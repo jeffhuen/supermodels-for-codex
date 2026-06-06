@@ -19,6 +19,7 @@ Initial public release.
 - Foreground/live cancellation now uses a single run controller; provider runners no longer own process-level exit timers and interrupted provider runs preserve signal metadata.
 - Provider runs killed by an external signal now report failed unless the Supermodels run controller initiated cancellation.
 - Already-terminal jobs, including already-cancelled jobs, are treated as no-ops and are not signaled again.
+- Signal finalization preserves already-terminal jobs instead of rewriting them to cancelled.
 - Centralized worker cancellation lifecycle handling, with contract tests plus process-level signal regression coverage.
 
 ### Scope

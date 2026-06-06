@@ -23,6 +23,7 @@ import {
 
 const SUMMARY_LIMIT = 4000;
 const NO_PID_STALE_MS = 5 * 60 * 1000;
+const TERMINAL_JOB_STATUSES = new Set(["cancelled", "completed", "failed", "partial"]);
 
 export { markCancelled } from "./cancellation.mjs";
 
@@ -569,7 +570,7 @@ export function createSerializedWriteQueue() {
 async function markJobRunning(state, jobId, requestPatch) {
   const pidStartedAt = await processStartedAt(process.pid);
   return await updateJob(state, jobId, (current) => {
-    if (["cancelled", "completed", "partial", "failed"].includes(current.status)) {
+    if (TERMINAL_JOB_STATUSES.has(current.status)) {
       return current;
     }
     return {
@@ -802,7 +803,7 @@ function finalizeJob(current, providerRuns, synthesis, options = {}) {
 }
 
 function markJobCancelledForSignal(job, signal, controller) {
-  if (job.status === "cancelled") {
+  if (TERMINAL_JOB_STATUSES.has(job.status)) {
     return job;
   }
   const now = controller?.cancelledAt ?? new Date().toISOString();
@@ -909,7 +910,7 @@ function isRunningJobStaleWithoutPid(job) {
 }
 
 function markJobFailed(current, message, writeError) {
-  if (["cancelled", "completed", "failed", "partial"].includes(current.status)) {
+  if (TERMINAL_JOB_STATUSES.has(current.status)) {
     return current;
   }
   const now = new Date().toISOString();

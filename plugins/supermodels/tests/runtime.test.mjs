@@ -962,6 +962,72 @@ test("runReview does not overwrite a cancelled job when providers finish", async
   }
 });
 
+test("runReview does not let signal cancellation overwrite terminal completed jobs", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-terminal-signal-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-terminal-signal-workspace-"));
+  try {
+    const adapters = {
+      claude: {
+        check: async () => ({
+          provider: "claude",
+          ready: true,
+          installed: true,
+          auth: "ok",
+          path: "/tmp/claude",
+        }),
+        review: async (input, options) => {
+          const state = createState({ workspaceRoot, dataRoot });
+          const jobId = path.basename(options.promptDir);
+          await updateJob(state, jobId, (current) => ({
+            ...current,
+            status: "completed",
+            stage: "synthesis-ready",
+            completedAt: "2026-06-06T00:00:00.000Z",
+            synthesis: "existing synthesis",
+          }));
+          options.controller.cancel("SIGINT");
+          return {
+            exitCode: 0,
+            rawText: JSON.stringify({
+              verdict: "clean",
+              summary: "Provider finished cleanly.",
+              findings: [],
+              assumptions: [],
+              verification_gaps: [],
+            }),
+            stderr: "",
+            sessionId: "claude-session",
+            commandLine: "claude -p",
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+          };
+        },
+      },
+    };
+
+    const output = await runReview({
+      adapters,
+      providerSelection: {
+        requested: ["claude"],
+        explicit: true,
+      },
+      mode: "review",
+      options: {
+        "data-root": dataRoot,
+      },
+      focus: "",
+      workspaceRoot,
+    });
+
+    assert.equal(output.job.status, "completed");
+    assert.equal(output.job.stage, "synthesis-ready");
+    assert.equal(output.job.synthesis, "existing synthesis");
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("runTask passes task mode into provider adapters", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-task-"));
   try {
