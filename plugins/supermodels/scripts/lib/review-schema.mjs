@@ -138,9 +138,6 @@ function normalizeStructuredFinding(value) {
     return null;
   }
   const severity = normalizeSeverity(value.severity);
-  if (!VALID_SEVERITIES.has(severity)) {
-    return null;
-  }
   const confidence = normalizeConfidence(value.confidence);
   if (!VALID_CONFIDENCE.has(confidence)) {
     return null;
@@ -170,7 +167,10 @@ function normalizeSeverity(value) {
   if (severity === "medium-high") {
     return "high";
   }
-  return severity;
+  if (["blocker", "blocking", "showstopper", "severe"].includes(severity)) {
+    return "high";
+  }
+  return VALID_SEVERITIES.has(severity) ? severity : "medium";
 }
 
 function normalizeConfidence(value) {

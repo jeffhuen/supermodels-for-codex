@@ -43,11 +43,13 @@ export async function runCommand(command, options = {}) {
     let stderr = "";
     let stdinError = "";
     let timedOut = false;
+    let killTimer;
 
     const timer = setTimeout(() => {
       timedOut = true;
       signalProcessTree(child.pid, "SIGTERM");
-      setTimeout(() => signalProcessTree(child.pid, "SIGKILL"), 1500).unref();
+      killTimer = setTimeout(() => signalProcessTree(child.pid, "SIGKILL"), 1500);
+      killTimer.unref();
     }, timeoutMs);
 
     child.stdout.setEncoding("utf8");
@@ -66,6 +68,7 @@ export async function runCommand(command, options = {}) {
 
     child.on("error", (error) => {
       clearTimeout(timer);
+      clearTimeout(killTimer);
       resolve({
         exitCode: 127,
         stdout,
@@ -77,6 +80,7 @@ export async function runCommand(command, options = {}) {
 
     child.on("close", (exitCode, signal) => {
       clearTimeout(timer);
+      clearTimeout(killTimer);
       resolve({
         exitCode,
         signal,

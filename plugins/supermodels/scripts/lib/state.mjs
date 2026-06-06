@@ -79,9 +79,10 @@ export async function writeJob(state, job) {
 }
 
 export async function updateJob(state, jobId, updater) {
-  return await withJobLock(state, jobId, async () => {
+  return await withJobLock(state, jobId, async (lock) => {
     const current = await readJob(state, jobId);
     const next = await updater(current);
+    await lock.assertOwned();
     return await writeJob(state, next);
   });
 }
@@ -241,11 +242,18 @@ async function withJobLock(state, jobId, operation) {
   const staleLockMs = Number(state.staleLockMs ?? 5_000);
   const lockWaitMs = Number(state.lockWaitMs ?? 10_000);
   const lockHeartbeatMs = Number(state.lockHeartbeatMs ?? Math.min(1_000, Math.max(100, Math.floor(staleLockMs / 2))));
+  const ownerToken = `${process.pid}:${Date.now().toString(36)}:${crypto.randomBytes(8).toString("hex")}`;
   let handle;
   while (!handle) {
     try {
       handle = await open(lockPath, "wx");
+      await handle.writeFile(`${ownerToken}\n`);
     } catch (error) {
+      if (handle) {
+        await handle.close().catch(() => {});
+        handle = null;
+        await unlinkOwnedLock(lockPath, ownerToken).catch(() => {});
+      }
       if (error?.code !== "EEXIST") {
         throw error;
       }
@@ -263,19 +271,26 @@ async function withJobLock(state, jobId, operation) {
   }
 
   let heartbeat;
+  const lock = {
+    async assertOwned() {
+      if (!await lockOwnedBy(lockPath, ownerToken)) {
+        throw new Error(`Lost job state lock ownership: ${jobId}`);
+      }
+    },
+  };
   try {
     heartbeat = setInterval(() => {
       const now = new Date();
-      utimes(lockPath, now, now).catch(() => {});
+      touchOwnedLock(lockPath, ownerToken, now).catch(() => {});
     }, lockHeartbeatMs);
     heartbeat.unref?.();
-    return await operation();
+    return await operation(lock);
   } finally {
     if (heartbeat) {
       clearInterval(heartbeat);
     }
     await handle.close().catch(() => {});
-    await unlink(lockPath).catch(() => {});
+    await unlinkOwnedLock(lockPath, ownerToken).catch(() => {});
   }
 }
 
@@ -296,15 +311,49 @@ async function removeStaleLock(lockPath, staleLockMs) {
   }
 
   try {
-    const lockInfo = await stat(lockPath).catch(() => null);
-    if (!lockInfo || Date.now() - lockInfo.mtimeMs <= staleLockMs) {
+    const before = await stat(lockPath).catch(() => null);
+    const lockToken = await readLockToken(lockPath);
+    const after = await stat(lockPath).catch(() => null);
+    if (
+      !before
+      || !after
+      || before.dev !== after.dev
+      || before.ino !== after.ino
+      || Date.now() - after.mtimeMs <= staleLockMs
+      || !lockToken
+    ) {
       return false;
     }
-    await unlink(lockPath).catch(() => {});
+    await unlinkLockIfToken(lockPath, lockToken);
     return true;
   } finally {
     await reaper.close().catch(() => {});
     await unlink(reaperPath).catch(() => {});
+  }
+}
+
+async function readLockToken(lockPath) {
+  const text = await readFile(lockPath, "utf8").catch(() => "");
+  return text.trim();
+}
+
+async function lockOwnedBy(lockPath, ownerToken) {
+  return await readLockToken(lockPath) === ownerToken;
+}
+
+async function touchOwnedLock(lockPath, ownerToken, when) {
+  if (await lockOwnedBy(lockPath, ownerToken)) {
+    await utimes(lockPath, when, when);
+  }
+}
+
+async function unlinkOwnedLock(lockPath, ownerToken) {
+  await unlinkLockIfToken(lockPath, ownerToken);
+}
+
+async function unlinkLockIfToken(lockPath, token) {
+  if (await readLockToken(lockPath) === token) {
+    await unlink(lockPath);
   }
 }
 

@@ -324,6 +324,47 @@ test("state heartbeats active locks so slow updates are not reaped", async () =>
   }
 });
 
+test("state lock owner tokens prevent stale holders from deleting fresh locks", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-state-lock-owner-"));
+  try {
+    const state = createState({
+      workspaceRoot: "/tmp/workspace",
+      dataRoot,
+      staleLockMs: 50,
+      lockHeartbeatMs: 10_000,
+      lockWaitMs: 2_000,
+    });
+    const job = await createJob(state, {
+      command: "review",
+      mode: "review",
+      requestedProviders: ["claude"],
+      background: false,
+    });
+
+    const staleHolder = updateJob(state, job.id, async (current) => {
+      await sleep(140);
+      return {
+        ...current,
+        markers: [...(current.markers ?? []), "stale-holder"],
+      };
+    });
+    staleHolder.catch(() => {});
+    await sleep(80);
+
+    const freshHolder = await updateJob(state, job.id, (current) => ({
+      ...current,
+      markers: [...(current.markers ?? []), "fresh-holder"],
+    }));
+
+    await assert.rejects(staleHolder, /Lost job state lock ownership/);
+    const reloaded = await readJob(state, job.id);
+    assert.deepEqual(reloaded.markers, ["fresh-holder"]);
+    assert.deepEqual(freshHolder.markers, ["fresh-holder"]);
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
 test("state recovers stale reaper locks", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-state-stale-reaper-"));
   try {

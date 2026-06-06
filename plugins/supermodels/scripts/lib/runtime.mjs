@@ -1,4 +1,6 @@
+import { execFile } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
+import { promisify } from "node:util";
 
 import { collectGitContext } from "./git.mjs";
 import { commandLine } from "./process.mjs";
@@ -23,6 +25,7 @@ import {
 
 const SUMMARY_LIMIT = 4000;
 const NO_PID_STALE_MS = 5 * 60 * 1000;
+const execFileAsync = promisify(execFile);
 
 export function selectProviders(input) {
   const requested = input.requested ?? [];
@@ -213,17 +216,18 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
       focus,
     });
   try {
-    await updateJob(state, job.id, (current) => ({
-      ...current,
-      status: "running",
-      stage: "calling-providers",
-      pid: process.pid,
-      request: {
-        ...current.request,
-        selectedProviders: providerPlan.selected,
-        skippedProviders: providerPlan.skipped,
-      },
-    }));
+    const started = await markJobRunning(state, job.id, {
+      selectedProviders: providerPlan.selected,
+      skippedProviders: providerPlan.skipped,
+    });
+    if (started.status !== "running") {
+      return terminalOutput({
+        job: started,
+        checks,
+        selected: providerPlan.selected,
+        skipped: providerPlan.skipped,
+      });
+    }
     await initializeProviderRuns(state, job.id, providerPlan.selected);
 
     const writeQueue = createSerializedWriteQueue();
@@ -350,17 +354,18 @@ export async function runTask({ adapters, providerSelection, options, task, work
       write: Boolean(options.write),
     });
   try {
-    await updateJob(state, job.id, (current) => ({
-      ...current,
-      status: "running",
-      stage: "calling-providers",
-      pid: process.pid,
-      request: {
-        ...current.request,
-        selectedProviders: providerPlan.selected,
-        skippedProviders: providerPlan.skipped,
-      },
-    }));
+    const started = await markJobRunning(state, job.id, {
+      selectedProviders: providerPlan.selected,
+      skippedProviders: providerPlan.skipped,
+    });
+    if (started.status !== "running") {
+      return terminalOutput({
+        job: started,
+        checks,
+        selected: providerPlan.selected,
+        skipped: providerPlan.skipped,
+      });
+    }
     await initializeProviderRuns(state, job.id, providerPlan.selected);
 
     const writeQueue = createSerializedWriteQueue();
@@ -466,11 +471,16 @@ export async function getStatus({ workspaceRoot, dataRoot, jobId }) {
 
 export async function markCancelled({ workspaceRoot, dataRoot, jobId }) {
   const state = createState({ workspaceRoot, dataRoot });
-  return await updateJob(state, jobId, (job) => ({
-    ...job,
-    status: "cancelled",
-    completedAt: new Date().toISOString(),
-  }));
+  return await updateJob(state, jobId, (job) => {
+    if (!["queued", "running"].includes(job.status)) {
+      return job;
+    }
+    return {
+      ...job,
+      status: "cancelled",
+      completedAt: new Date().toISOString(),
+    };
+  });
 }
 
 export function renderHumanResult(output) {
@@ -516,9 +526,14 @@ export function createSerializedWriteQueue() {
   };
 
   return {
-    enqueue(operation) {
+    enqueue(operation, options = {}) {
+      const critical = options.critical ?? true;
       const run = tail.then(operation, operation);
-      run.catch(rememberError);
+      if (critical) {
+        run.catch(rememberError);
+      } else {
+        run.catch(() => {});
+      }
       tail = run.catch(() => undefined);
       return run;
     },
@@ -528,6 +543,41 @@ export function createSerializedWriteQueue() {
         throw firstError;
       }
     },
+  };
+}
+
+async function markJobRunning(state, jobId, requestPatch) {
+  const pidStartedAt = await processStartedAt(process.pid);
+  return await updateJob(state, jobId, (current) => {
+    if (["cancelled", "completed", "partial", "failed"].includes(current.status)) {
+      return current;
+    }
+    return {
+      ...current,
+      status: "running",
+      stage: "calling-providers",
+      pid: process.pid,
+      pidStartedAt,
+      request: {
+        ...current.request,
+        ...requestPatch,
+      },
+    };
+  });
+}
+
+function terminalOutput({ job, checks, selected, skipped }) {
+  const results = Object.values(job.providerRuns ?? {})
+    .map((run) => run.normalized)
+    .filter(Boolean);
+  const synthesis = job.synthesis ?? synthesizeProviderResults(results);
+  return {
+    job,
+    checks,
+    selected,
+    skipped,
+    results,
+    synthesis,
   };
 }
 
@@ -563,7 +613,7 @@ function createProviderEventRecorder({ state, jobId, provider, events, enqueueWr
       events: recent,
       lastEvent: normalized.message,
       usage: normalized.usage ?? undefined,
-    }));
+    }), { critical: false });
   };
 }
 
@@ -574,7 +624,7 @@ function createProviderStartRecorder({ state, jobId, job, provider, enqueueWrite
       return;
     }
     writeProviderPid(job, provider, pid);
-    enqueueWrite(() => updateProviderRun(state, jobId, provider, { pid }));
+    enqueueWrite(() => updateProviderRun(state, jobId, provider, { pid }), { critical: false });
   };
 }
 
@@ -722,19 +772,19 @@ async function reconcileJobStatus(state, job) {
     return job;
   }
   const pids = jobProcessPids(job);
-  if (pids.some(isProcessAlive)) {
+  if (await jobHasLiveProcess(job, pids)) {
     return job;
   }
   if (!pids.length && !isRunningJobStaleWithoutPid(job)) {
     return job;
   }
   try {
-    return await updateJob(state, job.id, (current) => {
+    return await updateJob(state, job.id, async (current) => {
       if (current.status !== "running") {
         return current;
       }
       const currentPids = jobProcessPids(current);
-      if (currentPids.some(isProcessAlive)) {
+      if (await jobHasLiveProcess(current, currentPids)) {
         return current;
       }
       if (!currentPids.length && !isRunningJobStaleWithoutPid(current)) {
@@ -747,6 +797,33 @@ async function reconcileJobStatus(state, job) {
     });
   } catch {
     return job;
+  }
+}
+
+async function jobHasLiveProcess(job, pids) {
+  for (const pid of pids) {
+    if (pid === Number(job.pid) && job.pidStartedAt) {
+      if (await processStartedAt(pid) === job.pidStartedAt) {
+        return true;
+      }
+      continue;
+    }
+    if (isProcessAlive(pid)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function processStartedAt(pid) {
+  if (!Number.isFinite(Number(pid)) || Number(pid) <= 0 || process.platform === "win32") {
+    return "";
+  }
+  try {
+    const { stdout } = await execFileAsync("ps", ["-o", "lstart=", "-p", String(pid)], { timeout: 1000 });
+    return stdout.trim().replace(/\s+/g, " ");
+  } catch {
+    return "";
   }
 }
 

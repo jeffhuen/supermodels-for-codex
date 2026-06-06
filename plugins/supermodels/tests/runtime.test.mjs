@@ -138,6 +138,46 @@ test("normalizeProviderResult prefers schema-validated structured review output"
   assert.equal(normalized.findings[0].file, "state.mjs");
 });
 
+test("normalizeProviderResult preserves structured findings with unknown severities", () => {
+  const normalized = normalizeProviderResult({
+    provider: "antigravity",
+    structured: {
+      verdict: "needs-attention",
+      summary: "Provider used non-schema severity.",
+      findings: [
+        {
+          severity: "blocker",
+          title: "Dropped finding",
+          evidence: "review-schema.mjs discarded this finding.",
+          impact: "Important provider findings can disappear.",
+          recommendation: "Map the severity instead of dropping the finding.",
+          file: "plugins/supermodels/scripts/lib/review-schema.mjs",
+          line_start: 136,
+          line_end: 136,
+          confidence: "high",
+        },
+        {
+          severity: "surprising",
+          title: "Unknown severity",
+          evidence: "Provider invented a severity.",
+          impact: "The finding should still be visible.",
+          recommendation: "Map unknown severities to medium.",
+          file: "runtime.mjs",
+          line_start: 1,
+          line_end: 1,
+          confidence: "high",
+        },
+      ],
+      assumptions: [],
+      verification_gaps: [],
+    },
+  });
+
+  assert.equal(normalized.findings.length, 2);
+  assert.equal(normalized.findings[0].severity, "high");
+  assert.equal(normalized.findings[1].severity, "medium");
+});
+
 test("normalizeProviderResult marks required structured reviews invalid when output is irrelevant", () => {
   const normalized = normalizeProviderResult({
     provider: "antigravity",
@@ -294,6 +334,22 @@ test("serialized write queue attaches rejection handlers immediately while propa
   }
 });
 
+test("serialized write queue ignores non-critical progress write failures", async () => {
+  const queue = createSerializedWriteQueue();
+  queue.enqueue(async () => {
+    throw new Error("progress lock timeout");
+  }, { critical: false });
+  queue.enqueue(async () => "artifact persisted");
+
+  await queue.drain();
+
+  const failingQueue = createSerializedWriteQueue();
+  failingQueue.enqueue(async () => {
+    throw new Error("artifact write failed");
+  });
+  await assert.rejects(() => failingQueue.drain(), /artifact write failed/);
+});
+
 test("providerTimeoutMs treats timeout option as seconds", () => {
   assert.equal(providerTimeoutMs("60"), 60_000);
   assert.equal(providerTimeoutMs(1.5), 1_500);
@@ -422,6 +478,58 @@ test("runReview records orchestrator pid so concurrent status does not fail live
 
     assert.equal(observedStatus, "running");
     assert.equal(observedPid, process.pid);
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("runReview does not start providers for jobs already cancelled", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-cancelled-before-start-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-cancelled-before-start-workspace-"));
+  try {
+    const state = createState({ workspaceRoot, dataRoot });
+    const job = await createJob(state, {
+      command: "review",
+      mode: "review",
+      requestedProviders: ["claude"],
+      background: false,
+    });
+    await markCancelled({ workspaceRoot, dataRoot, jobId: job.id });
+    let providerCalled = false;
+    const adapters = {
+      claude: {
+        check: async () => ({
+          provider: "claude",
+          ready: true,
+          installed: true,
+          auth: "ok",
+          path: "/tmp/claude",
+        }),
+        review: async () => {
+          providerCalled = true;
+          throw new Error("provider should not run");
+        },
+      },
+    };
+
+    const output = await runReview({
+      adapters,
+      providerSelection: {
+        requested: ["claude"],
+        explicit: true,
+      },
+      mode: "review",
+      options: {
+        "data-root": dataRoot,
+        "job-id": job.id,
+      },
+      focus: "",
+      workspaceRoot,
+    });
+
+    assert.equal(output.job.status, "cancelled");
+    assert.equal(providerCalled, false);
   } finally {
     await rm(dataRoot, { recursive: true, force: true });
     await rm(workspaceRoot, { recursive: true, force: true });
@@ -690,6 +798,36 @@ test("runTask passes task mode into provider adapters", async () => {
   }
 });
 
+test("markCancelled does not overwrite terminal jobs", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-cancel-terminal-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-cancel-terminal-workspace-"));
+  try {
+    const state = createState({ workspaceRoot, dataRoot });
+    const job = await createJob(state, {
+      command: "review",
+      mode: "review",
+      requestedProviders: ["claude"],
+      background: false,
+    });
+    await updateJob(state, job.id, (current) => ({
+      ...current,
+      status: "completed",
+      stage: "synthesis-ready",
+      completedAt: "2026-06-06T00:00:00.000Z",
+      synthesis: "existing synthesis",
+    }));
+
+    const cancelled = await markCancelled({ workspaceRoot, dataRoot, jobId: job.id });
+
+    assert.equal(cancelled.status, "completed");
+    assert.equal(cancelled.stage, "synthesis-ready");
+    assert.equal(cancelled.synthesis, "existing synthesis");
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("getStatus marks running jobs failed when stored process pids are dead", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-dead-pid-"));
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-dead-pid-workspace-"));
@@ -712,6 +850,35 @@ test("getStatus marks running jobs failed when stored process pids are dead", as
 
     assert.equal(status.status, "failed");
     assert.equal(status.stage, "failed");
+    assert.match(status.error, /no longer running/i);
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("getStatus does not trust a live reused pid with a mismatched start signature", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-reused-pid-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-reused-pid-workspace-"));
+  try {
+    const state = createState({ workspaceRoot, dataRoot });
+    const job = await createJob(state, {
+      command: "review",
+      mode: "review",
+      requestedProviders: ["claude"],
+      background: true,
+    });
+    await updateJob(state, job.id, (current) => ({
+      ...current,
+      status: "running",
+      stage: "calling-providers",
+      pid: process.pid,
+      pidStartedAt: "Mon Jan 1 00:00:00 1970",
+    }));
+
+    const status = await getStatus({ workspaceRoot, dataRoot, jobId: job.id });
+
+    assert.equal(status.status, "failed");
     assert.match(status.error, /no longer running/i);
   } finally {
     await rm(dataRoot, { recursive: true, force: true });
