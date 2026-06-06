@@ -352,18 +352,23 @@ async function handleCancel(parsed) {
     jobId,
   });
   if (output.status !== "cancelled") {
-    writeOutput(parsed, output, `Cancelled Supermodels job ${jobId}`);
+    writeOutput(parsed, addCancellationSignals(output, []), `Supermodels job ${jobId} is ${output.status}; no processes signaled.`);
     return;
   }
 
   const job = await readJob(state, jobId).catch(() => output);
-  signalJobProcesses(job, { signal: "SIGTERM", signaler: signalProcessTree, verifyIdentity: true });
+  const graceful = signalJobProcesses(job, { signal: "SIGTERM", signaler: signalProcessTree, verifyIdentity: true });
   await sleep(1500);
   const latestJob = await readJob(state, jobId).catch(() => job);
-  signalJobProcesses(latestJob, { signal: "SIGTERM", signaler: signalProcessTree, verifyIdentity: true });
+  const lateGraceful = signalJobProcesses(latestJob, { signal: "SIGTERM", signaler: signalProcessTree, verifyIdentity: true });
   await sleep(250);
-  signalJobProcesses(latestJob, { signal: "SIGKILL", signaler: signalProcessTree, verifyIdentity: true });
-  writeOutput(parsed, output, `Cancelled Supermodels job ${jobId}`);
+  const forced = signalJobProcesses(latestJob, { signal: "SIGKILL", signaler: signalProcessTree, verifyIdentity: true });
+  const signals = [
+    ...graceful.map((pid) => ({ signal: "SIGTERM", pid, phase: "initial" })),
+    ...lateGraceful.map((pid) => ({ signal: "SIGTERM", pid, phase: "late" })),
+    ...forced.map((pid) => ({ signal: "SIGKILL", pid, phase: "force" })),
+  ];
+  writeOutput(parsed, addCancellationSignals(output, signals), renderCancelResult(output, signals));
 }
 
 async function startBackgroundJob(input) {
@@ -429,7 +434,7 @@ function installLiveAbortHandlers({ state, jobId }) {
 async function handleLiveAbort({ state, jobId, signal }) {
   const job = await readJob(state, jobId).catch(() => null);
   if (job) {
-    signalJobProcesses(job, { signal: "SIGTERM", signaler: signalProcessTree, excludePids: [process.pid] });
+    signalJobProcesses(job, { signal: "SIGTERM", signaler: signalProcessTree, excludePids: [process.pid], verifyIdentity: true });
   }
   await updateJob(state, jobId, (current) => ({
     ...current,
@@ -450,6 +455,23 @@ async function handleLiveAbort({ state, jobId, signal }) {
       verifyIdentity: true,
     });
   }
+}
+
+function addCancellationSignals(job, signals) {
+  return {
+    ...job,
+    cancellationSignals: signals,
+  };
+}
+
+function renderCancelResult(job, signals) {
+  const signalled = signals.length
+    ? signals.map((entry) => `${entry.signal} ${entry.pid}`).join(", ")
+    : "none";
+  return [
+    `Cancelled Supermodels job ${job.id}`,
+    `Processes signaled: ${signalled}`,
+  ].join("\n");
 }
 
 function renderSetup(output) {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { access, mkdtemp, realpath, rm } from "node:fs/promises";
+import { access, chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -136,6 +136,9 @@ test("cancel escalates to SIGKILL when a job process ignores SIGTERM", { skip: p
     });
 
     assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(result.stdout);
+    assert(output.cancellationSignals.some((entry) => entry.signal === "SIGTERM" && entry.pid === child.pid));
+    assert(output.cancellationSignals.some((entry) => entry.signal === "SIGKILL" && entry.pid === child.pid));
     const close = await closed;
     assert.equal(close.signal, "SIGKILL");
     const reloaded = await readJob(state, job.id);
@@ -197,6 +200,8 @@ test("cancel does not signal already terminal jobs", { skip: process.platform ==
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(result.stdout);
+    assert.deepEqual(output.cancellationSignals, []);
     await assert.rejects(() => access(signalPath), /ENOENT/);
     const reloaded = await readJob(state, job.id);
     assert.equal(reloaded.status, "completed");
@@ -206,6 +211,77 @@ test("cancel does not signal already terminal jobs", { skip: process.platform ==
     }
     await rm(dataRoot, { recursive: true, force: true });
     await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("cancel still signals signed live pids when ps is unavailable", { skip: process.platform === "win32" }, async () => {
+  const tempRoot = await realpath(tmpdir());
+  const dataRoot = await mkdtemp(path.join(tempRoot, "supermodels-cancel-fake-ps-data-"));
+  const workspaceRoot = await mkdtemp(path.join(tempRoot, "supermodels-cancel-fake-ps-workspace-"));
+  const fakeBinDir = await mkdtemp(path.join(tempRoot, "supermodels-cancel-fake-ps-bin-"));
+  const signalPath = path.join(workspaceRoot, "signalled.txt");
+  const fakePs = path.join(fakeBinDir, "ps");
+  const child = spawn(process.execPath, [
+    "-e",
+    [
+      "const fs = require('node:fs');",
+      `process.on('SIGTERM', () => { fs.writeFileSync(${JSON.stringify(signalPath)}, 'signalled'); process.exit(0); });`,
+      "setInterval(() => {}, 1000);",
+    ].join(" "),
+  ], {
+    cwd: workspaceRoot,
+    stdio: "ignore",
+  });
+  try {
+    await writeFile(fakePs, "#!/bin/sh\nexit 127\n");
+    await chmod(fakePs, 0o755);
+
+    const state = createState({ workspaceRoot, dataRoot });
+    const job = await createJob(state, {
+      command: "review",
+      mode: "review",
+      requestedProviders: ["claude"],
+      background: true,
+    });
+    await updateJob(state, job.id, (current) => ({
+      ...current,
+      status: "running",
+      stage: "calling-providers",
+      pid: child.pid,
+      pidStartedAt: processStartedAt(child.pid),
+    }));
+
+    const closed = onceClosed(child);
+    const scriptPath = path.resolve(import.meta.dirname, "../scripts/supermodels.mjs");
+    const result = spawnSync(process.execPath, [
+      scriptPath,
+      "cancel",
+      job.id,
+      "--data-root",
+      dataRoot,
+      "--json",
+    ], {
+      cwd: workspaceRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH}`,
+      },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(result.stdout);
+    assert(output.cancellationSignals.some((entry) => entry.signal === "SIGTERM" && entry.pid === child.pid));
+    const close = await closed;
+    assert.equal(close.signal, null);
+    assert.equal(await fileExists(signalPath), true);
+  } finally {
+    if (!child.killed) {
+      child.kill("SIGKILL");
+    }
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(fakeBinDir, { recursive: true, force: true });
   }
 });
 
@@ -339,6 +415,15 @@ async function waitFor(predicate, timeoutMs) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error("Timed out waiting for condition.");
+}
+
+async function fileExists(filePath) {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function processStartedAt(pid) {

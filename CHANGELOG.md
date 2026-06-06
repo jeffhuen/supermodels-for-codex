@@ -19,6 +19,7 @@ Initial public release.
 - Cancel escalation from `SIGTERM` to `SIGKILL` for provider processes that ignore graceful termination.
 - Foreground/live aborts exclude the current orchestrator process, re-read job state before escalation, and verify recorded PID start signatures before `SIGKILL`.
 - Explicit cancel gates signaling on a successful queued/running-to-cancelled transition and verifies recorded PID start signatures before `SIGTERM`.
+- PID identity checks fall back to live-process checks when `ps` is unavailable, and cancel output reports the actual process signals sent.
 
 ### Scope
 

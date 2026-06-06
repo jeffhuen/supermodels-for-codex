@@ -140,7 +140,10 @@ function descriptorIdentityMatches(descriptor) {
     return true;
   }
   const observedStartedAt = processStartedAtSync(descriptor.pid);
-  return observedStartedAt === descriptor.pidStartedAt;
+  if (observedStartedAt) {
+    return observedStartedAt === descriptor.pidStartedAt;
+  }
+  return isProcessAlive(descriptor.pid);
 }
 
 function processStartedAtSync(pid) {
@@ -155,5 +158,17 @@ function processStartedAtSync(pid) {
     }).trim().replace(/\s+/g, " ");
   } catch {
     return "";
+  }
+}
+
+function isProcessAlive(pid) {
+  if (!Number.isFinite(Number(pid)) || Number(pid) <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
   }
 }
