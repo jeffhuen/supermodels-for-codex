@@ -5,14 +5,17 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  createSerializedWriteQueue,
+  getStatus,
   markCancelled,
   normalizeProviderResult,
+  providerTimeoutMs,
   runReview,
   runTask,
   selectProviders,
   synthesizeProviderResults,
 } from "../scripts/lib/runtime.mjs";
-import { createState, listJobs } from "../scripts/lib/state.mjs";
+import { createJob, createState, listJobs, updateJob } from "../scripts/lib/state.mjs";
 
 const checks = {
   claude: {
@@ -269,6 +272,34 @@ test("synthesizeProviderResults preserves provider attribution and full finding 
   assert.match(text, /## Antigravity/);
   assert.match(text, /No material findings reported by Antigravity\./);
   assert.doesNotMatch(text, /Codex should synthesize/i);
+});
+
+test("serialized write queue attaches rejection handlers immediately while propagating errors", async () => {
+  const unhandled = [];
+  const handler = (reason) => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", handler);
+  try {
+    const queue = createSerializedWriteQueue();
+    queue.enqueue(async () => {
+      throw new Error("state write failed");
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(unhandled, []);
+    await assert.rejects(() => queue.drain(), /state write failed/);
+  } finally {
+    process.off("unhandledRejection", handler);
+  }
+});
+
+test("providerTimeoutMs treats timeout option as seconds", () => {
+  assert.equal(providerTimeoutMs("60"), 60_000);
+  assert.equal(providerTimeoutMs(1.5), 1_500);
+  assert.equal(providerTimeoutMs(undefined), undefined);
+  assert.throws(() => providerTimeoutMs("abc"), /positive number of seconds/i);
+  assert.throws(() => providerTimeoutMs("0"), /positive number of seconds/i);
 });
 
 test("runTask stores provider progress events from adapters", async () => {
@@ -580,7 +611,8 @@ test("runTask passes task mode into provider adapters", async () => {
         explicit: true,
       },
       options: {
-        dataRoot,
+        "data-root": dataRoot,
+        timeout: "60",
       },
       task: "inspect only",
       workspaceRoot: "/tmp/workspace",
@@ -588,8 +620,38 @@ test("runTask passes task mode into provider adapters", async () => {
 
     assert.equal(receivedInput.mode, "task");
     assert.equal(receivedOptions.write, false);
+    assert.equal(receivedOptions.timeoutMs, 60_000);
   } finally {
     await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("getStatus marks running jobs failed when stored process pids are dead", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-dead-pid-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-dead-pid-workspace-"));
+  try {
+    const state = createState({ workspaceRoot, dataRoot });
+    const job = await createJob(state, {
+      command: "review",
+      mode: "review",
+      requestedProviders: ["claude"],
+      background: true,
+    });
+    await updateJob(state, job.id, (current) => ({
+      ...current,
+      status: "running",
+      stage: "calling-providers",
+      pid: 99_999_999,
+    }));
+
+    const status = await getStatus({ workspaceRoot, dataRoot, jobId: job.id });
+
+    assert.equal(status.status, "failed");
+    assert.equal(status.stage, "failed");
+    assert.match(status.error, /no longer running/i);
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
   }
 });
 

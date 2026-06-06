@@ -91,8 +91,13 @@ export async function listJobs(state) {
   const entries = await readdir(state.jobsDir).catch(() => []);
   const jobs = [];
   for (const entry of entries.filter((name) => name.endsWith(".json"))) {
-    const payload = await readFile(path.join(state.jobsDir, entry), "utf8");
-    jobs.push(JSON.parse(payload));
+    try {
+      const payload = await readFile(path.join(state.jobsDir, entry), "utf8");
+      jobs.push(JSON.parse(payload));
+    } catch {
+      // Ignore malformed or partially-written job files so one bad record does not
+      // break status listing for the rest of the workspace.
+    }
   }
   jobs.sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)));
   return jobs;
@@ -202,7 +207,7 @@ function timestampId() {
   return new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
 }
 
-async function writeFileAtomic(finalPath, payload) {
+export async function writeFileAtomic(finalPath, payload) {
   const tempPath = `${finalPath}.${process.pid}.${Date.now().toString(36)}.${crypto.randomBytes(3).toString("hex")}.tmp`;
   await writeFile(tempPath, payload);
   await rename(tempPath, finalPath);

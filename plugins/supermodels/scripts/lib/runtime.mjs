@@ -2,7 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 
 import { collectGitContext } from "./git.mjs";
 import { commandLine } from "./process.mjs";
-import { writeProviderPid } from "./provider-pids.mjs";
+import { jobProcessPids, writeProviderPid } from "./provider-pids.mjs";
 import { renderReviewPrompt, renderTaskPrompt } from "./prompts.mjs";
 import {
   normalizeStructuredReview,
@@ -17,6 +17,7 @@ import {
   readJob,
   updateJob,
   updateProviderRun,
+  writeFileAtomic,
   writeProviderResult,
 } from "./state.mjs";
 
@@ -222,11 +223,9 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
     }));
     await initializeProviderRuns(state, job.id, providerPlan.selected);
 
-    let writeQueue = Promise.resolve();
-    const enqueueWrite = (operation) => {
-      writeQueue = writeQueue.then(operation, operation);
-      return writeQueue;
-    };
+    const writeQueue = createSerializedWriteQueue();
+    const enqueueWrite = writeQueue.enqueue;
+    const timeoutMs = providerTimeoutMs(options.timeout);
     const providerRuns = await Promise.all(providerPlan.selected.map(async (provider) => {
       const adapter = adapters[provider];
       const check = checks[provider] ?? {};
@@ -268,7 +267,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
         cwd: workspaceRoot,
         promptDir: job.dir,
         dataRoot: state.dataRoot,
-        timeoutMs: Number(options.timeout || 0) || undefined,
+        timeoutMs,
         onStart: recordStart,
         onEvent: recordEvent,
       }));
@@ -301,7 +300,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
       await enqueueWrite(() => writeProviderResult(state, job.id, providerRun));
       return providerRun;
     }));
-    await writeQueue;
+    await writeQueue.drain();
     const providerResults = [];
     for (const run of providerRuns) {
       providerResults.push(run.normalized);
@@ -360,11 +359,9 @@ export async function runTask({ adapters, providerSelection, options, task, work
     }));
     await initializeProviderRuns(state, job.id, providerPlan.selected);
 
-    let writeQueue = Promise.resolve();
-    const enqueueWrite = (operation) => {
-      writeQueue = writeQueue.then(operation, operation);
-      return writeQueue;
-    };
+    const writeQueue = createSerializedWriteQueue();
+    const enqueueWrite = writeQueue.enqueue;
+    const timeoutMs = providerTimeoutMs(options.timeout);
     const providerRuns = await Promise.all(providerPlan.selected.map(async (provider) => {
       const adapter = adapters[provider];
       const check = checks[provider] ?? {};
@@ -399,7 +396,7 @@ export async function runTask({ adapters, providerSelection, options, task, work
         cwd: workspaceRoot,
         promptDir: job.dir,
         dataRoot: state.dataRoot,
-        timeoutMs: Number(options.timeout || 0) || undefined,
+        timeoutMs,
         write: Boolean(options.write),
         onStart: recordStart,
         onEvent: recordEvent,
@@ -432,7 +429,7 @@ export async function runTask({ adapters, providerSelection, options, task, work
       await enqueueWrite(() => writeProviderResult(state, job.id, providerRun));
       return providerRun;
     }));
-    await writeQueue;
+    await writeQueue.drain();
     const providerResults = [];
     for (const run of providerRuns) {
       providerResults.push(run.normalized);
@@ -457,7 +454,11 @@ export async function runTask({ adapters, providerSelection, options, task, work
 
 export async function getStatus({ workspaceRoot, dataRoot, jobId }) {
   const state = createState({ workspaceRoot, dataRoot });
-  return jobId ? await readJob(state, jobId) : await listJobs(state);
+  if (jobId) {
+    return await reconcileJobStatus(state, await readJob(state, jobId));
+  }
+  const jobs = await listJobs(state);
+  return await Promise.all(jobs.map((job) => reconcileJobStatus(state, job)));
 }
 
 export async function markCancelled({ workspaceRoot, dataRoot, jobId }) {
@@ -488,6 +489,43 @@ export function renderHumanResult(output) {
 
 export function commandLineForRun(command) {
   return commandLine(command);
+}
+
+export function providerTimeoutMs(value) {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    throw new Error("--timeout must be a positive number of seconds.");
+  }
+  return Math.ceil(seconds * 1000);
+}
+
+export function createSerializedWriteQueue() {
+  let tail = Promise.resolve();
+  let firstError = null;
+
+  const rememberError = (error) => {
+    if (!firstError) {
+      firstError = error;
+    }
+  };
+
+  return {
+    enqueue(operation) {
+      const run = tail.then(operation, operation);
+      run.catch(rememberError);
+      tail = run.catch(() => undefined);
+      return run;
+    },
+    async drain() {
+      await tail;
+      if (firstError) {
+        throw firstError;
+      }
+    },
+  };
 }
 
 async function runProviderSafely(provider, operation) {
@@ -665,7 +703,47 @@ async function markJobFailedDirectly(state, jobId, message, writeError) {
   if (next === current) {
     return;
   }
-  await writeFile(filePath, `${JSON.stringify(next, null, 2)}\n`);
+  const payload = `${JSON.stringify(next, null, 2)}\n`;
+  try {
+    await writeFileAtomic(filePath, payload);
+  } catch {
+    // This is the last-ditch failure path. If the directory cannot create temp
+    // files but the existing job file is still writable, prefer recording the
+    // failure over leaving a running job behind.
+    await writeFile(filePath, payload);
+  }
+}
+
+async function reconcileJobStatus(state, job) {
+  if (job?.status !== "running") {
+    return job;
+  }
+  const pids = jobProcessPids(job);
+  if (!pids.length || pids.some(isProcessAlive)) {
+    return job;
+  }
+  try {
+    return await updateJob(state, job.id, (current) => {
+      if (current.status !== "running") {
+        return current;
+      }
+      return markJobFailed(current, "Job process is no longer running.");
+    });
+  } catch {
+    return job;
+  }
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "EPERM") {
+      return true;
+    }
+    return false;
+  }
 }
 
 function markJobFailed(current, message, writeError) {

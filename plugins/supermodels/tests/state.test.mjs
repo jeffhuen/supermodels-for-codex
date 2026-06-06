@@ -60,6 +60,30 @@ test("state stores jobs and provider artifacts outside the repo", async () => {
   }
 });
 
+test("listJobs skips malformed job files", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-state-malformed-list-"));
+  try {
+    const state = createState({
+      workspaceRoot: "/tmp/workspace",
+      dataRoot,
+    });
+    const job = await createJob(state, {
+      command: "review",
+      mode: "review",
+      requestedProviders: ["claude"],
+      background: false,
+    });
+    await writeFile(path.join(state.jobsDir, "job-20260606000000-deadbe.json"), "{");
+
+    const jobs = await listJobs(state);
+
+    assert.equal(jobs.length, 1);
+    assert.equal(jobs[0].id, job.id);
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
 test("state rejects unsafe job ids before path construction", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-state-job-id-"));
   try {
