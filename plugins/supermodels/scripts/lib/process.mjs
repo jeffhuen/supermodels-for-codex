@@ -1,8 +1,12 @@
-import { access } from "node:fs/promises";
+import { access, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { constants } from "node:fs";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const SUPERVISOR_PATH = path.join(__dirname, "process-supervisor.mjs");
 
 export async function findExecutable(bin, options = {}) {
   const env = options.env ?? process.env;
@@ -26,6 +30,64 @@ export async function findExecutable(bin, options = {}) {
 }
 
 export async function runCommand(command, options = {}) {
+  if (options.supervised) {
+    return await runSupervisedCommand(command, options);
+  }
+  return await runSpawnedCommand(command, options);
+}
+
+async function runSupervisedCommand(command, options = {}) {
+  const guardRoot = options.guardDir
+    ? path.resolve(options.guardDir)
+    : await mkdtemp(path.join(os.tmpdir(), "supermodels-command-"));
+  const guardDir = await mkdtemp(path.join(guardRoot, ".supermodels-supervisor-"));
+  const armPath = path.join(guardDir, "armed");
+  const abortPath = path.join(guardDir, "abort");
+  const specPath = path.join(guardDir, "spec.json");
+  const inputPath = options.input === undefined ? "" : path.join(guardDir, "stdin.txt");
+  if (inputPath) {
+    await writeFile(inputPath, String(options.input));
+  }
+  await writeFile(specPath, `${JSON.stringify({
+    command,
+    cwd: options.cwd ?? process.cwd(),
+    env: { ...process.env, ...(options.env ?? {}) },
+    inputPath,
+    armPath,
+    abortPath,
+  })}\n`);
+
+  let startAccepted = true;
+  return await runSpawnedCommand({
+    bin: process.execPath,
+    args: [SUPERVISOR_PATH, specPath],
+  }, {
+    ...options,
+    input: undefined,
+    onStart: (start) => {
+      startAccepted = options.onStart?.(start) !== false;
+      if (startAccepted) {
+        writeFile(armPath, "armed\n").catch(() => {});
+      } else {
+        writeFile(abortPath, "abort\n").catch(() => {});
+      }
+    },
+    onStderr: options.onStderr,
+    onStdout: options.onStdout,
+    timeoutMs: options.timeoutMs,
+  }).then((result) => {
+    if (!startAccepted && !result.stderr) {
+      return {
+        ...result,
+        exitCode: result.exitCode || 127,
+        stderr: "Provider supervisor PID was not recorded; provider was not started.",
+      };
+    }
+    return result;
+  });
+}
+
+async function runSpawnedCommand(command, options = {}) {
   const timeoutMs = options.timeoutMs ?? 10 * 60 * 1000;
   const env = { ...process.env, ...(options.env ?? {}) };
   const killProcessGroup = process.platform !== "win32";
@@ -37,7 +99,10 @@ export async function runCommand(command, options = {}) {
       detached: killProcessGroup,
       stdio: ["pipe", "pipe", "pipe"],
     });
-    options.onStart?.({ pid: child.pid ?? null });
+    const startAccepted = options.onStart?.({ pid: child.pid ?? null });
+    if (startAccepted === false) {
+      signalProcessTree(child.pid, "SIGTERM");
+    }
 
     let stdout = "";
     let stderr = "";

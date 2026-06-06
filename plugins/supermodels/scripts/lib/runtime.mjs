@@ -621,9 +621,9 @@ function createProviderStartRecorder({ state, jobId, job, provider, enqueueWrite
   return (start) => {
     const pid = Number(start?.pid);
     if (!Number.isFinite(pid) || pid <= 0) {
-      return;
+      return false;
     }
-    writeProviderPid(job, provider, pid);
+    const persisted = writeProviderPid(job, provider, pid);
     enqueueWrite(() => updateProviderRun(state, jobId, provider, { pid }), { critical: false });
     processStartedAt(pid).then((pidStartedAt) => {
       if (!pidStartedAt) {
@@ -632,6 +632,7 @@ function createProviderStartRecorder({ state, jobId, job, provider, enqueueWrite
       writeProviderPid(job, provider, pid, { pidStartedAt });
       enqueueWrite(() => updateProviderRun(state, jobId, provider, { pid, pidStartedAt }), { critical: false });
     }).catch(() => {});
+    return persisted;
   };
 }
 

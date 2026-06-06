@@ -203,6 +203,8 @@ async function runClaudePrompt(input, options = {}) {
     timeoutMs: options.timeoutMs ?? 20 * 60 * 1000,
     onStart: options.onStart,
     onStdout: (chunk) => streamParser.push(chunk),
+    supervised: true,
+    guardDir: options.promptDir,
   });
   streamParser.end();
   const parsed = parseClaudeOutput(result.stdout);

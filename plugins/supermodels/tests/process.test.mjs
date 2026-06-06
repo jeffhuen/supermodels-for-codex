@@ -19,6 +19,48 @@ test("runCommand handles stdin pipe errors when child exits early", async () => 
   assert.equal(result.timedOut, false);
 });
 
+test("runCommand supervised mode starts after pid recording is accepted", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-supervised-start-"));
+  const markerPath = path.join(tempDir, "started.txt");
+  try {
+    const result = await runCommand({
+      bin: process.execPath,
+      args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(markerPath)}, 'started')`],
+    }, {
+      supervised: true,
+      guardDir: tempDir,
+      timeoutMs: 5_000,
+      onStart: ({ pid }) => Number.isFinite(Number(pid)) && Number(pid) > 0,
+    });
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(await readFile(markerPath, "utf8"), "started");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("runCommand supervised mode does not start provider when pid recording is rejected", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-supervised-reject-"));
+  const markerPath = path.join(tempDir, "started.txt");
+  try {
+    const result = await runCommand({
+      bin: process.execPath,
+      args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(markerPath)}, 'started')`],
+    }, {
+      supervised: true,
+      guardDir: tempDir,
+      timeoutMs: 5_000,
+      onStart: () => false,
+    });
+
+    assert.notEqual(result.exitCode, 0);
+    await assert.rejects(() => readFile(markerPath, "utf8"), /ENOENT/);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("runCommand timeout terminates provider subprocesses", { skip: process.platform === "win32" }, async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-process-tree-"));
   const markerPath = path.join(tempDir, "survived.txt");

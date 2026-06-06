@@ -150,6 +150,8 @@ async function runAntigravityPrompt(input, options = {}) {
     cwd: options.cwd,
     timeoutMs: options.timeoutMs ?? 20 * 60 * 1000,
     onStart: options.onStart,
+    supervised: true,
+    guardDir: options.promptDir,
   });
   const parsed = parseAntigravitySessionMetadata(result.stderr, { trusted: true });
 

@@ -13,6 +13,7 @@ Initial public release.
 - Structured review parsing, provider artifact preservation, and synthesis with provider attribution.
 - Read-only review/task defaults and explicit `--write` handling for bounded task delegation.
 - Job state locking, stale lock recovery, cancellation terminality, PID identity checks, and provider process signaling.
+- Provider process supervisor handshake so provider CLIs do not start until a signalable supervisor PID has been recorded.
 
 ### Scope
 
@@ -22,5 +23,4 @@ Initial public release.
 
 ### Known Limitations
 
-- Cancellation can only signal provider processes whose PIDs have been observed by the orchestrator or recorded in job artifacts. If a provider process is spawned but its PID is never observed or persisted before interruption, that process may need manual cleanup.
 - Additional providers such as Grok are intentionally out of scope for `0.1.0`.
