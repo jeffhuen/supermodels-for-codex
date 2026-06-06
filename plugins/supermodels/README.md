@@ -51,6 +51,8 @@ The plugin does not embed provider API keys or OAuth secrets. Provider CLIs use 
 
 Background cancellation is scoped to the Supermodels worker process. The worker forwards termination to the direct provider child process it starts, but the plugin does not claim provider-native interrupt or durable provider session ownership.
 
+Antigravity write tasks use the installed `agy` CLI's native default write behavior. Use `--write --provider antigravity` only when that native CLI permission model is acceptable.
+
 ## Development
 
 Run tests from this directory:
@@ -68,13 +70,13 @@ node --test plugins/supermodels/tests/*.test.mjs
 Validate the plugin from the repository root:
 
 ```bash
-python3 /Users/jeffhuen/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py plugins/supermodels
+python3 "$HOME/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py" plugins/supermodels
 ```
 
 For local development builds only, update the manifest cachebuster before reinstalling from a local marketplace:
 
 ```bash
-python3 /Users/jeffhuen/.codex/skills/.system/plugin-creator/scripts/update_plugin_cachebuster.py plugins/supermodels
+python3 "$HOME/.codex/skills/.system/plugin-creator/scripts/update_plugin_cachebuster.py" plugins/supermodels
 ```
 
 Release builds should use a plain SemVer manifest version such as `0.1.0`.

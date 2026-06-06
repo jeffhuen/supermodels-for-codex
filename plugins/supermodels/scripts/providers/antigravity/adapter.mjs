@@ -156,6 +156,8 @@ async function runAntigravityPrompt(input, options = {}) {
   const result = await runCommand(command, {
     cwd: options.cwd,
     timeoutMs: options.timeoutMs ?? 20 * 60 * 1000,
+    exitOnForwardSignal: options.exitOnForwardSignal,
+    signalKillMs: options.signalKillMs,
     onStart: options.onStart,
   });
   await chmod(logFile, 0o600).catch(() => {});

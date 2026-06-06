@@ -107,6 +107,8 @@ Claude Code runs through the installed `claude` CLI. Review and read-only task p
 
 Antigravity runs through the installed `agy` CLI. Review mode defaults to Gemini 3.5 Flash High through Antigravity's model naming. Read-only paths use sandboxed execution where supported by the CLI.
 
+Antigravity write tasks use the installed `agy` CLI's native default write behavior. The current `agy` CLI exposes a read-only `--sandbox` mode and a broad `--dangerously-skip-permissions` mode, but not a Claude-style edit allow-list. Use `--write --provider antigravity` only when that native CLI permission model is acceptable.
+
 ## Job State and Artifacts
 
 Supermodels stores job state outside the repository under the Codex plugin data directory, normally:
@@ -162,13 +164,13 @@ node --test plugins/supermodels/tests/*.test.mjs
 Validate the plugin:
 
 ```bash
-python3 /Users/jeffhuen/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py plugins/supermodels
+python3 "$HOME/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py" plugins/supermodels
 ```
 
 For local development builds only, update the plugin cachebuster before reinstalling from a local marketplace:
 
 ```bash
-python3 /Users/jeffhuen/.codex/skills/.system/plugin-creator/scripts/update_plugin_cachebuster.py plugins/supermodels
+python3 "$HOME/.codex/skills/.system/plugin-creator/scripts/update_plugin_cachebuster.py" plugins/supermodels
 ```
 
 Then reinstall from the configured marketplace:

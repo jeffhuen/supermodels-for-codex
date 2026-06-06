@@ -205,6 +205,8 @@ async function runClaudePrompt(input, options = {}) {
     cwd: options.cwd,
     input: input.prompt,
     timeoutMs: options.timeoutMs ?? 20 * 60 * 1000,
+    exitOnForwardSignal: options.exitOnForwardSignal,
+    signalKillMs: options.signalKillMs,
     onStart: options.onStart,
     onStdout: (chunk) => streamParser.push(chunk),
   });

@@ -156,7 +156,6 @@ function installForwardSignalHandlers(child, options = {}) {
       exitTimer = setTimeout(() => {
         process.exit(signalExitCode(signal));
       }, signalKillMs + 100);
-      exitTimer.unref();
     }
   };
   const onSigint = () => forward("SIGINT");
@@ -166,7 +165,9 @@ function installForwardSignalHandlers(child, options = {}) {
   return {
     cleanup() {
       clearTimeout(forceTimer);
-      clearTimeout(exitTimer);
+      if (!forwarded || !options.exitOnForwardSignal) {
+        clearTimeout(exitTimer);
+      }
       process.off("SIGINT", onSigint);
       process.off("SIGTERM", onSigterm);
     },

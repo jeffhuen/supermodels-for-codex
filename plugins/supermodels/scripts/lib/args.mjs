@@ -55,7 +55,6 @@ export function parseArgs(argv, config = {}) {
       }
 
       throw new Error(`Unknown option --${rawKey}. Use -- before focus text that starts with '-'.`);
-      continue;
     }
 
     const shortKey = token.slice(1);

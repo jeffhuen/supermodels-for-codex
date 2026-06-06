@@ -222,6 +222,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
       background: false,
       focus,
     });
+  const cleanupSignalCancellation = installJobSignalCancellation(state, job.id);
   try {
     const started = await markJobRunning(state, job.id, {
       selectedProviders: providerPlan.selected,
@@ -280,6 +281,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
         promptDir: job.dir,
         dataRoot: state.dataRoot,
         timeoutMs,
+        exitOnForwardSignal: true,
         onStart: recordStart,
         onEvent: recordEvent,
       }));
@@ -332,6 +334,8 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
   } catch (error) {
     await markJobFailedBestEffort(state, job.id, error);
     throw error;
+  } finally {
+    cleanupSignalCancellation();
   }
 }
 
@@ -365,6 +369,7 @@ export async function runTask({ adapters, providerSelection, options, task, work
       task,
       write: Boolean(options.write),
     });
+  const cleanupSignalCancellation = installJobSignalCancellation(state, job.id);
   try {
     const started = await markJobRunning(state, job.id, {
       selectedProviders: providerPlan.selected,
@@ -417,6 +422,7 @@ export async function runTask({ adapters, providerSelection, options, task, work
         dataRoot: state.dataRoot,
         timeoutMs,
         write: Boolean(options.write),
+        exitOnForwardSignal: true,
         onStart: recordStart,
         onEvent: recordEvent,
       }));
@@ -468,6 +474,8 @@ export async function runTask({ adapters, providerSelection, options, task, work
   } catch (error) {
     await markJobFailedBestEffort(state, job.id, error);
     throw error;
+  } finally {
+    cleanupSignalCancellation();
   }
 }
 
@@ -561,6 +569,39 @@ async function markJobRunning(state, jobId, requestPatch) {
       },
     };
   });
+}
+
+function installJobSignalCancellation(state, jobId) {
+  let handling = false;
+  const mark = (signal) => {
+    if (handling) {
+      return;
+    }
+    handling = true;
+    updateJob(state, jobId, (current) => {
+      if (["cancelled", "completed", "partial", "failed"].includes(current.status)) {
+        return current;
+      }
+      const now = new Date().toISOString();
+      return {
+        ...current,
+        status: "cancelled",
+        completedAt: now,
+        cancellation: {
+          signal,
+          at: now,
+        },
+      };
+    }).catch(() => {});
+  };
+  const onSigint = () => mark("SIGINT");
+  const onSigterm = () => mark("SIGTERM");
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
+  return () => {
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
+  };
 }
 
 function terminalOutput({ job, checks, selected, skipped }) {

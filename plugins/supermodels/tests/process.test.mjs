@@ -125,6 +125,46 @@ test("runCommand force-kills provider child when worker receives SIGTERM", { ski
   }
 });
 
+test("runCommand exits after forwarded signal even when provider child exits quickly", { skip: process.platform === "win32" }, async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-worker-exit-"));
+  let worker;
+  try {
+    const providerScript = [
+      "process.on('SIGTERM', () => process.exit(0));",
+      "setInterval(() => {}, 1000);",
+    ].join(" ");
+    const processLib = path.resolve(import.meta.dirname, "../scripts/lib/process.mjs");
+    const workerScript = [
+      `import { runCommand } from ${JSON.stringify(pathToFileURL(processLib).href)};`,
+      "await runCommand({",
+      `  bin: ${JSON.stringify(process.execPath)},`,
+      `  args: ['-e', ${JSON.stringify(providerScript)}],`,
+      "}, {",
+      "  timeoutMs: 10_000,",
+      "  exitOnForwardSignal: true,",
+      "  signalKillMs: 50,",
+      "  onStart: () => { console.log('READY'); },",
+      "});",
+      "setInterval(() => {}, 1000);",
+    ].join("\n");
+
+    worker = spawn(process.execPath, ["--input-type=module", "-e", workerScript], {
+      cwd: tempDir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    await waitForStdout(worker, "READY");
+    worker.kill("SIGTERM");
+
+    const closed = await onceClosed(worker, 1000);
+    assert.equal(closed.code, 143);
+  } finally {
+    if (worker?.pid) {
+      signalProcessTree(worker.pid, "SIGKILL");
+    }
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -153,8 +193,12 @@ function waitForStdout(child, expected) {
   });
 }
 
-function onceClosed(child) {
-  return new Promise((resolve) => {
-    child.once("close", (code, signal) => resolve({ code, signal }));
+function onceClosed(child, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Timed out waiting for child close")), timeoutMs);
+    child.once("close", (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, signal });
+    });
   });
 }

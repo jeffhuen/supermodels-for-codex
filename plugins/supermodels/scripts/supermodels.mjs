@@ -19,6 +19,7 @@ import { createAntigravityAdapter } from "./providers/antigravity/adapter.mjs";
 import { createClaudeAdapter } from "./providers/claude/adapter.mjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
+const LIVE_SIGNAL_EXIT_GRACE_MS = 1200;
 
 const adapters = {
   claude: createClaudeAdapter(),
@@ -407,7 +408,9 @@ function installLiveAbortHandlers({ state, jobId }) {
     handling = true;
     cleanup();
     handleLiveAbort({ state, jobId, signal }).finally(() => {
-      process.exit(signal === "SIGINT" ? 130 : 143);
+      setTimeout(() => {
+        process.exit(signal === "SIGINT" ? 130 : 143);
+      }, LIVE_SIGNAL_EXIT_GRACE_MS);
     });
   };
   const onSigint = () => onSignal("SIGINT");
