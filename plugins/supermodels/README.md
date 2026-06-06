@@ -1,73 +1,80 @@
-# Supermodels for Codex
+# Supermodels
 
-Supermodels is a Codex plugin that lets Codex ask local external coding agents for independent review and task delegation.
+Supermodels is a Codex plugin that lets Codex call Claude Code and Google Antigravity for independent review and task delegation.
 
-Version 1 supports:
-
-- Claude Code through the installed `claude` CLI.
-- Google Antigravity through the installed `agy` CLI.
-
-The plugin is a broker. Codex owns the user conversation and final synthesis; Claude Code and Antigravity produce attributed provider results from their native local runtimes.
+This directory contains the plugin package. For full installation and usage documentation, see the repository [README](../../README.md).
 
 ## Commands
 
-- `supermodels:setup` checks local provider readiness.
-- `supermodels:providers` shows provider status.
-- `supermodels:review` runs a normal working-tree review.
-- `supermodels:adversarial-review` runs a stricter adversarial review.
-- `supermodels:task` delegates a focused task to one provider.
-- `supermodels:status`, `supermodels:result`, and `supermodels:cancel` manage background jobs.
+Codex skills:
 
-## Setup
+- `$supermodels:setup`
+- `$supermodels:providers`
+- `$supermodels:review`
+- `$supermodels:adversarial-review`
+- `$supermodels:task`
+- `$supermodels:status`
+- `$supermodels:result`
+- `$supermodels:cancel`
 
-Install and authenticate the provider CLIs you want to use:
+Runtime CLI during development:
+
+```bash
+node scripts/supermodels.mjs setup
+node scripts/supermodels.mjs providers
+node scripts/supermodels.mjs review --live
+node scripts/supermodels.mjs adversarial-review --live
+node scripts/supermodels.mjs task --provider claude "Investigate the failing test"
+node scripts/supermodels.mjs status
+```
+
+## Provider Requirements
+
+Install and authenticate at least one provider CLI:
 
 ```bash
 claude auth login
 agy
 ```
 
-Then run:
+If both providers are ready, reviews run both in parallel. If only one provider is ready, reviews use the available provider.
 
-```bash
-node scripts/supermodels.mjs setup
-```
+## Data
 
-At least one provider must be ready. If both are ready, review commands ask both providers in parallel.
-
-## Data and Privacy
-
-Supermodels shells out to local provider CLIs. It does not embed provider API keys or OAuth secrets.
-
-Job state, prompt artifacts, raw provider output, normalized results, and provider logs are written under the Codex plugin data directory, normally:
+Job state and provider artifacts are stored outside the repository under the Codex plugin data directory, normally:
 
 ```text
 ~/.codex/plugins/data/supermodels
 ```
 
-Provider CLIs may use their own local auth, session, telemetry, and data storage. Review the Claude Code and Antigravity CLI settings for those behaviors.
+The plugin does not embed provider API keys or OAuth secrets. Provider CLIs use their own local auth and session storage.
 
 ## Development
 
-Run the test suite:
+Run tests from this directory:
 
 ```bash
-node --test tests/*.test.mjs
+npm test
 ```
 
-Validate the plugin:
+Or from the repository root:
 
 ```bash
-python3 /Users/jeffhuen/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py .
+node --test plugins/supermodels/tests/*.test.mjs
 ```
 
-During local iteration, update the manifest cachebuster and reinstall from the repo marketplace:
+Validate the plugin from the repository root:
 
 ```bash
-python3 /Users/jeffhuen/.codex/skills/.system/plugin-creator/scripts/update_plugin_cachebuster.py .
-codex plugin add supermodels@supermodels-local
+python3 /Users/jeffhuen/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py plugins/supermodels
+```
+
+Update the manifest cachebuster before publishing a new development build:
+
+```bash
+python3 /Users/jeffhuen/.codex/skills/.system/plugin-creator/scripts/update_plugin_cachebuster.py plugins/supermodels
 ```
 
 ## License
 
-MIT
+MIT.
