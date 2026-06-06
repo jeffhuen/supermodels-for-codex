@@ -26,7 +26,13 @@ Supermodels is designed for that workflow:
 Add this repository as a Codex plugin marketplace:
 
 ```bash
-codex plugin marketplace add https://github.com/jeffhuen/supermodels-for-codex.git --sparse .agents/plugins
+codex plugin marketplace add jeffhuen/supermodels-for-codex
+```
+
+To pin the marketplace to `main` explicitly:
+
+```bash
+codex plugin marketplace add jeffhuen/supermodels-for-codex --ref main
 ```
 
 Install the plugin:
