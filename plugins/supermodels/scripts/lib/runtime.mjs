@@ -1,10 +1,7 @@
-import { execFile } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
-import { promisify } from "node:util";
 
 import { collectGitContext } from "./git.mjs";
-import { commandLine } from "./process.mjs";
-import { jobProcessDescriptors, writeProviderPid } from "./provider-pids.mjs";
+import { commandLine, isProcessAlive, processStartedAt } from "./process.mjs";
 import { renderReviewPrompt, renderTaskPrompt } from "./prompts.mjs";
 import {
   normalizeStructuredReview,
@@ -25,7 +22,6 @@ import {
 
 const SUMMARY_LIMIT = 4000;
 const NO_PID_STALE_MS = 5 * 60 * 1000;
-const execFileAsync = promisify(execFile);
 
 export { markCancelled } from "./cancellation.mjs";
 
@@ -170,7 +166,13 @@ export function synthesizeProviderResults(results) {
 
 export async function checkProviders(adapters, options = {}) {
   const entries = await Promise.all(
-    Object.entries(adapters).map(async ([id, adapter]) => [id, await adapter.check(options)]),
+    Object.entries(adapters).map(async ([id, adapter]) => {
+      const check = await adapter.check(options);
+      return [id, {
+        ...check,
+        capabilities: adapter.capabilities?.() ?? {},
+      }];
+    }),
   );
   return Object.fromEntries(entries);
 }
@@ -182,7 +184,10 @@ export async function setupProviders(adapters, options = {}) {
       const check = await adapter.check(options);
       return [id, {
         setup,
-        check,
+        check: {
+          ...check,
+          capabilities: adapter.capabilities?.() ?? {},
+        },
       }];
     }),
   );
@@ -251,7 +256,6 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
       const recordStart = createProviderStartRecorder({
         state,
         jobId: job.id,
-        job,
         provider,
         enqueueWrite,
       });
@@ -343,6 +347,12 @@ export async function runTask({ adapters, providerSelection, options, task, work
     explicit: providerSelection.explicit,
     checks,
   });
+  if (options.write) {
+    const unsupported = providerPlan.selected.filter((provider) => !adapters[provider]?.capabilities?.().writeTask);
+    if (unsupported.length) {
+      throw new Error(`Provider '${unsupported[0]}' does not support write tasks.`);
+    }
+  }
   const job = options["job-id"]
     ? await readJob(state, options["job-id"])
     : await createJob(state, {
@@ -388,7 +398,6 @@ export async function runTask({ adapters, providerSelection, options, task, work
       const recordStart = createProviderStartRecorder({
         state,
         jobId: job.id,
-        job,
         provider,
         enqueueWrite,
       });
@@ -605,22 +614,14 @@ function createProviderEventRecorder({ state, jobId, provider, events, enqueueWr
   };
 }
 
-function createProviderStartRecorder({ state, jobId, job, provider, enqueueWrite }) {
+function createProviderStartRecorder({ state, jobId, provider, enqueueWrite }) {
   return (start) => {
     const pid = Number(start?.pid);
     if (!Number.isFinite(pid) || pid <= 0) {
       return false;
     }
-    const persisted = writeProviderPid(job, provider, pid);
     enqueueWrite(() => updateProviderRun(state, jobId, provider, { pid }), { critical: false });
-    processStartedAt(pid).then((pidStartedAt) => {
-      if (!pidStartedAt) {
-        return;
-      }
-      writeProviderPid(job, provider, pid, { pidStartedAt });
-      enqueueWrite(() => updateProviderRun(state, jobId, provider, { pid, pidStartedAt }), { critical: false });
-    }).catch(() => {});
-    return persisted;
+    return true;
   };
 }
 
@@ -767,11 +768,10 @@ async function reconcileJobStatus(state, job) {
   if (job?.status !== "running") {
     return job;
   }
-  const processes = jobProcessDescriptors(job);
-  if (await jobHasLiveProcess(job, processes)) {
+  if (await jobHasLiveWorker(job)) {
     return job;
   }
-  if (!processes.length && !isRunningJobStaleWithoutPid(job)) {
+  if (!hasWorkerPid(job) && !isRunningJobStaleWithoutPid(job)) {
     return job;
   }
   try {
@@ -779,15 +779,14 @@ async function reconcileJobStatus(state, job) {
       if (current.status !== "running") {
         return current;
       }
-      const currentProcesses = jobProcessDescriptors(current);
-      if (await jobHasLiveProcess(current, currentProcesses)) {
+      if (await jobHasLiveWorker(current)) {
         return current;
       }
-      if (!currentProcesses.length && !isRunningJobStaleWithoutPid(current)) {
+      if (!hasWorkerPid(current) && !isRunningJobStaleWithoutPid(current)) {
         return current;
       }
-      const reason = currentProcesses.length
-        ? "Job process is no longer running."
+      const reason = hasWorkerPid(current)
+        ? "Supermodels worker process is no longer running."
         : "Job has no recorded worker process and has not updated recently.";
       return markJobFailed(current, reason);
     });
@@ -796,38 +795,27 @@ async function reconcileJobStatus(state, job) {
   }
 }
 
-async function jobHasLiveProcess(job, processes) {
-  for (const descriptor of processes) {
-    const pid = Number(descriptor.pid);
-    const pidStartedAt = descriptor.pidStartedAt
-      || (pid === Number(job.pid) ? job.pidStartedAt : "");
-    if (pidStartedAt) {
-      const observedStartedAt = await processStartedAt(pid);
-      if (observedStartedAt === pidStartedAt) {
-        return true;
-      }
-      if (!observedStartedAt && isProcessAlive(pid)) {
-        return true;
-      }
-      continue;
-    }
-    if (descriptor.source === "job" && isProcessAlive(pid)) {
+async function jobHasLiveWorker(job) {
+  const pid = Number(job?.pid);
+  if (!Number.isFinite(pid) || pid <= 0) {
+    return false;
+  }
+  if (job.pidStartedAt) {
+    const observedStartedAt = await processStartedAt(pid);
+    if (observedStartedAt === job.pidStartedAt) {
       return true;
     }
+    if (!observedStartedAt && isProcessAlive(pid)) {
+      return true;
+    }
+    return false;
   }
-  return false;
+  return isProcessAlive(pid);
 }
 
-async function processStartedAt(pid) {
-  if (!Number.isFinite(Number(pid)) || Number(pid) <= 0 || process.platform === "win32") {
-    return "";
-  }
-  try {
-    const { stdout } = await execFileAsync("ps", ["-o", "lstart=", "-p", String(pid)], { timeout: 1000 });
-    return stdout.trim().replace(/\s+/g, " ");
-  } catch {
-    return "";
-  }
+function hasWorkerPid(job) {
+  const pid = Number(job?.pid);
+  return Number.isFinite(pid) && pid > 0;
 }
 
 function isRunningJobStaleWithoutPid(job) {
@@ -836,18 +824,6 @@ function isRunningJobStaleWithoutPid(job) {
     return false;
   }
   return Date.now() - timestamp > NO_PID_STALE_MS;
-}
-
-function isProcessAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error?.code === "EPERM") {
-      return true;
-    }
-    return false;
-  }
 }
 
 function markJobFailed(current, message, writeError) {

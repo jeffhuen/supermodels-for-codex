@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { chmod, mkdir, readdir, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,8 +21,12 @@ export function createAntigravityAdapter() {
     label: "Google Antigravity",
     capabilities: () => ({
       review: true,
+      adversarialReview: true,
       task: true,
+      writeTask: true,
       resume: true,
+      nativeInterrupt: false,
+      background: "worker",
     }),
     check,
     setup,
@@ -123,6 +127,7 @@ export function parseAntigravitySessionMetadata(stdout, options = {}) {
   }
   const text = String(stdout ?? "");
   const patterns = [
+    /\bCreated conversation\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i,
     /\bconversation[_ -]?id\s*[:=]\s*([A-Za-z0-9._:-]+)/i,
     /\bsession[_ -]?id\s*[:=]\s*([A-Za-z0-9._:-]+)/i,
   ];
@@ -138,6 +143,7 @@ export function parseAntigravitySessionMetadata(stdout, options = {}) {
 async function runAntigravityPrompt(input, options = {}) {
   const startedAt = new Date().toISOString();
   const promptPath = await writePromptFile(input.prompt, options);
+  const logFile = await antigravityLogFile(options);
   const command = buildAntigravityCommand({
     bin: options.bin,
     model: options.model,
@@ -145,15 +151,16 @@ async function runAntigravityPrompt(input, options = {}) {
     write: Boolean(options.write),
     resume: options.resume,
     promptPath,
+    logFile,
   });
   const result = await runCommand(command, {
     cwd: options.cwd,
     timeoutMs: options.timeoutMs ?? 20 * 60 * 1000,
     onStart: options.onStart,
-    supervised: true,
-    guardDir: options.promptDir,
   });
-  const parsed = parseAntigravitySessionMetadata(result.stderr, { trusted: true });
+  await chmod(logFile, 0o600).catch(() => {});
+  const logText = await readFile(logFile, "utf8").catch(() => "");
+  const parsed = parseAntigravitySessionMetadata(`${result.stderr}\n${logText}`, { trusted: true });
 
   return {
     provider: "antigravity",
@@ -166,6 +173,15 @@ async function runAntigravityPrompt(input, options = {}) {
     startedAt,
     completedAt: new Date().toISOString(),
   };
+}
+
+async function antigravityLogFile(options = {}) {
+  const promptDir = options.promptDir
+    ? path.resolve(options.promptDir)
+    : path.join(os.tmpdir(), "supermodels-prompts");
+  await mkdir(promptDir, { recursive: true, mode: 0o700 });
+  await chmod(promptDir, 0o700).catch(() => {});
+  return path.join(promptDir, "provider-antigravity.log");
 }
 
 async function writePromptFile(prompt, options = {}) {

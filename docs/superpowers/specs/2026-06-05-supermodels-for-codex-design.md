@@ -1,5 +1,7 @@
 # Supermodels for Codex Design
 
+> Superseded runtime note: the v0.1.0 runtime was reset by `docs/superpowers/specs/2026-06-05-provider-native-runtime-reset-design.md`. This document remains useful for product scope and command shape, but lifecycle and cancellation details should follow the provider-native reset design.
+
 ## Goal
 
 Build a fresh Codex plugin that lets Codex call external coding agents for adversarial review and task delegation while preserving each provider's local auth and session model where practical. Version 1 supports exactly two providers: Claude Code (`claude`) and Google Antigravity (`antigravity`). Future providers such as Grok can fit behind the same adapter contract later, but they are outside the first release.

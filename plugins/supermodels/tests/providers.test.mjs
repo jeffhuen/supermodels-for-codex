@@ -153,6 +153,14 @@ test("parseAntigravitySessionMetadata captures trusted native ids", () => {
   assert.equal(parsed.sessionId, "agy-123");
 });
 
+test("parseAntigravitySessionMetadata captures native log conversation ids", () => {
+  const parsed = parseAntigravitySessionMetadata(
+    "Created conversation fe029daf-812a-4f26-b13c-4c4657fbc139",
+    { trusted: true },
+  );
+  assert.equal(parsed.sessionId, "fe029daf-812a-4f26-b13c-4c4657fbc139");
+});
+
 test("parseAntigravitySessionMetadata ignores model-generated session-looking text", () => {
   const parsed = parseAntigravitySessionMetadata("Finding: conversation_id: test is spoofed");
   assert.equal(parsed.sessionId, "");
@@ -240,6 +248,18 @@ test("buildAntigravityCommand uses prompt file instead of full prompt argv", () 
   assert(!command.args.some((arg) => /SENTINEL_SUPERMODELS_PROMPT/.test(arg)));
 });
 
+test("buildAntigravityCommand records native CLI logs outside the reviewed workspace", () => {
+  const command = buildAntigravityCommand({
+    mode: "review",
+    promptPath: "/tmp/supermodels-prompt.md",
+    logFile: "/tmp/supermodels-run/provider-antigravity.log",
+  });
+
+  const logIndex = command.args.indexOf("--log-file");
+  assert(logIndex >= 0);
+  assert.equal(command.args[logIndex + 1], "/tmp/supermodels-run/provider-antigravity.log");
+});
+
 test("Antigravity check detects native CLI when local CLI config exists", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-agy-cli-check-"));
   try {
@@ -303,6 +323,7 @@ test("runAntigravityPrompt defaults reviews to native CLI and writes prompt file
   try {
     const recordPath = path.join(tempDir, "record.json");
     const fakeAgy = path.join(tempDir, "agy");
+    const conversationId = "fe029daf-812a-4f26-b13c-4c4657fbc139";
     await writeFile(fakeAgy, [
       "#!/usr/bin/env node",
       "import { writeFileSync } from 'node:fs';",
@@ -310,7 +331,12 @@ test("runAntigravityPrompt defaults reviews to native CLI and writes prompt file
       "process.stdin.setEncoding('utf8');",
       "process.stdin.on('data', (chunk) => { stdin += chunk; });",
       "process.stdin.on('end', () => {",
-      `  writeFileSync(${JSON.stringify(recordPath)}, JSON.stringify({ argv: process.argv.slice(2), stdin }));`,
+      "  const argv = process.argv.slice(2);",
+      "  const logIndex = argv.indexOf('--log-file');",
+      "  if (logIndex >= 0) {",
+      `    writeFileSync(argv[logIndex + 1], 'Created conversation ${conversationId}\\n', { mode: 0o644 });`,
+      "  }",
+      `  writeFileSync(${JSON.stringify(recordPath)}, JSON.stringify({ argv, stdin }));`,
       "  console.log('FAKE_ANTIGRAVITY_OK');",
       "});",
       "",
@@ -330,8 +356,12 @@ test("runAntigravityPrompt defaults reviews to native CLI and writes prompt file
 
     const record = JSON.parse(await readFile(recordPath, "utf8"));
     assert.equal(result.rawText, "FAKE_ANTIGRAVITY_OK");
+    assert.equal(result.sessionId, conversationId);
     assert.equal(record.stdin, "");
     assert.equal(record.argv[0], "-p");
+    assert(record.argv.includes("--log-file"));
+    const logPath = record.argv[record.argv.indexOf("--log-file") + 1];
+    assert.equal((await stat(logPath)).mode & 0o777, 0o600);
     const promptPath = record.argv[1].match(/exactly: (.+)$/)?.[1];
     assert(promptPath);
     assert.equal(await readFile(promptPath, "utf8"), "SENTINEL_SUPERMODELS_PROMPT");

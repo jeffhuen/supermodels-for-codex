@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { access, chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { buildBackgroundChildArgs, markBackgroundJobRunning } from "../scripts/lib/background.mjs";
 import { createJob, createState, readJob, updateJob } from "../scripts/lib/state.mjs";
-import { writeProviderPid } from "../scripts/lib/provider-pids.mjs";
 
 test("background child args preserve dash-leading focus text behind passthrough separator", () => {
   const args = buildBackgroundChildArgs({
@@ -31,11 +30,9 @@ test("background child args preserve dash-leading focus text behind passthrough 
 });
 
 test("background child failures mark the persisted job failed", async () => {
-  const tempRoot = await realpath(tmpdir());
-  const dataRoot = await mkdtemp(path.join(tempRoot, "supermodels-background-failure-data-"));
-  const workspaceRoot = await mkdtemp(path.join(tempRoot, "supermodels-background-failure-workspace-"));
+  const fixture = await createFixture("supermodels-background-failure-");
   try {
-    const state = createState({ workspaceRoot, dataRoot });
+    const { state, dataRoot, workspaceRoot } = fixture;
     const job = await createJob(state, {
       command: "review",
       mode: "review",
@@ -75,8 +72,7 @@ test("background child failures mark the persisted job failed", async () => {
     assert.equal(reloaded.stage, "failed");
     assert.match(reloaded.error, /unsupported provider/i);
   } finally {
-    await rm(dataRoot, { recursive: true, force: true });
-    await rm(workspaceRoot, { recursive: true, force: true });
+    await fixture.cleanup();
   }
 });
 
@@ -95,19 +91,17 @@ test("background parent running update does not overwrite terminal child status"
   assert.equal(next.pid, 111);
 });
 
-test("cancel escalates to SIGKILL when a job process ignores SIGTERM", { skip: process.platform === "win32" }, async () => {
-  const tempRoot = await realpath(tmpdir());
-  const dataRoot = await mkdtemp(path.join(tempRoot, "supermodels-cancel-data-"));
-  const workspaceRoot = await mkdtemp(path.join(tempRoot, "supermodels-cancel-workspace-"));
+test("cancel escalates to SIGKILL when a worker ignores SIGTERM", { skip: process.platform === "win32" }, async () => {
+  const fixture = await createFixture("supermodels-cancel-worker-");
   const child = spawn(process.execPath, [
     "-e",
     "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);",
   ], {
-    cwd: workspaceRoot,
+    cwd: fixture.workspaceRoot,
     stdio: "ignore",
   });
   try {
-    const state = createState({ workspaceRoot, dataRoot });
+    const { state, dataRoot, workspaceRoot } = fixture;
     const job = await createJob(state, {
       command: "review",
       mode: "review",
@@ -147,16 +141,13 @@ test("cancel escalates to SIGKILL when a job process ignores SIGTERM", { skip: p
     if (!child.killed) {
       child.kill("SIGKILL");
     }
-    await rm(dataRoot, { recursive: true, force: true });
-    await rm(workspaceRoot, { recursive: true, force: true });
+    await fixture.cleanup();
   }
 });
 
 test("cancel does not signal already terminal jobs", { skip: process.platform === "win32" }, async () => {
-  const tempRoot = await realpath(tmpdir());
-  const dataRoot = await mkdtemp(path.join(tempRoot, "supermodels-cancel-terminal-data-"));
-  const workspaceRoot = await mkdtemp(path.join(tempRoot, "supermodels-cancel-terminal-workspace-"));
-  const signalPath = path.join(workspaceRoot, "signalled.txt");
+  const fixture = await createFixture("supermodels-cancel-terminal-");
+  const signalPath = path.join(fixture.workspaceRoot, "signalled.txt");
   const child = spawn(process.execPath, [
     "-e",
     [
@@ -165,11 +156,11 @@ test("cancel does not signal already terminal jobs", { skip: process.platform ==
       "setInterval(() => {}, 1000);",
     ].join(" "),
   ], {
-    cwd: workspaceRoot,
+    cwd: fixture.workspaceRoot,
     stdio: "ignore",
   });
   try {
-    const state = createState({ workspaceRoot, dataRoot });
+    const { state, dataRoot, workspaceRoot } = fixture;
     const job = await createJob(state, {
       command: "review",
       mode: "review",
@@ -182,7 +173,6 @@ test("cancel does not signal already terminal jobs", { skip: process.platform ==
       stage: "synthesis-ready",
       completedAt: new Date().toISOString(),
       pid: child.pid,
-      pidStartedAt: processStartedAt(child.pid),
     }));
 
     const scriptPath = path.resolve(import.meta.dirname, "../scripts/supermodels.mjs");
@@ -209,18 +199,13 @@ test("cancel does not signal already terminal jobs", { skip: process.platform ==
     if (!child.killed) {
       child.kill("SIGKILL");
     }
-    await rm(dataRoot, { recursive: true, force: true });
-    await rm(workspaceRoot, { recursive: true, force: true });
+    await fixture.cleanup();
   }
 });
 
-test("cancel still signals signed live pids when ps is unavailable", { skip: process.platform === "win32" }, async () => {
-  const tempRoot = await realpath(tmpdir());
-  const dataRoot = await mkdtemp(path.join(tempRoot, "supermodels-cancel-fake-ps-data-"));
-  const workspaceRoot = await mkdtemp(path.join(tempRoot, "supermodels-cancel-fake-ps-workspace-"));
-  const fakeBinDir = await mkdtemp(path.join(tempRoot, "supermodels-cancel-fake-ps-bin-"));
-  const signalPath = path.join(workspaceRoot, "signalled.txt");
-  const fakePs = path.join(fakeBinDir, "ps");
+test("cancel skips workers whose recorded start identity does not match", { skip: process.platform === "win32" }, async () => {
+  const fixture = await createFixture("supermodels-cancel-stale-worker-");
+  const signalPath = path.join(fixture.workspaceRoot, "signalled.txt");
   const child = spawn(process.execPath, [
     "-e",
     [
@@ -229,80 +214,11 @@ test("cancel still signals signed live pids when ps is unavailable", { skip: pro
       "setInterval(() => {}, 1000);",
     ].join(" "),
   ], {
-    cwd: workspaceRoot,
+    cwd: fixture.workspaceRoot,
     stdio: "ignore",
   });
   try {
-    await writeFile(fakePs, "#!/bin/sh\nexit 127\n");
-    await chmod(fakePs, 0o755);
-
-    const state = createState({ workspaceRoot, dataRoot });
-    const job = await createJob(state, {
-      command: "review",
-      mode: "review",
-      requestedProviders: ["claude"],
-      background: true,
-    });
-    await updateJob(state, job.id, (current) => ({
-      ...current,
-      status: "running",
-      stage: "calling-providers",
-      pid: child.pid,
-      pidStartedAt: processStartedAt(child.pid),
-    }));
-
-    const closed = onceClosed(child);
-    const scriptPath = path.resolve(import.meta.dirname, "../scripts/supermodels.mjs");
-    const result = spawnSync(process.execPath, [
-      scriptPath,
-      "cancel",
-      job.id,
-      "--data-root",
-      dataRoot,
-      "--json",
-    ], {
-      cwd: workspaceRoot,
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH}`,
-      },
-    });
-
-    assert.equal(result.status, 0, result.stderr);
-    const output = JSON.parse(result.stdout);
-    assert(output.cancellationSignals.some((entry) => entry.signal === "SIGTERM" && entry.pid === child.pid));
-    const close = await closed;
-    assert.equal(close.signal, null);
-    assert.equal(await fileExists(signalPath), true);
-  } finally {
-    if (!child.killed) {
-      child.kill("SIGKILL");
-    }
-    await rm(dataRoot, { recursive: true, force: true });
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(fakeBinDir, { recursive: true, force: true });
-  }
-});
-
-test("cancel uses pid identity checks for initial SIGTERM", { skip: process.platform === "win32" }, async () => {
-  const tempRoot = await realpath(tmpdir());
-  const dataRoot = await mkdtemp(path.join(tempRoot, "supermodels-cancel-identity-data-"));
-  const workspaceRoot = await mkdtemp(path.join(tempRoot, "supermodels-cancel-identity-workspace-"));
-  const signalPath = path.join(workspaceRoot, "signalled.txt");
-  const child = spawn(process.execPath, [
-    "-e",
-    [
-      "const fs = require('node:fs');",
-      `process.on('SIGTERM', () => { fs.writeFileSync(${JSON.stringify(signalPath)}, 'signalled'); process.exit(0); });`,
-      "setInterval(() => {}, 1000);",
-    ].join(" "),
-  ], {
-    cwd: workspaceRoot,
-    stdio: "ignore",
-  });
-  try {
-    const state = createState({ workspaceRoot, dataRoot });
+    const { state, dataRoot, workspaceRoot } = fixture;
     const job = await createJob(state, {
       command: "review",
       mode: "review",
@@ -332,6 +248,8 @@ test("cancel uses pid identity checks for initial SIGTERM", { skip: process.plat
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(result.stdout);
+    assert.deepEqual(output.cancellationSignals, []);
     await assert.rejects(() => access(signalPath), /ENOENT/);
     const reloaded = await readJob(state, job.id);
     assert.equal(reloaded.status, "cancelled");
@@ -339,98 +257,27 @@ test("cancel uses pid identity checks for initial SIGTERM", { skip: process.plat
     if (!child.killed) {
       child.kill("SIGKILL");
     }
-    await rm(dataRoot, { recursive: true, force: true });
-    await rm(workspaceRoot, { recursive: true, force: true });
+    await fixture.cleanup();
   }
 });
 
-test("cancel re-reads job state before SIGKILL escalation", { skip: process.platform === "win32" }, async () => {
+async function createFixture(prefix) {
   const tempRoot = await realpath(tmpdir());
-  const dataRoot = await mkdtemp(path.join(tempRoot, "supermodels-cancel-reread-data-"));
-  const workspaceRoot = await mkdtemp(path.join(tempRoot, "supermodels-cancel-reread-workspace-"));
-  const provider = spawn(process.execPath, [
-    "-e",
-    "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);",
-  ], {
-    cwd: workspaceRoot,
-    stdio: "ignore",
-  });
-  try {
-    const state = createState({ workspaceRoot, dataRoot });
-    const job = await createJob(state, {
-      command: "review",
-      mode: "review",
-      requestedProviders: ["claude"],
-      background: true,
-    });
-    await updateJob(state, job.id, (current) => ({
-      ...current,
-      status: "running",
-      stage: "calling-providers",
-      pid: null,
-    }));
-
-    const scriptPath = path.resolve(import.meta.dirname, "../scripts/supermodels.mjs");
-    const cancel = spawn(process.execPath, [
-      scriptPath,
-      "cancel",
-      job.id,
-      "--data-root",
-      dataRoot,
-      "--json",
-    ], {
-      cwd: workspaceRoot,
-      encoding: "utf8",
-    });
-
-    await waitFor(async () => (await readJob(state, job.id)).status === "cancelled", 1000);
-    writeProviderPid(job, "claude", provider.pid, { pidStartedAt: processStartedAt(provider.pid) });
-
-    const providerClosed = onceClosed(provider);
-    const cancelClosed = await onceClosed(cancel);
-    assert.equal(cancelClosed.code, 0);
-    const close = await providerClosed;
-    assert.equal(close.signal, "SIGKILL");
-  } finally {
-    if (!provider.killed) {
-      provider.kill("SIGKILL");
-    }
-    await rm(dataRoot, { recursive: true, force: true });
-    await rm(workspaceRoot, { recursive: true, force: true });
-  }
-});
+  const dataRoot = await mkdtemp(path.join(tempRoot, `${prefix}data-`));
+  const workspaceRoot = await mkdtemp(path.join(tempRoot, `${prefix}workspace-`));
+  return {
+    dataRoot,
+    workspaceRoot,
+    state: createState({ workspaceRoot, dataRoot }),
+    async cleanup() {
+      await rm(dataRoot, { recursive: true, force: true });
+      await rm(workspaceRoot, { recursive: true, force: true });
+    },
+  };
+}
 
 function onceClosed(child) {
   return new Promise((resolve) => {
     child.once("close", (code, signal) => resolve({ code, signal }));
   });
-}
-
-async function waitFor(predicate, timeoutMs) {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt <= timeoutMs) {
-    if (await predicate()) {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  throw new Error("Timed out waiting for condition.");
-}
-
-async function fileExists(filePath) {
-  try {
-    await access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function processStartedAt(pid) {
-  if (process.platform === "win32") {
-    return "";
-  }
-  return spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
-    encoding: "utf8",
-  }).stdout.trim().replace(/\s+/g, " ");
 }

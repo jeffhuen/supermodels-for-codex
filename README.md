@@ -86,7 +86,7 @@ Use the plugin skills from Codex:
 | `$supermodels:task` | Delegate a bounded task to one provider. |
 | `$supermodels:status` | List jobs or inspect a specific job. |
 | `$supermodels:result` | Read a completed job and artifact paths. |
-| `$supermodels:cancel` | Cancel a background job and signal tracked provider processes. |
+| `$supermodels:cancel` | Cancel a Supermodels background worker job. |
 
 The runtime can also be called directly from the installed plugin cache or from `plugins/supermodels` during development:
 
@@ -125,6 +125,8 @@ Each run stores:
 
 These artifacts are useful for debugging provider behavior and validating final review summaries.
 
+Background cancellation is worker-scoped in v1. Supermodels records provider session IDs and artifacts when the CLIs expose them, but it does not claim provider-native interrupt or provider process ownership.
+
 ## Data and Privacy
 
 Supermodels shells out to local provider CLIs. It does not embed provider API keys, OAuth client secrets, or provider account credentials.
@@ -139,6 +141,8 @@ Version 1 intentionally supports only:
 - Google Antigravity
 
 The runtime caps provider orchestration at two providers. Support for additional agents can be added later, but the current implementation prioritizes a maintainable two-provider review workflow.
+
+Supermodels deliberately stays a broker rather than a process supervisor for provider runtimes. Claude Code and Antigravity own their own auth, session storage, model behavior, and deeper interruption semantics.
 
 ## Development
 

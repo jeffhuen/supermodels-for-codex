@@ -11,4 +11,4 @@ Resolve the plugin root as the directory two levels above this `SKILL.md`. Keep 
 node "$PLUGIN_ROOT/scripts/supermodels.mjs" cancel "$@"
 ```
 
-Requires a job ID. The runtime marks the job cancelled and sends SIGTERM to the tracked background process when available.
+Requires a job ID. The runtime marks the job cancelled and signals the Supermodels background worker when available. Provider CLIs keep ownership of their own native sessions.

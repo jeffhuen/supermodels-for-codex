@@ -22,8 +22,12 @@ export function createClaudeAdapter() {
     label: "Claude Code",
     capabilities: () => ({
       review: true,
+      adversarialReview: true,
       task: true,
+      writeTask: true,
       resume: true,
+      nativeInterrupt: false,
+      background: "worker",
     }),
     check,
     review: runClaudePrompt,
@@ -203,8 +207,6 @@ async function runClaudePrompt(input, options = {}) {
     timeoutMs: options.timeoutMs ?? 20 * 60 * 1000,
     onStart: options.onStart,
     onStdout: (chunk) => streamParser.push(chunk),
-    supervised: true,
-    guardDir: options.promptDir,
   });
   streamParser.end();
   const parsed = parseClaudeOutput(result.stdout);

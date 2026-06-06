@@ -44,7 +44,7 @@ test("cancelJob never signals already terminal jobs", async () => {
     assert.deepEqual(signals, []);
     assert.deepEqual(result.signals, []);
     assert.equal(result.job.status, "completed");
-    assert.match(result.text, /no processes signaled/i);
+    assert.match(result.text, /no worker signaled/i);
     assert.equal((await readJob(state, job.id)).status, "completed");
   } finally {
     await fixture.cleanup();
@@ -84,15 +84,15 @@ test("cancelJob never re-signals already cancelled jobs", async () => {
     assert.deepEqual(signals, []);
     assert.deepEqual(result.signals, []);
     assert.equal(result.job.status, "cancelled");
-    assert.match(result.text, /no processes signaled/i);
+    assert.match(result.text, /no worker signaled/i);
     assert.equal((await readJob(state, job.id)).status, "cancelled");
   } finally {
     await fixture.cleanup();
   }
 });
 
-test("cancelJob gives late-discovered provider pids a graceful signal before force", async () => {
-  const fixture = await createFixture("supermodels-cancellation-late-pid-");
+test("cancelJob signals only the worker pid", async () => {
+  const fixture = await createFixture("supermodels-cancellation-worker-only-");
   try {
     const { state, workspaceRoot, dataRoot } = fixture;
     const job = await createJob(state, {
@@ -104,10 +104,16 @@ test("cancelJob gives late-discovered provider pids a graceful signal before for
       ...current,
       status: "running",
       stage: "calling-providers",
-      pid: 111,
+      pid: process.pid,
+      providerRuns: {
+        claude: {
+          provider: "claude",
+          status: "running",
+          pid: 222,
+        },
+      },
     }));
     const signaled = [];
-    let sleepCount = 0;
 
     const result = await cancelJob({
       state,
@@ -118,35 +124,16 @@ test("cancelJob gives late-discovered provider pids a graceful signal before for
         signaled.push([pid, signal]);
         return true;
       },
-      sleep: async () => {
-        sleepCount += 1;
-        if (sleepCount === 1) {
-          await updateJob(state, job.id, (current) => ({
-            ...current,
-            providerRuns: {
-              ...(current.providerRuns ?? {}),
-              claude: {
-                provider: "claude",
-                status: "running",
-                pid: 222,
-              },
-            },
-          }));
-        }
-      },
+      sleep: async () => {},
     });
 
     assert.deepEqual(signaled, [
-      [111, "SIGTERM"],
-      [222, "SIGTERM"],
-      [111, "SIGKILL"],
-      [222, "SIGKILL"],
+      [process.pid, "SIGTERM"],
+      [process.pid, "SIGKILL"],
     ]);
     assert.deepEqual(result.signals, [
-      { signal: "SIGTERM", pid: 111, phase: "initial" },
-      { signal: "SIGTERM", pid: 222, phase: "late" },
-      { signal: "SIGKILL", pid: 111, phase: "force" },
-      { signal: "SIGKILL", pid: 222, phase: "force" },
+      { signal: "SIGTERM", pid: process.pid, phase: "initial" },
+      { signal: "SIGKILL", pid: process.pid, phase: "force" },
     ]);
     assert.equal((await readJob(state, job.id)).status, "cancelled");
   } finally {
@@ -154,7 +141,7 @@ test("cancelJob gives late-discovered provider pids a graceful signal before for
   }
 });
 
-test("abortLiveJob excludes the foreground orchestrator pid", async () => {
+test("abortLiveJob marks live jobs cancelled without signaling provider metadata pids", async () => {
   const fixture = await createFixture("supermodels-cancellation-live-abort-");
   try {
     const { state } = fixture;
@@ -191,14 +178,8 @@ test("abortLiveJob excludes the foreground orchestrator pid", async () => {
       sleep: async () => {},
     });
 
-    assert.deepEqual(signaled, [
-      [444, "SIGTERM"],
-      [444, "SIGKILL"],
-    ]);
-    assert.deepEqual(result.signals, [
-      { signal: "SIGTERM", pid: 444, phase: "initial" },
-      { signal: "SIGKILL", pid: 444, phase: "force" },
-    ]);
+    assert.deepEqual(signaled, []);
+    assert.deepEqual(result.signals, []);
     const reloaded = await readJob(state, job.id);
     assert.equal(reloaded.status, "cancelled");
     assert.equal(reloaded.cancellation.signal, "SIGINT");
@@ -215,7 +196,7 @@ test("renderCancelResult reports exact signal attempts", () => {
 
   assert.equal(text, [
     "Cancelled Supermodels job job-20260606000000-abcdef",
-    "Processes signaled: SIGTERM 111, SIGKILL 111",
+    "Workers signaled: SIGTERM worker 111, SIGKILL worker 111",
   ].join("\n"));
 });
 

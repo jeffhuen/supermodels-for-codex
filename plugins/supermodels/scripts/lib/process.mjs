@@ -1,12 +1,12 @@
-import { access, chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { constants } from "node:fs";
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SUPERVISOR_PATH = path.join(__dirname, "process-supervisor.mjs");
+const execFileAsync = promisify(execFile);
 
 export async function findExecutable(bin, options = {}) {
   const env = options.env ?? process.env;
@@ -30,58 +30,7 @@ export async function findExecutable(bin, options = {}) {
 }
 
 export async function runCommand(command, options = {}) {
-  if (options.supervised) {
-    return await runSupervisedCommand(command, options);
-  }
   return await runSpawnedCommand(command, options);
-}
-
-async function runSupervisedCommand(command, options = {}) {
-  const guardRoot = options.guardDir ? path.resolve(options.guardDir) : os.tmpdir();
-  await mkdir(guardRoot, { recursive: true, mode: 0o700 });
-  const guardDir = await mkdtemp(path.join(guardRoot, ".supermodels-supervisor-"));
-  await chmod(guardDir, 0o700);
-  const armPath = path.join(guardDir, "armed");
-  const abortPath = path.join(guardDir, "abort");
-  const specPath = path.join(guardDir, "spec.json");
-  await writeFile(specPath, `${JSON.stringify({
-    command,
-    cwd: options.cwd ?? process.cwd(),
-    armPath,
-    abortPath,
-  })}\n`, { mode: 0o600 });
-
-  let startAccepted = true;
-  try {
-    return await runSpawnedCommand({
-      bin: process.execPath,
-      args: [SUPERVISOR_PATH, specPath],
-    }, {
-      ...options,
-      onStart: (start) => {
-        startAccepted = options.onStart?.(start) !== false;
-        if (startAccepted) {
-          writeFile(armPath, "armed\n", { mode: 0o600 }).catch(() => {});
-        } else {
-          writeFile(abortPath, "abort\n", { mode: 0o600 }).catch(() => {});
-        }
-      },
-      onStderr: options.onStderr,
-      onStdout: options.onStdout,
-      timeoutMs: options.timeoutMs,
-    }).then((result) => {
-      if (!startAccepted && !result.stderr) {
-        return {
-          ...result,
-          exitCode: result.exitCode || 127,
-          stderr: "Provider supervisor PID was not recorded; provider was not started.",
-        };
-      }
-      return result;
-    });
-  } finally {
-    await rm(guardDir, { recursive: true, force: true });
-  }
 }
 
 async function runSpawnedCommand(command, options = {}) {
@@ -113,6 +62,12 @@ async function runSpawnedCommand(command, options = {}) {
       killTimer = setTimeout(() => signalProcessTree(child.pid, "SIGKILL"), 1500);
       killTimer.unref();
     }, timeoutMs);
+    const signalHandlers = installForwardSignalHandlers(child);
+    const cleanup = () => {
+      clearTimeout(timer);
+      clearTimeout(killTimer);
+      signalHandlers.cleanup();
+    };
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -129,8 +84,7 @@ async function runSpawnedCommand(command, options = {}) {
     });
 
     child.on("error", (error) => {
-      clearTimeout(timer);
-      clearTimeout(killTimer);
+      cleanup();
       resolve({
         exitCode: 127,
         stdout,
@@ -141,8 +95,7 @@ async function runSpawnedCommand(command, options = {}) {
     });
 
     child.on("close", (exitCode, signal) => {
-      clearTimeout(timer);
-      clearTimeout(killTimer);
+      cleanup();
       resolve({
         exitCode,
         signal,
@@ -165,6 +118,25 @@ async function runSpawnedCommand(command, options = {}) {
       child.stdin.destroy();
     }
   });
+}
+
+function installForwardSignalHandlers(child) {
+  const forward = (signal) => {
+    if (!child.pid) {
+      return;
+    }
+    signalProcessTree(child.pid, signal);
+  };
+  const onSigint = () => forward("SIGINT");
+  const onSigterm = () => forward("SIGTERM");
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
+  return {
+    cleanup() {
+      process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
+    },
+  };
 }
 
 export function commandLine(command) {
@@ -190,5 +162,29 @@ export function signalProcessTree(pid, signal = "SIGTERM") {
     return true;
   } catch {
     return false;
+  }
+}
+
+export async function processStartedAt(pid) {
+  if (!Number.isFinite(Number(pid)) || Number(pid) <= 0 || process.platform === "win32") {
+    return "";
+  }
+  try {
+    const { stdout } = await execFileAsync("ps", ["-o", "lstart=", "-p", String(pid)], { timeout: 1000 });
+    return stdout.trim().replace(/\s+/g, " ");
+  } catch {
+    return "";
+  }
+}
+
+export function isProcessAlive(pid) {
+  if (!Number.isFinite(Number(pid)) || Number(pid) <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
   }
 }

@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  checkProviders,
   createSerializedWriteQueue,
   getStatus,
   markCancelled,
@@ -13,6 +14,7 @@ import {
   runReview,
   runTask,
   selectProviders,
+  setupProviders,
   synthesizeProviderResults,
 } from "../scripts/lib/runtime.mjs";
 import { createJob, createState, jobPath, listJobs, updateJob } from "../scripts/lib/state.mjs";
@@ -92,6 +94,68 @@ test("selectProviders skips unavailable providers for explicit multi-provider re
   assert.deepEqual(selected.skipped.map((item) => item.provider), ["antigravity"]);
 });
 
+test("checkProviders reports provider capabilities without lifecycle ownership claims", async () => {
+  const output = await checkProviders({
+    claude: {
+      async check() {
+        return { provider: "claude", ready: true };
+      },
+      capabilities() {
+        return {
+          review: true,
+          task: true,
+          resume: true,
+          nativeInterrupt: false,
+          background: "worker",
+        };
+      },
+    },
+  });
+
+  assert.deepEqual(output.claude.capabilities, {
+    review: true,
+    task: true,
+    resume: true,
+    nativeInterrupt: false,
+    background: "worker",
+  });
+});
+
+test("setupProviders reports the same provider capabilities as readiness checks", async () => {
+  const output = await setupProviders({
+    antigravity: {
+      async setup() {
+        return { ready: true, changed: false };
+      },
+      async check() {
+        return { provider: "antigravity", ready: true };
+      },
+      capabilities() {
+        return {
+          review: true,
+          adversarialReview: true,
+          task: true,
+          writeTask: true,
+          resume: true,
+          nativeInterrupt: false,
+          background: "worker",
+        };
+      },
+    },
+  });
+
+  assert.equal(output.antigravity.setup.ready, true);
+  assert.deepEqual(output.antigravity.check.capabilities, {
+    review: true,
+    adversarialReview: true,
+    task: true,
+    writeTask: true,
+    resume: true,
+    nativeInterrupt: false,
+    background: "worker",
+  });
+});
+
 test("normalizeProviderResult conservatively preserves raw output", () => {
   const normalized = normalizeProviderResult({
     provider: "claude",
@@ -136,6 +200,49 @@ test("normalizeProviderResult prefers schema-validated structured review output"
   assert.equal(normalized.summary, "Structured issue.");
   assert.equal(normalized.findings[0].title, "Race condition");
   assert.equal(normalized.findings[0].file, "state.mjs");
+});
+
+test("normalizeProviderResult prefers the last schema-valid JSON object in resumed output", () => {
+  const previous = {
+    verdict: "clean",
+    summary: "Previous conversation output.",
+    findings: [],
+    assumptions: [],
+    verification_gaps: [],
+  };
+  const current = {
+    verdict: "needs-attention",
+    summary: "Current review output.",
+    findings: [
+      {
+        severity: "high",
+        title: "Current finding",
+        evidence: "The last JSON object is the active review.",
+        impact: "Using the first object can hide current findings.",
+        recommendation: "Parse candidate JSON objects from the end.",
+        file: "plugins/supermodels/scripts/lib/review-schema.mjs",
+        line_start: 186,
+        line_end: 202,
+        confidence: "high",
+      },
+    ],
+    assumptions: [],
+    verification_gaps: [],
+  };
+
+  const normalized = normalizeProviderResult({
+    provider: "antigravity",
+    rawText: [
+      JSON.stringify(previous),
+      "resumed conversation continued",
+      JSON.stringify(current),
+    ].join("\n"),
+    requireStructured: true,
+  });
+
+  assert.equal(normalized.verdict, "needs-attention");
+  assert.equal(normalized.summary, "Current review output.");
+  assert.equal(normalized.findings[0].title, "Current finding");
 });
 
 test("normalizeProviderResult preserves structured findings with unknown severities", () => {
@@ -828,7 +935,7 @@ test("markCancelled does not overwrite terminal jobs", async () => {
   }
 });
 
-test("getStatus marks running jobs failed when stored process pids are dead", async () => {
+test("getStatus marks running jobs failed when stored worker pid is dead", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-dead-pid-"));
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-dead-pid-workspace-"));
   try {
@@ -919,9 +1026,9 @@ test("getStatus does not fail live jobs when ps lookup is temporarily unavailabl
   }
 });
 
-test("getStatus does not trust a live reused provider pid with a mismatched start signature", async () => {
-  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-reused-provider-pid-"));
-  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-reused-provider-pid-workspace-"));
+test("getStatus ignores provider metadata pids when no worker pid is recorded", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-provider-pid-ignored-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-provider-pid-ignored-workspace-"));
   try {
     const state = createState({ workspaceRoot, dataRoot });
     const job = await createJob(state, {
@@ -947,8 +1054,7 @@ test("getStatus does not trust a live reused provider pid with a mismatched star
 
     const status = await getStatus({ workspaceRoot, dataRoot, jobId: job.id });
 
-    assert.equal(status.status, "failed");
-    assert.match(status.error, /no longer running/i);
+    assert.equal(status.status, "running");
   } finally {
     await rm(dataRoot, { recursive: true, force: true });
     await rm(workspaceRoot, { recursive: true, force: true });

@@ -421,9 +421,6 @@ async function handleLiveAbort({ state, jobId, signal }) {
     state,
     jobId,
     signal,
-    currentPid: process.pid,
-    signaler: signalProcessTree,
-    sleep,
   });
 }
 

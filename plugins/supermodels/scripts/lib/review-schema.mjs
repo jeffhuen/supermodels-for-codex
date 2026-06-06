@@ -185,26 +185,22 @@ function normalizeLine(value) {
 
 function structuredJsonCandidates(text) {
   const candidates = [text];
+  const fenced = [];
   for (const match of text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) {
-    candidates.push(match[1].trim());
+    fenced.push(match[1].trim());
   }
-  const object = extractFirstJsonObject(text);
-  if (object) {
-    candidates.push(object);
-  }
+  candidates.push(...fenced.reverse());
+  candidates.push(...extractJsonObjects(text).reverse());
   return [...new Set(candidates.filter(Boolean))];
 }
 
-function extractFirstJsonObject(text) {
-  const start = text.indexOf("{");
-  if (start < 0) {
-    return "";
-  }
-
+function extractJsonObjects(text) {
+  const objects = [];
   let depth = 0;
   let inString = false;
   let escaping = false;
-  for (let index = start; index < text.length; index += 1) {
+  let start = -1;
+  for (let index = 0; index < text.length; index += 1) {
     const character = text[index];
     if (escaping) {
       escaping = false;
@@ -222,13 +218,17 @@ function extractFirstJsonObject(text) {
       continue;
     }
     if (character === "{") {
+      if (depth === 0) {
+        start = index;
+      }
       depth += 1;
     } else if (character === "}") {
       depth -= 1;
-      if (depth === 0) {
-        return text.slice(start, index + 1);
+      if (depth === 0 && start >= 0) {
+        objects.push(text.slice(start, index + 1));
+        start = -1;
       }
     }
   }
-  return "";
+  return objects;
 }
