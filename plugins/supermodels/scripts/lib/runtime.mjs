@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 
 import { collectGitContext } from "./git.mjs";
-import { commandLine, isProcessAlive, processStartedAt } from "./process.mjs";
+import { commandLine, isProcessAlive, processStartedAt, processStartedAtLookup } from "./process.mjs";
 import { renderReviewPrompt, renderTaskPrompt } from "./prompts.mjs";
 import { createRunController, signalExitCode } from "./run-control.mjs";
 import {
@@ -884,11 +884,11 @@ async function jobHasLiveWorker(job) {
     return false;
   }
   if (job.pidStartedAt) {
-    const observedStartedAt = await processStartedAt(pid);
-    if (observedStartedAt === job.pidStartedAt) {
+    const lookup = await processStartedAtLookup(pid);
+    if (lookup.startedAt === job.pidStartedAt) {
       return true;
     }
-    if (!observedStartedAt && isProcessAlive(pid)) {
+    if (!lookup.startedAt && lookup.unavailable && isProcessAlive(pid)) {
       return true;
     }
     return false;

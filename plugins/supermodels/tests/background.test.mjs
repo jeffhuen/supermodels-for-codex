@@ -5,31 +5,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { buildBackgroundChildArgs, markBackgroundJobRunning } from "../scripts/lib/background.mjs";
 import { createJob, createState, readJob, updateJob } from "../scripts/lib/state.mjs";
 
-test("background child args preserve dash-leading focus text behind passthrough separator", () => {
-  const args = buildBackgroundChildArgs({
-    scriptPath: "/plugin/scripts/supermodels.mjs",
-    command: "review",
-    options: {
-      background: true,
-      "job-id": "job-123",
-    },
-    positionals: ["--literal-focus"],
-  });
-
-  assert.deepEqual(args, [
-    "/plugin/scripts/supermodels.mjs",
-    "review",
-    "--job-id",
-    "job-123",
-    "--",
-    "--literal-focus",
-  ]);
-});
-
-test("background child failures mark the persisted job failed", async () => {
+test("worker failures mark the persisted job failed", async () => {
   const fixture = await createFixture("supermodels-background-failure-");
   try {
     const { state, dataRoot, workspaceRoot } = fixture;
@@ -37,6 +15,13 @@ test("background child failures mark the persisted job failed", async () => {
       command: "review",
       mode: "review",
       requestedProviders: ["grok"],
+      providerSelection: {
+        explicit: true,
+        requested: ["grok"],
+      },
+      options: {
+        "data-root": dataRoot,
+      },
       background: true,
     });
     await updateJob(state, job.id, (current) => ({
@@ -48,13 +33,11 @@ test("background child failures mark the persisted job failed", async () => {
     const scriptPath = path.resolve(import.meta.dirname, "../scripts/supermodels.mjs");
     const result = spawnSync(process.execPath, [
       scriptPath,
-      "review",
+      "worker",
       "--job-id",
       job.id,
       "--data-root",
       dataRoot,
-      "--provider",
-      "grok",
     ], {
       cwd: workspaceRoot,
       encoding: "utf8",
@@ -65,30 +48,15 @@ test("background child failures mark the persisted job failed", async () => {
     });
 
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /unsupported provider/i);
+    assert.match(result.stderr, /Provider 'grok' is not ready/i);
 
     const reloaded = await readJob(state, job.id);
     assert.equal(reloaded.status, "failed");
     assert.equal(reloaded.stage, "failed");
-    assert.match(reloaded.error, /unsupported provider/i);
+    assert.match(reloaded.error, /Provider 'grok' is not ready/i);
   } finally {
     await fixture.cleanup();
   }
-});
-
-test("background parent running update does not overwrite terminal child status", () => {
-  const failed = {
-    id: "job-20260605235900-abcdef",
-    status: "failed",
-    stage: "failed",
-    pid: 111,
-  };
-
-  const next = markBackgroundJobRunning(failed, 222);
-
-  assert.strictEqual(next, failed);
-  assert.equal(next.status, "failed");
-  assert.equal(next.pid, 111);
 });
 
 test("cancel escalates to SIGKILL when a worker ignores SIGTERM", { skip: process.platform === "win32" }, async () => {

@@ -86,7 +86,7 @@ Use the plugin skills from Codex:
 | `$supermodels:task` | Delegate a bounded task to one provider. |
 | `$supermodels:status` | List jobs or inspect a specific job. |
 | `$supermodels:result` | Read a completed job and artifact paths. |
-| `$supermodels:cancel` | Cancel a Supermodels background worker job. |
+| `$supermodels:cancel` | Cancel a queued or running Supermodels worker job. |
 
 The runtime can also be called directly from the installed plugin cache or from `plugins/supermodels` during development:
 
@@ -127,7 +127,7 @@ Each run stores:
 
 These artifacts are useful for debugging provider behavior and validating final review summaries.
 
-Background cancellation is worker-scoped in v1. Supermodels owns the worker process and the direct provider child process it starts for the duration of a job. It records provider session IDs and artifacts when the CLIs expose them, but it does not claim provider-native interrupt or durable provider session ownership.
+All review and task execution modes run through a dedicated Supermodels worker process. Foreground and live commands wait on that worker, while background commands return the job id immediately. Cancellation is worker-scoped in v1: Supermodels owns the worker process and the direct provider child process it starts for the duration of a job. It records provider session IDs and artifacts when the CLIs expose them, but it does not claim provider-native interrupt or durable provider session ownership.
 
 ## Data and Privacy
 

@@ -119,7 +119,7 @@ async function workerIdentityMatches(job) {
   if (observedStartedAt) {
     return observedStartedAt === job.pidStartedAt;
   }
-  return isProcessAlive(pid);
+  return false;
 }
 
 function defaultSleep(ms) {

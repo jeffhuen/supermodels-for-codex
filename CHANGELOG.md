@@ -21,6 +21,7 @@ Initial public release.
 - Already-terminal jobs, including already-cancelled jobs, are treated as no-ops and are not signaled again.
 - Signal finalization preserves already-terminal jobs instead of rewriting them to cancelled.
 - Centralized worker cancellation lifecycle handling, with contract tests plus process-level signal regression coverage.
+- Foreground, live, and background review/task paths now all execute through the same persisted worker lifecycle instead of mixing direct CLI execution with detached background children.
 
 ### Scope
 

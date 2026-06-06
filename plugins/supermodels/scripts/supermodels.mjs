@@ -1,11 +1,19 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { parseRuntimeArgs, resolveProviderIds } from "./lib/args.mjs";
-import { buildBackgroundChildArgs, markBackgroundJobRunning } from "./lib/background.mjs";
 import { cancelJob } from "./lib/cancellation.mjs";
+import {
+  buildReviewRequest,
+  buildTaskRequest,
+  installWorkerCancelHandlers,
+  outputFromJob,
+  runStoredWorkerJob,
+  startWorkerJob,
+  waitForWorker,
+} from "./lib/job-lifecycle.mjs";
 import { findExecutable, signalProcessTree } from "./lib/process.mjs";
+import { signalExitCode } from "./lib/run-control.mjs";
 import {
   checkProviders,
   getStatus,
@@ -47,6 +55,9 @@ async function main(argv = process.argv.slice(2)) {
       return;
     case "task":
       await handleTask(parsed);
+      return;
+    case "worker":
+      await handleWorker(parsed);
       return;
     case "status":
       await handleStatus(parsed);
@@ -113,6 +124,14 @@ async function handleProviders(parsed) {
 async function handleReview(parsed) {
   const providerSelection = resolveProviderIds(parsed.options);
   const focus = parsed.positionals.join(" ").trim();
+  const request = buildReviewRequest({
+    command: parsed.command,
+    options: parsed.options,
+    providerSelection,
+    focus,
+    live: parsed.options.live,
+    background: parsed.options.background,
+  });
 
   if (parsed.options.live && parsed.options.background) {
     throw new Error("Use either --live or --background, not both.");
@@ -121,23 +140,16 @@ async function handleReview(parsed) {
     throw new Error("--live cannot be combined with --json.");
   }
   if (parsed.options.live) {
-    const output = await runLiveReview({
+    const output = await runLiveWorkerJob({
       parsed,
-      providerSelection,
-      focus,
+      request,
     });
     writeOutput(parsed, output, renderHumanResult(output));
     return;
   }
 
   if (parsed.options.background) {
-    const job = await startBackgroundJob({
-      command: parsed.command,
-      options: parsed.options,
-      positionals: parsed.positionals,
-      providerSelection,
-      payload: { focus },
-    });
+    const job = await startBackgroundWorkerJob({ parsed, request });
     writeOutput(parsed, job, [
       `Started Supermodels background job ${job.id}`,
       `Requested providers: ${providerSelection.requested.join(", ")}`,
@@ -147,56 +159,53 @@ async function handleReview(parsed) {
     return;
   }
 
-  const output = await runReview({
-    adapters,
-    providerSelection,
-    mode: parsed.command,
-    options: parsed.options,
-    focus,
-    workspaceRoot: process.cwd(),
-  });
+  const output = await runForegroundWorkerJob({ parsed, request });
   writeOutput(parsed, output, renderHumanResult(output));
 }
 
-async function runLiveReview({ parsed, providerSelection, focus }) {
+async function runLiveWorkerJob({ parsed, request }) {
   const workspaceRoot = process.cwd();
-  const state = createState({
+  const dataRoot = parsed.options["data-root"];
+  const { state, job, child } = await startWorkerJob({
+    scriptPath: SCRIPT_PATH,
     workspaceRoot,
-    dataRoot: parsed.options["data-root"],
-  });
-  const job = await createJob(state, {
-    command: parsed.command,
-    mode: parsed.command,
-    requestedProviders: providerSelection.requested,
-    background: false,
-    live: true,
-    focus,
+    dataRoot,
+    request,
   });
   writeText(`Started Supermodels live ${parsed.command} ${job.id}\n`);
 
-  const runPromise = runReview({
-    adapters,
-    providerSelection,
-    mode: parsed.command,
-    options: {
-      ...parsed.options,
-      background: false,
-      live: false,
-      "job-id": job.id,
-    },
-    focus,
-    workspaceRoot,
-  });
-
-  await watchLiveProgress({
+  let exitCodeFromSignal = null;
+  const cleanup = installWorkerCancelHandlers({
     state,
+    workspaceRoot,
+    dataRoot,
     jobId: job.id,
-    runPromise,
-    intervalMs: Math.max(1, Number(parsed.options.interval || 5)) * 1000,
-    heartbeatMs: 60 * 1000,
+    signaler: signalProcessTree,
+    sleep,
+    onSignal: (signal) => {
+      exitCodeFromSignal = signalExitCode(signal);
+      process.exitCode = exitCodeFromSignal;
+    },
   });
+  const runPromise = waitForWorker(child);
 
-  return await runPromise;
+  try {
+    await watchLiveProgress({
+      state,
+      jobId: job.id,
+      runPromise,
+      intervalMs: Math.max(1, Number(parsed.options.interval || 5)) * 1000,
+      heartbeatMs: 60 * 1000,
+    });
+  } finally {
+    cleanup();
+  }
+
+  const close = await runPromise;
+  if (!exitCodeFromSignal && close.code) {
+    process.exitCode = close.code;
+  }
+  return outputFromJob(await getStatus({ workspaceRoot, dataRoot, jobId: job.id }));
 }
 
 async function handleTask(parsed) {
@@ -208,15 +217,15 @@ async function handleTask(parsed) {
   if (parsed.options.write && providerSelection.requested.length > 1) {
     throw new Error("Refusing multi-provider --write task in v1. Pick --provider claude or --provider antigravity.");
   }
+  const request = buildTaskRequest({
+    options: parsed.options,
+    providerSelection,
+    task,
+    background: parsed.options.background,
+  });
 
   if (parsed.options.background) {
-    const job = await startBackgroundJob({
-      command: "task",
-      options: parsed.options,
-      positionals: parsed.positionals,
-      providerSelection,
-      payload: { task },
-    });
+    const job = await startBackgroundWorkerJob({ parsed, request });
     writeOutput(parsed, job, [
       `Started Supermodels background job ${job.id}`,
       `Requested providers: ${providerSelection.requested.join(", ")}`,
@@ -226,14 +235,23 @@ async function handleTask(parsed) {
     return;
   }
 
-  const output = await runTask({
-    adapters,
-    providerSelection,
-    options: parsed.options,
-    task,
-    workspaceRoot: process.cwd(),
-  });
+  const output = await runForegroundWorkerJob({ parsed, request });
   writeOutput(parsed, output, renderHumanResult(output));
+}
+
+async function handleWorker(parsed) {
+  const jobId = parsed.options["job-id"];
+  if (!jobId) {
+    throw new Error("worker requires --job-id.");
+  }
+  await runStoredWorkerJob({
+    adapters,
+    workspaceRoot: process.env.SUPERMODELS_WORKSPACE_ROOT || process.cwd(),
+    dataRoot: parsed.options["data-root"],
+    jobId,
+    runReview,
+    runTask,
+  });
 }
 
 async function handleStatus(parsed) {
@@ -354,36 +372,48 @@ async function handleCancel(parsed) {
   writeOutput(parsed, result.job, result.text);
 }
 
-async function startBackgroundJob(input) {
-  const state = createState({
-    workspaceRoot: process.cwd(),
-    dataRoot: input.options["data-root"],
-  });
-  const job = await createJob(state, {
-    command: input.command,
-    mode: input.command,
-    requestedProviders: input.providerSelection.requested,
-    background: true,
-    ...input.payload,
-  });
-  const childArgs = buildBackgroundChildArgs({
+async function runForegroundWorkerJob({ parsed, request }) {
+  const workspaceRoot = process.cwd();
+  const dataRoot = parsed.options["data-root"];
+  const { state, job, child } = await startWorkerJob({
     scriptPath: SCRIPT_PATH,
-    command: input.command,
-    options: input.options,
+    workspaceRoot,
+    dataRoot,
+    request,
+  });
+  let exitCodeFromSignal = null;
+  const cleanup = installWorkerCancelHandlers({
+    state,
+    workspaceRoot,
+    dataRoot,
     jobId: job.id,
-    positionals: input.positionals,
-  });
-  const child = spawn(process.execPath, childArgs, {
-    cwd: process.cwd(),
-    detached: true,
-    env: {
-      ...process.env,
-      SUPERMODELS_WORKSPACE_ROOT: state.workspaceRoot,
+    signaler: signalProcessTree,
+    sleep,
+    onSignal: (signal) => {
+      exitCodeFromSignal = signalExitCode(signal);
+      process.exitCode = exitCodeFromSignal;
     },
-    stdio: "ignore",
   });
-  child.unref();
-  return await updateJob(state, job.id, (current) => markBackgroundJobRunning(current, child.pid));
+  try {
+    const close = await waitForWorker(child);
+    if (!exitCodeFromSignal && close.code) {
+      process.exitCode = close.code;
+    }
+  } finally {
+    cleanup();
+  }
+  return outputFromJob(await getStatus({ workspaceRoot, dataRoot, jobId: job.id }));
+}
+
+async function startBackgroundWorkerJob({ parsed, request }) {
+  const { job } = await startWorkerJob({
+    scriptPath: SCRIPT_PATH,
+    workspaceRoot: process.cwd(),
+    dataRoot: parsed.options["data-root"],
+    request,
+    unref: true,
+  });
+  return job;
 }
 
 function renderSetup(output) {

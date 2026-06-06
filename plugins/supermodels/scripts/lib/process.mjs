@@ -172,14 +172,18 @@ export function signalProcessTree(pid, signal = "SIGTERM") {
 }
 
 export async function processStartedAt(pid) {
+  return (await processStartedAtLookup(pid)).startedAt;
+}
+
+export async function processStartedAtLookup(pid) {
   if (!Number.isFinite(Number(pid)) || Number(pid) <= 0 || process.platform === "win32") {
-    return "";
+    return { startedAt: "", unavailable: true };
   }
   try {
     const { stdout } = await execFileAsync("ps", ["-o", "lstart=", "-p", String(pid)], { timeout: 1000 });
-    return stdout.trim().replace(/\s+/g, " ");
-  } catch {
-    return "";
+    return { startedAt: stdout.trim().replace(/\s+/g, " "), unavailable: false };
+  } catch (error) {
+    return { startedAt: "", unavailable: error?.code === "ENOENT" };
   }
 }
 

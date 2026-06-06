@@ -49,7 +49,7 @@ Job state and provider artifacts are stored outside the repository under the Cod
 
 The plugin does not embed provider API keys or OAuth secrets. Provider CLIs use their own local auth and session storage.
 
-Background cancellation is scoped to the Supermodels worker process. The worker forwards termination to the direct provider child process it starts, but the plugin does not claim provider-native interrupt or durable provider session ownership.
+All review and task execution modes run through a dedicated Supermodels worker process. Foreground and live commands wait on that worker, while background commands return the job id immediately. Cancellation is worker-scoped in v1. The worker forwards termination to the direct provider child process it starts, but the plugin does not claim provider-native interrupt or durable provider session ownership.
 
 Antigravity write tasks use the installed `agy` CLI's native default write behavior. Use `--write --provider antigravity` only when that native CLI permission model is acceptable.
 
