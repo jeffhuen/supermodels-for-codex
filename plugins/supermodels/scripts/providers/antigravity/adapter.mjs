@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -172,9 +172,10 @@ async function writePromptFile(prompt, options = {}) {
   const promptDir = options.promptDir
     ? path.resolve(options.promptDir)
     : path.join(os.tmpdir(), "supermodels-prompts");
-  await mkdir(promptDir, { recursive: true });
+  await mkdir(promptDir, { recursive: true, mode: 0o700 });
+  await chmod(promptDir, 0o700).catch(() => {});
   const promptPath = path.join(promptDir, "provider-antigravity.prompt.md");
-  await writeFile(promptPath, String(prompt ?? ""));
+  await writeFile(promptPath, String(prompt ?? ""), { mode: 0o600 });
   return promptPath;
 }
 

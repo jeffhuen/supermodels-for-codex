@@ -353,6 +353,8 @@ async function handleCancel(parsed) {
     dataRoot: parsed.options["data-root"],
     jobId,
   });
+  await sleep(1500);
+  signalJobProcesses(job, { signal: "SIGKILL", signaler: signalProcessTree });
   writeOutput(parsed, output, `Cancelled Supermodels job ${jobId}`);
 }
 
@@ -430,6 +432,10 @@ async function handleLiveAbort({ state, jobId, signal }) {
       at: new Date().toISOString(),
     },
   })).catch(() => null);
+  if (job) {
+    await sleep(1500);
+    signalJobProcesses(job, { signal: "SIGKILL", signaler: signalProcessTree });
+  }
 }
 
 function renderSetup(output) {

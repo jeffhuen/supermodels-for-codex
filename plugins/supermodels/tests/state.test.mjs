@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, open, readFile, readdir, rm, unlink, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, readdir, rm, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -49,9 +49,17 @@ test("state stores jobs and provider artifacts outside the repo", async () => {
     const reloaded = await readJob(state, job.id);
     assert.equal(reloaded.providerRuns.claude.status, "completed");
     assert.equal(reloaded.providerRuns.claude.normalized.verdict, "needs-attention");
+    assert.equal((await stat(state.root)).mode & 0o777, 0o700);
+    assert.equal((await stat(state.jobsDir)).mode & 0o777, 0o700);
+    assert.equal((await stat(state.runsDir)).mode & 0o777, 0o700);
+    assert.equal((await stat(job.dir)).mode & 0o777, 0o700);
+    assert.equal((await stat(jobPath(state, job.id))).mode & 0o777, 0o600);
 
     const rawText = await readFile(reloaded.providerRuns.claude.rawResultPath, "utf8");
     assert.equal(rawText, "raw review");
+    assert.equal((await stat(reloaded.providerRuns.claude.rawResultPath)).mode & 0o777, 0o600);
+    assert.equal((await stat(reloaded.providerRuns.claude.stderrPath)).mode & 0o777, 0o600);
+    assert.equal((await stat(reloaded.providerRuns.claude.normalizedResultPath)).mode & 0o777, 0o600);
 
     const jobs = await listJobs(state);
     assert.equal(jobs.length, 1);

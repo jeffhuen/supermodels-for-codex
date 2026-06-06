@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -335,6 +335,8 @@ test("runAntigravityPrompt defaults reviews to native CLI and writes prompt file
     const promptPath = record.argv[1].match(/exactly: (.+)$/)?.[1];
     assert(promptPath);
     assert.equal(await readFile(promptPath, "utf8"), "SENTINEL_SUPERMODELS_PROMPT");
+    assert.equal((await stat(tempDir)).mode & 0o777, 0o700);
+    assert.equal((await stat(promptPath)).mode & 0o777, 0o600);
     assert(!record.argv.includes("SENTINEL_SUPERMODELS_PROMPT"));
   } finally {
     await rm(tempDir, { recursive: true, force: true });

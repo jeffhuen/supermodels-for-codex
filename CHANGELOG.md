@@ -15,6 +15,8 @@ Initial public release.
 - Job state locking, stale lock recovery, cancellation terminality, PID identity checks, and provider process signaling.
 - Provider process supervisor handshake so provider CLIs do not start until a signalable supervisor PID has been recorded.
 - Private supervisor handoff files that avoid serialized env/prompt leakage and are removed after provider startup.
+- Private state/run artifacts and Antigravity prompt artifacts using `0700` directories and `0600` files.
+- Cancel escalation from `SIGTERM` to `SIGKILL` for provider processes that ignore graceful termination.
 
 ### Scope
 

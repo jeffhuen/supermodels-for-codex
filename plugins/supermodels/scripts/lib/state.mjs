@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { mkdir, open, readFile, readdir, rename, stat, unlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, readdir, rename, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -36,15 +36,16 @@ export function validateJobId(jobId) {
 }
 
 export async function ensureState(state) {
-  await mkdir(state.jobsDir, { recursive: true });
-  await mkdir(state.runsDir, { recursive: true });
+  await ensurePrivateDir(state.root);
+  await ensurePrivateDir(state.jobsDir);
+  await ensurePrivateDir(state.runsDir);
 }
 
 export async function createJob(state, request) {
   await ensureState(state);
   const id = `job-${timestampId()}-${crypto.randomBytes(3).toString("hex")}`;
   const dir = path.join(state.runsDir, id);
-  await mkdir(dir, { recursive: true });
+  await ensurePrivateDir(dir);
   const now = new Date().toISOString();
   const job = {
     id,
@@ -112,7 +113,7 @@ export async function writeProviderResult(state, jobId, result) {
   const safeJobId = validateJobId(jobId);
   const provider = result.provider;
   const runDir = path.join(state.runsDir, safeJobId);
-  await mkdir(runDir, { recursive: true });
+  await ensurePrivateDir(runDir);
 
   const rawResultPath = path.join(runDir, `provider-${provider}.raw.txt`);
   const normalizedResultPath = path.join(runDir, `provider-${provider}.normalized.json`);
@@ -124,8 +125,8 @@ export async function writeProviderResult(state, jobId, result) {
     raw_result_path: rawResultPath,
   };
 
-  await writeFile(rawResultPath, result.rawText ?? "");
-  await writeFile(stderrPath, result.stderr ?? "");
+  await writeFile(rawResultPath, result.rawText ?? "", { mode: 0o600 });
+  await writeFile(stderrPath, result.stderr ?? "", { mode: 0o600 });
   await writeFileAtomic(normalizedResultPath, `${JSON.stringify(normalized, null, 2)}\n`);
 
   return await updateJob(state, jobId, (job) => {
@@ -215,12 +216,17 @@ function timestampId() {
 export async function writeFileAtomic(finalPath, payload) {
   const tempPath = `${finalPath}.${process.pid}.${Date.now().toString(36)}.${crypto.randomBytes(3).toString("hex")}.tmp`;
   try {
-    await writeFile(tempPath, payload);
+    await writeFile(tempPath, payload, { mode: 0o600 });
     await rename(tempPath, finalPath);
   } catch (error) {
     await unlink(tempPath).catch(() => {});
     throw error;
   }
+}
+
+async function ensurePrivateDir(dirPath) {
+  await mkdir(dirPath, { recursive: true, mode: 0o700 });
+  await chmod(dirPath, 0o700).catch(() => {});
 }
 
 function isJobRecord(job) {

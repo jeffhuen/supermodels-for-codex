@@ -771,7 +771,7 @@ async function markJobFailedDirectly(state, jobId, message, writeError) {
     // This is the last-ditch failure path. If the directory cannot create temp
     // files but the existing job file is still writable, prefer recording the
     // failure over leaving a running job behind.
-    await writeFile(filePath, payload);
+    await writeFile(filePath, payload, { mode: 0o600 });
   }
 }
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -1097,7 +1097,8 @@ test("runTask marks foreground jobs failed when an internal state write fails", 
           path: "/tmp/claude",
         }),
         task: async () => {
-          await chmod(state.jobsDir, 0o500);
+          const [job] = await listJobs(state);
+          await mkdir(`${jobPath(state, job.id)}.lock`);
           return {
             exitCode: 0,
             rawText: "Task completed.",
@@ -1124,14 +1125,13 @@ test("runTask marks foreground jobs failed when an internal state write fails", 
         task: "trigger state write failure",
         workspaceRoot,
       }),
-      /EACCES|permission denied/i,
+      /EPERM|EISDIR|illegal operation/i,
     );
 
-    await chmod(state.jobsDir, 0o700);
     const [job] = await listJobs(state);
     assert.equal(job.status, "failed");
     assert.equal(job.stage, "failed");
-    assert.match(job.error, /EACCES|permission denied/i);
+    assert.match(job.error, /EPERM|EISDIR|illegal operation/i);
   } finally {
     await chmod(state.jobsDir, 0o700).catch(() => {});
     await rm(dataRoot, { recursive: true, force: true });
