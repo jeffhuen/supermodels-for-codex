@@ -7,17 +7,27 @@ export const CANCEL_LATE_GRACE_MS = 250;
 const TERMINAL_STATUSES = new Set(["cancelled", "completed", "partial", "failed"]);
 
 export async function markCancelled({ workspaceRoot, dataRoot, jobId }) {
+  return (await transitionToCancelled({ workspaceRoot, dataRoot, jobId })).job;
+}
+
+async function transitionToCancelled({ workspaceRoot, dataRoot, jobId }) {
   const state = createState({ workspaceRoot, dataRoot });
-  return await updateJob(state, jobId, (job) => {
+  let transitioned = false;
+  const job = await updateJob(state, jobId, (job) => {
     if (TERMINAL_STATUSES.has(job.status)) {
       return job;
     }
+    transitioned = true;
     return {
       ...job,
       status: "cancelled",
       completedAt: new Date().toISOString(),
     };
   });
+  return {
+    job,
+    transitioned,
+  };
 }
 
 export async function cancelJob({
@@ -28,8 +38,8 @@ export async function cancelJob({
   signaler,
   sleep = defaultSleep,
 }) {
-  const output = await markCancelled({ workspaceRoot, dataRoot, jobId });
-  if (output.status !== "cancelled") {
+  const { job: output, transitioned } = await transitionToCancelled({ workspaceRoot, dataRoot, jobId });
+  if (!transitioned) {
     const job = addCancellationSignals(output, []);
     return {
       job,

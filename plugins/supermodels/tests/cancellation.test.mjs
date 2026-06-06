@@ -51,6 +51,46 @@ test("cancelJob never signals already terminal jobs", async () => {
   }
 });
 
+test("cancelJob never re-signals already cancelled jobs", async () => {
+  const fixture = await createFixture("supermodels-cancellation-already-cancelled-");
+  try {
+    const { state, workspaceRoot, dataRoot } = fixture;
+    const job = await createJob(state, {
+      command: "review",
+      mode: "review",
+      requestedProviders: ["claude"],
+    });
+    await updateJob(state, job.id, (current) => ({
+      ...current,
+      status: "cancelled",
+      stage: "calling-providers",
+      completedAt: new Date().toISOString(),
+      pid: 12345,
+    }));
+    const signals = [];
+
+    const result = await cancelJob({
+      state,
+      workspaceRoot,
+      dataRoot,
+      jobId: job.id,
+      signaler: (pid, signal) => {
+        signals.push([pid, signal]);
+        return true;
+      },
+      sleep: async () => {},
+    });
+
+    assert.deepEqual(signals, []);
+    assert.deepEqual(result.signals, []);
+    assert.equal(result.job.status, "cancelled");
+    assert.match(result.text, /no processes signaled/i);
+    assert.equal((await readJob(state, job.id)).status, "cancelled");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("cancelJob gives late-discovered provider pids a graceful signal before force", async () => {
   const fixture = await createFixture("supermodels-cancellation-late-pid-");
   try {
