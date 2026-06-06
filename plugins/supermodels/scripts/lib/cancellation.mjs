@@ -55,32 +55,6 @@ export async function cancelJob({
   };
 }
 
-export async function abortLiveJob({
-  state,
-  jobId,
-  signal,
-}) {
-  const cancelled = await updateJob(state, jobId, (current) => {
-    if (!isCancellableJob(current)) {
-      return current;
-    }
-    return {
-      ...current,
-      status: "cancelled",
-      completedAt: new Date().toISOString(),
-      cancellation: {
-        signal,
-        at: new Date().toISOString(),
-      },
-    };
-  }).catch(() => null);
-
-  return {
-    job: cancelled,
-    signals: [],
-  };
-}
-
 export function addCancellationSignals(job, signals) {
   return {
     ...job,
@@ -146,10 +120,6 @@ async function workerIdentityMatches(job) {
     return observedStartedAt === job.pidStartedAt;
   }
   return isProcessAlive(pid);
-}
-
-function isCancellableJob(job) {
-  return Boolean(job && !TERMINAL_STATUSES.has(job.status));
 }
 
 function defaultSleep(ms) {

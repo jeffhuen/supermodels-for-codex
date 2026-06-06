@@ -745,14 +745,17 @@ function pushFindingDetail(lines, label, value) {
 }
 
 function providerRunStatus(command, normalized, options = {}) {
+  if (options.cancelled) {
+    return "cancelled";
+  }
   if (command.failedBeforeOutput) {
     return "failed";
   }
   if (command.timedOut) {
     return "failed";
   }
-  if (options.cancelled || command.signal) {
-    return "cancelled";
+  if (command.signal) {
+    return "failed";
   }
   if (normalized?.output_valid === false || normalized?.verdict === "invalid-output") {
     return "invalid-output";

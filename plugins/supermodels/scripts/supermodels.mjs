@@ -379,7 +379,6 @@ async function startBackgroundJob(input) {
     env: {
       ...process.env,
       SUPERMODELS_WORKSPACE_ROOT: state.workspaceRoot,
-      SUPERMODELS_BACKGROUND_WORKER: "1",
     },
     stdio: "ignore",
   });

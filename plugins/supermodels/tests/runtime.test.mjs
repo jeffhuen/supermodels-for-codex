@@ -794,6 +794,115 @@ test("runReview marks provider crashes as failed, not invalid-output", async () 
   }
 });
 
+test("runReview marks bare provider signal exits as failed when the run was not cancelled", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-signal-failed-"));
+  try {
+    const adapters = {
+      claude: {
+        check: async () => ({
+          provider: "claude",
+          ready: true,
+          installed: true,
+          auth: "ok",
+          path: "/tmp/claude",
+        }),
+        review: async () => ({
+          exitCode: null,
+          signal: "SIGTERM",
+          rawText: JSON.stringify({
+            verdict: "clean",
+            summary: "Provider exited by signal.",
+            findings: [],
+            assumptions: [],
+            verification_gaps: [],
+          }),
+          stderr: "",
+          sessionId: "claude-session",
+          commandLine: "claude -p",
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+        }),
+      },
+    };
+
+    const output = await runReview({
+      adapters,
+      providerSelection: {
+        requested: ["claude"],
+        explicit: true,
+      },
+      mode: "review",
+      options: {
+        "data-root": dataRoot,
+      },
+      focus: "",
+      workspaceRoot: "/tmp/workspace",
+    });
+
+    assert.equal(output.job.status, "failed");
+    assert.equal(output.job.providerRuns.claude.status, "failed");
+    assert.equal(output.job.providerRuns.claude.signal, "SIGTERM");
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("runReview lets cancellation dominate provider timeout status", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-cancel-timeout-"));
+  try {
+    const adapters = {
+      claude: {
+        check: async () => ({
+          provider: "claude",
+          ready: true,
+          installed: true,
+          auth: "ok",
+          path: "/tmp/claude",
+        }),
+        review: async (input, options) => {
+          options.controller.cancel("SIGINT");
+          return {
+            exitCode: null,
+            signal: "SIGKILL",
+            timedOut: true,
+            rawText: JSON.stringify({
+              verdict: "clean",
+              summary: "Provider was interrupted during timeout cleanup.",
+              findings: [],
+              assumptions: [],
+              verification_gaps: [],
+            }),
+            stderr: "",
+            sessionId: "claude-session",
+            commandLine: "claude -p",
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+          };
+        },
+      },
+    };
+
+    const output = await runReview({
+      adapters,
+      providerSelection: {
+        requested: ["claude"],
+        explicit: true,
+      },
+      mode: "review",
+      options: {
+        "data-root": dataRoot,
+      },
+      focus: "",
+      workspaceRoot: "/tmp/workspace",
+    });
+
+    assert.equal(output.job.status, "cancelled");
+    assert.equal(output.job.providerRuns.claude.status, "cancelled");
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
 test("runReview does not overwrite a cancelled job when providers finish", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-review-cancel-"));
   try {

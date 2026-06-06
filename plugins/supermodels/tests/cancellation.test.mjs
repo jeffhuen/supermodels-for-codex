@@ -5,7 +5,6 @@ import path from "node:path";
 import test from "node:test";
 
 import {
-  abortLiveJob,
   cancelJob,
   renderCancelResult,
 } from "../scripts/lib/cancellation.mjs";
@@ -136,53 +135,6 @@ test("cancelJob signals only the worker pid", async () => {
       { signal: "SIGKILL", pid: process.pid, phase: "force" },
     ]);
     assert.equal((await readJob(state, job.id)).status, "cancelled");
-  } finally {
-    await fixture.cleanup();
-  }
-});
-
-test("abortLiveJob marks live jobs cancelled without signaling provider metadata pids", async () => {
-  const fixture = await createFixture("supermodels-cancellation-live-abort-");
-  try {
-    const { state } = fixture;
-    const job = await createJob(state, {
-      command: "review",
-      mode: "review",
-      requestedProviders: ["claude"],
-      live: true,
-    });
-    await updateJob(state, job.id, (current) => ({
-      ...current,
-      status: "running",
-      stage: "calling-providers",
-      pid: 333,
-      providerRuns: {
-        claude: {
-          provider: "claude",
-          status: "running",
-          pid: 444,
-        },
-      },
-    }));
-    const signaled = [];
-
-    const result = await abortLiveJob({
-      state,
-      jobId: job.id,
-      signal: "SIGINT",
-      currentPid: 333,
-      signaler: (pid, sig) => {
-        signaled.push([pid, sig]);
-        return true;
-      },
-      sleep: async () => {},
-    });
-
-    assert.deepEqual(signaled, []);
-    assert.deepEqual(result.signals, []);
-    const reloaded = await readJob(state, job.id);
-    assert.equal(reloaded.status, "cancelled");
-    assert.equal(reloaded.cancellation.signal, "SIGINT");
   } finally {
     await fixture.cleanup();
   }
