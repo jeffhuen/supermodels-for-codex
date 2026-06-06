@@ -91,13 +91,13 @@ Background mode remains as a thin worker wrapper:
 - Job status stores the worker PID, not provider PID sidecars.
 - `status` and `result` read job files and artifacts.
 - `cancel` transitions queued/running jobs to cancelled and signals only the worker PID.
-- The worker forwards SIGTERM/SIGINT to its active provider child.
+- The worker forwards SIGTERM/SIGINT to its active provider child and force-kills that direct child if it ignores graceful termination.
 
 If the worker dies before finalizing, `status` may report a stale running job until the job becomes stale by timestamp. This is acceptable for v0.1.0 because it is explicit worker-state handling, not simulated provider session control.
 
 ## Foreground And Live Runs
 
-Foreground/live runs should avoid background cancellation machinery. Ctrl+C is handled by the active process runner, which forwards the signal to the current provider child and lets the runtime mark the job cancelled where possible.
+Foreground/live runs should avoid background cancellation machinery. Ctrl+C is handled by the active process runner, which forwards the signal to the current provider child, escalates if needed, and lets the runtime mark the job cancelled where possible.
 
 Live progress remains best-effort provider event reporting. It should not expose implementation internals in user-facing skill updates.
 

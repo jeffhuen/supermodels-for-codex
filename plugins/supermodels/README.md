@@ -49,7 +49,7 @@ Job state and provider artifacts are stored outside the repository under the Cod
 
 The plugin does not embed provider API keys or OAuth secrets. Provider CLIs use their own local auth and session storage.
 
-Background cancellation is scoped to the Supermodels worker process. The plugin records provider session IDs and artifacts when available, but it does not claim provider-native interrupt or provider process ownership.
+Background cancellation is scoped to the Supermodels worker process. The worker forwards termination to the direct provider child process it starts, but the plugin does not claim provider-native interrupt or durable provider session ownership.
 
 ## Development
 

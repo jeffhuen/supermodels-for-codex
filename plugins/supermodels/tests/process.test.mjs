@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import { runCommand, signalProcessTree } from "../scripts/lib/process.mjs";
 
@@ -84,6 +86,75 @@ test("signalProcessTree terminates a detached provider subprocess group", { skip
   }
 });
 
+test("runCommand force-kills provider child when worker receives SIGTERM", { skip: process.platform === "win32" }, async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-worker-signal-"));
+  const markerPath = path.join(tempDir, "provider-survived.txt");
+  try {
+    const providerScript = [
+      "const { writeFileSync } = require('node:fs');",
+      "process.on('SIGTERM', () => {});",
+      `setTimeout(() => writeFileSync(${JSON.stringify(markerPath)}, 'survived'), 900);`,
+      "setInterval(() => {}, 1000);",
+    ].join(" ");
+    const processLib = path.resolve(import.meta.dirname, "../scripts/lib/process.mjs");
+    const workerScript = [
+      `import { runCommand } from ${JSON.stringify(pathToFileURL(processLib).href)};`,
+      "await runCommand({",
+      `  bin: ${JSON.stringify(process.execPath)},`,
+      `  args: ['-e', ${JSON.stringify(providerScript)}],`,
+      "}, {",
+      "  timeoutMs: 10_000,",
+      "  exitOnForwardSignal: true,",
+      "  signalKillMs: 0,",
+      "  onStart: () => { console.log('READY'); },",
+      "});",
+    ].join("\n");
+
+    const worker = spawn(process.execPath, ["--input-type=module", "-e", workerScript], {
+      cwd: tempDir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    await waitForStdout(worker, "READY");
+    worker.kill("SIGTERM");
+    await onceClosed(worker);
+    await sleep(1000);
+
+    await assert.rejects(() => readFile(markerPath, "utf8"), /ENOENT/);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function waitForStdout(child, expected) {
+  return new Promise((resolve, reject) => {
+    let stdout = "";
+    const timer = setTimeout(() => reject(new Error(`Timed out waiting for ${expected}. stdout=${stdout}`)), 5000);
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+      if (stdout.includes(expected)) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code, signal) => {
+      if (!stdout.includes(expected)) {
+        clearTimeout(timer);
+        reject(new Error(`Worker closed before ${expected}: code=${code} signal=${signal} stdout=${stdout}`));
+      }
+    });
+  });
+}
+
+function onceClosed(child) {
+  return new Promise((resolve) => {
+    child.once("close", (code, signal) => resolve({ code, signal }));
+  });
 }

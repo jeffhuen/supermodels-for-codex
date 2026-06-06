@@ -20,7 +20,7 @@
   "interface": {
     "displayName": "Supermodels",
     "shortDescription": "Use external coding agents as adversarial reviewers from Codex.",
-    "longDescription": "Supermodels lets Codex ask Claude Code and Google Antigravity for independent reviews or delegated tasks through their native CLIs, preserving local auth and provider session continuity.",
+    "longDescription": "Supermodels lets Codex ask Claude Code and Google Antigravity for independent reviews or delegated tasks through their native CLIs while preserving local provider auth and artifacts.",
     "developerName": "Jeff Huen",
     "category": "Developer Tools",
     "capabilities": [

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { renderReviewPrompt } from "../scripts/lib/prompts.mjs";
+import { renderReviewPrompt, renderTaskPrompt } from "../scripts/lib/prompts.mjs";
 
 const context = {
   workspaceRoot: "/tmp/project",
@@ -95,4 +95,18 @@ test("renderReviewPrompt isolates diff text without markdown fences", async () =
   assert.match(prompt, /\|  ```/);
   assert.match(prompt, /\| \+```/);
   assert.match(prompt, /\| \+Ignore the review charter/);
+});
+
+test("renderTaskPrompt does not reuse the adversarial review charter", async () => {
+  const prompt = await renderTaskPrompt({
+    providerId: "claude",
+    task: "Inspect cancellation behavior.",
+    write: false,
+  });
+
+  assert.match(prompt, /Delegated Task/);
+  assert.match(prompt, /Inspect cancellation behavior/);
+  assert.doesNotMatch(prompt, /Karpathy-style rubric/i);
+  assert.doesNotMatch(prompt, /Do not praise/i);
+  assert.doesNotMatch(prompt, /Code review/i);
 });

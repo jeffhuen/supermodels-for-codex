@@ -12,16 +12,12 @@ Initial public release.
 - Live review mode with provider progress, persisted job state, and attributed provider output.
 - Structured review parsing, provider artifact preservation, and synthesis with provider attribution.
 - Read-only review/task defaults and explicit `--write` handling for bounded task delegation.
-- Job state locking, stale lock recovery, cancellation terminality, PID identity checks, and provider process signaling.
-- Provider process supervisor handshake so provider CLIs do not start until a signalable supervisor PID has been recorded.
-- Private supervisor handoff files that avoid serialized env/prompt leakage and are removed after provider startup.
+- Job state locking, stale lock recovery, terminal job handling, and worker-scoped cancellation.
 - Private state/run artifacts and Antigravity prompt artifacts using `0700` directories and `0600` files.
-- Cancel escalation from `SIGTERM` to `SIGKILL` for provider processes that ignore graceful termination.
-- Foreground/live aborts exclude the current orchestrator process, re-read job state before escalation, and verify recorded PID start signatures before `SIGKILL`.
-- Explicit cancel gates signaling on a successful queued/running-to-cancelled transition and verifies recorded PID start signatures before `SIGTERM`.
-- Already-cancelled jobs are treated as terminal no-ops and are not signaled again.
-- PID identity checks fall back to live-process checks when `ps` is unavailable, and cancel output reports the actual process signals sent.
-- Centralized cancellation lifecycle handling for explicit cancel and foreground/live abort paths, with contract tests plus process-level signal regression coverage.
+- Background cancel transitions queued/running jobs to cancelled and signals the Supermodels worker when available.
+- Active workers and foreground/live runs forward `SIGINT`/`SIGTERM` to the current direct provider child and escalate to `SIGKILL` when it ignores graceful termination.
+- Already-terminal jobs, including already-cancelled jobs, are treated as no-ops and are not signaled again.
+- Centralized worker cancellation lifecycle handling, with contract tests plus process-level signal regression coverage.
 
 ### Scope
 

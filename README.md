@@ -125,7 +125,7 @@ Each run stores:
 
 These artifacts are useful for debugging provider behavior and validating final review summaries.
 
-Background cancellation is worker-scoped in v1. Supermodels records provider session IDs and artifacts when the CLIs expose them, but it does not claim provider-native interrupt or provider process ownership.
+Background cancellation is worker-scoped in v1. Supermodels owns the worker process and the direct provider child process it starts for the duration of a job. It records provider session IDs and artifacts when the CLIs expose them, but it does not claim provider-native interrupt or durable provider session ownership.
 
 ## Data and Privacy
 
@@ -142,7 +142,7 @@ Version 1 intentionally supports only:
 
 The runtime caps provider orchestration at two providers. Support for additional agents can be added later, but the current implementation prioritizes a maintainable two-provider review workflow.
 
-Supermodels deliberately stays a broker rather than a process supervisor for provider runtimes. Claude Code and Antigravity own their own auth, session storage, model behavior, and deeper interruption semantics.
+Supermodels deliberately stays a broker rather than a durable process manager for provider runtimes. Claude Code and Antigravity own their own auth, session storage, model behavior, and deeper interruption semantics.
 
 ## Development
 
