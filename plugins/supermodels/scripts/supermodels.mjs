@@ -346,15 +346,22 @@ async function handleCancel(parsed) {
     workspaceRoot: process.cwd(),
     dataRoot: parsed.options["data-root"],
   });
-  const job = await readJob(state, jobId);
-  signalJobProcesses(job, { signal: "SIGTERM", signaler: signalProcessTree });
   const output = await markCancelled({
     workspaceRoot: process.cwd(),
     dataRoot: parsed.options["data-root"],
     jobId,
   });
+  if (output.status !== "cancelled") {
+    writeOutput(parsed, output, `Cancelled Supermodels job ${jobId}`);
+    return;
+  }
+
+  const job = await readJob(state, jobId).catch(() => output);
+  signalJobProcesses(job, { signal: "SIGTERM", signaler: signalProcessTree, verifyIdentity: true });
   await sleep(1500);
   const latestJob = await readJob(state, jobId).catch(() => job);
+  signalJobProcesses(latestJob, { signal: "SIGTERM", signaler: signalProcessTree, verifyIdentity: true });
+  await sleep(250);
   signalJobProcesses(latestJob, { signal: "SIGKILL", signaler: signalProcessTree, verifyIdentity: true });
   writeOutput(parsed, output, `Cancelled Supermodels job ${jobId}`);
 }

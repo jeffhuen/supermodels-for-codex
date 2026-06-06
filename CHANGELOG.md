@@ -18,6 +18,7 @@ Initial public release.
 - Private state/run artifacts and Antigravity prompt artifacts using `0700` directories and `0600` files.
 - Cancel escalation from `SIGTERM` to `SIGKILL` for provider processes that ignore graceful termination.
 - Foreground/live aborts exclude the current orchestrator process, re-read job state before escalation, and verify recorded PID start signatures before `SIGKILL`.
+- Explicit cancel gates signaling on a successful queued/running-to-cancelled transition and verifies recorded PID start signatures before `SIGTERM`.
 
 ### Scope
 

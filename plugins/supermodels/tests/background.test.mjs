@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { access, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -138,6 +138,125 @@ test("cancel escalates to SIGKILL when a job process ignores SIGTERM", { skip: p
     assert.equal(result.status, 0, result.stderr);
     const close = await closed;
     assert.equal(close.signal, "SIGKILL");
+    const reloaded = await readJob(state, job.id);
+    assert.equal(reloaded.status, "cancelled");
+  } finally {
+    if (!child.killed) {
+      child.kill("SIGKILL");
+    }
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("cancel does not signal already terminal jobs", { skip: process.platform === "win32" }, async () => {
+  const tempRoot = await realpath(tmpdir());
+  const dataRoot = await mkdtemp(path.join(tempRoot, "supermodels-cancel-terminal-data-"));
+  const workspaceRoot = await mkdtemp(path.join(tempRoot, "supermodels-cancel-terminal-workspace-"));
+  const signalPath = path.join(workspaceRoot, "signalled.txt");
+  const child = spawn(process.execPath, [
+    "-e",
+    [
+      "const fs = require('node:fs');",
+      `process.on('SIGTERM', () => { fs.writeFileSync(${JSON.stringify(signalPath)}, 'signalled'); process.exit(0); });`,
+      "setInterval(() => {}, 1000);",
+    ].join(" "),
+  ], {
+    cwd: workspaceRoot,
+    stdio: "ignore",
+  });
+  try {
+    const state = createState({ workspaceRoot, dataRoot });
+    const job = await createJob(state, {
+      command: "review",
+      mode: "review",
+      requestedProviders: ["claude"],
+      background: true,
+    });
+    await updateJob(state, job.id, (current) => ({
+      ...current,
+      status: "completed",
+      stage: "synthesis-ready",
+      completedAt: new Date().toISOString(),
+      pid: child.pid,
+      pidStartedAt: processStartedAt(child.pid),
+    }));
+
+    const scriptPath = path.resolve(import.meta.dirname, "../scripts/supermodels.mjs");
+    const result = spawnSync(process.execPath, [
+      scriptPath,
+      "cancel",
+      job.id,
+      "--data-root",
+      dataRoot,
+      "--json",
+    ], {
+      cwd: workspaceRoot,
+      encoding: "utf8",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    assert.equal(result.status, 0, result.stderr);
+    await assert.rejects(() => access(signalPath), /ENOENT/);
+    const reloaded = await readJob(state, job.id);
+    assert.equal(reloaded.status, "completed");
+  } finally {
+    if (!child.killed) {
+      child.kill("SIGKILL");
+    }
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("cancel uses pid identity checks for initial SIGTERM", { skip: process.platform === "win32" }, async () => {
+  const tempRoot = await realpath(tmpdir());
+  const dataRoot = await mkdtemp(path.join(tempRoot, "supermodels-cancel-identity-data-"));
+  const workspaceRoot = await mkdtemp(path.join(tempRoot, "supermodels-cancel-identity-workspace-"));
+  const signalPath = path.join(workspaceRoot, "signalled.txt");
+  const child = spawn(process.execPath, [
+    "-e",
+    [
+      "const fs = require('node:fs');",
+      `process.on('SIGTERM', () => { fs.writeFileSync(${JSON.stringify(signalPath)}, 'signalled'); process.exit(0); });`,
+      "setInterval(() => {}, 1000);",
+    ].join(" "),
+  ], {
+    cwd: workspaceRoot,
+    stdio: "ignore",
+  });
+  try {
+    const state = createState({ workspaceRoot, dataRoot });
+    const job = await createJob(state, {
+      command: "review",
+      mode: "review",
+      requestedProviders: ["claude"],
+      background: true,
+    });
+    await updateJob(state, job.id, (current) => ({
+      ...current,
+      status: "running",
+      stage: "calling-providers",
+      pid: child.pid,
+      pidStartedAt: "Mon Jan 1 00:00:00 1970",
+    }));
+
+    const scriptPath = path.resolve(import.meta.dirname, "../scripts/supermodels.mjs");
+    const result = spawnSync(process.execPath, [
+      scriptPath,
+      "cancel",
+      job.id,
+      "--data-root",
+      dataRoot,
+      "--json",
+    ], {
+      cwd: workspaceRoot,
+      encoding: "utf8",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    assert.equal(result.status, 0, result.stderr);
+    await assert.rejects(() => access(signalPath), /ENOENT/);
     const reloaded = await readJob(state, job.id);
     assert.equal(reloaded.status, "cancelled");
   } finally {
