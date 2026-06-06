@@ -813,7 +813,11 @@ async function jobHasLiveProcess(job, processes) {
     const pidStartedAt = descriptor.pidStartedAt
       || (pid === Number(job.pid) ? job.pidStartedAt : "");
     if (pidStartedAt) {
-      if (await processStartedAt(pid) === pidStartedAt) {
+      const observedStartedAt = await processStartedAt(pid);
+      if (observedStartedAt === pidStartedAt) {
+        return true;
+      }
+      if (!observedStartedAt && isProcessAlive(pid)) {
         return true;
       }
       continue;

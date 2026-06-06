@@ -12,7 +12,7 @@ Resolve the plugin root as the directory two levels above this `SKILL.md`. Keep 
 Default adversarial reviews should use live mode:
 
 ```bash
-node "$PLUGIN_ROOT/scripts/supermodels.mjs" adversarial-review --live "$@"
+node "$PLUGIN_ROOT/scripts/supermodels.mjs" adversarial-review --live -- "$@"
 ```
 
 Let the live command run to completion. Do not start separate `status`, `watch`, or `result` commands unless the live command exits early and explicitly tells you to inspect a job.

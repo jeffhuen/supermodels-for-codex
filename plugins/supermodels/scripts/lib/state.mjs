@@ -320,11 +320,14 @@ async function removeStaleLock(lockPath, staleLockMs) {
       || before.dev !== after.dev
       || before.ino !== after.ino
       || Date.now() - after.mtimeMs <= staleLockMs
-      || !lockToken
     ) {
       return false;
     }
-    await unlinkLockIfToken(lockPath, lockToken);
+    if (lockToken) {
+      await unlinkLockIfToken(lockPath, lockToken);
+    } else {
+      await unlinkEmptyLockIfSameFile(lockPath, after);
+    }
     return true;
   } finally {
     await reaper.close().catch(() => {});
@@ -353,6 +356,19 @@ async function unlinkOwnedLock(lockPath, ownerToken) {
 
 async function unlinkLockIfToken(lockPath, token) {
   if (await readLockToken(lockPath) === token) {
+    await unlink(lockPath);
+  }
+}
+
+async function unlinkEmptyLockIfSameFile(lockPath, expectedInfo) {
+  const token = await readLockToken(lockPath);
+  const currentInfo = await stat(lockPath).catch(() => null);
+  if (
+    token === ""
+    && currentInfo
+    && Number(currentInfo.dev) === Number(expectedInfo.dev)
+    && Number(currentInfo.ino) === Number(expectedInfo.ino)
+  ) {
     await unlink(lockPath);
   }
 }

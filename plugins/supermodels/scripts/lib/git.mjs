@@ -29,17 +29,22 @@ export async function collectGitContext(options = {}) {
     };
   }
 
-  const diffArgs = scope === "branch" && baseRef
+  const primaryDiffArgs = scope === "branch" && baseRef
     ? ["-C", workspaceRoot, "diff", `${baseRef}...HEAD`]
     : ["-C", workspaceRoot, "diff", "HEAD"];
-  const diff = await runCommand({ bin: "git", args: diffArgs }, { timeoutMs: 30000 });
-  const fallbackDiff = diff.stdout.trim() ? diff : await runCommand({
-    bin: "git",
-    args: ["-C", workspaceRoot, "diff"],
-  }, { timeoutMs: 30000 });
+  const primaryDiff = await runCommand({ bin: "git", args: primaryDiffArgs }, { timeoutMs: 30000 });
+  let usedDiffArgs = primaryDiffArgs;
+  let fallbackDiff = primaryDiff;
+  if (!primaryDiff.stdout.trim()) {
+    usedDiffArgs = ["-C", workspaceRoot, "diff"];
+    fallbackDiff = await runCommand({
+      bin: "git",
+      args: usedDiffArgs,
+    }, { timeoutMs: 30000 });
+  }
   const summary = await runCommand({
     bin: "git",
-    args: ["-C", workspaceRoot, "diff", "--shortstat"],
+    args: diffArgsWithShortstat(usedDiffArgs),
   }, { timeoutMs: 10000 });
   const untracked = await collectUntrackedContext(workspaceRoot, options);
   const diffParts = [
@@ -60,6 +65,18 @@ export async function collectGitContext(options = {}) {
     diff: diffParts.join("\n\n"),
     gitAvailable: true,
   };
+}
+
+function diffArgsWithShortstat(args) {
+  const diffIndex = args.indexOf("diff");
+  if (diffIndex === -1) {
+    return args;
+  }
+  return [
+    ...args.slice(0, diffIndex + 1),
+    "--shortstat",
+    ...args.slice(diffIndex + 1),
+  ];
 }
 
 async function collectUntrackedContext(workspaceRoot, options = {}) {

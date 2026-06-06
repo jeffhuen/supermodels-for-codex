@@ -886,6 +886,39 @@ test("getStatus does not trust a live reused pid with a mismatched start signatu
   }
 });
 
+test("getStatus does not fail live jobs when ps lookup is temporarily unavailable", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-ps-unavailable-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-ps-unavailable-workspace-"));
+  const oldPath = process.env.PATH;
+  const emptyPath = await mkdtemp(path.join(tmpdir(), "supermodels-empty-path-"));
+  try {
+    const state = createState({ workspaceRoot, dataRoot });
+    const job = await createJob(state, {
+      command: "review",
+      mode: "review",
+      requestedProviders: ["claude"],
+      background: true,
+    });
+    await updateJob(state, job.id, (current) => ({
+      ...current,
+      status: "running",
+      stage: "calling-providers",
+      pid: process.pid,
+      pidStartedAt: "Mon Jan 1 00:00:00 1970",
+    }));
+    process.env.PATH = emptyPath;
+
+    const status = await getStatus({ workspaceRoot, dataRoot, jobId: job.id });
+
+    assert.equal(status.status, "running");
+  } finally {
+    process.env.PATH = oldPath;
+    await rm(emptyPath, { recursive: true, force: true });
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("getStatus does not trust a live reused provider pid with a mismatched start signature", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-reused-provider-pid-"));
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-reused-provider-pid-workspace-"));

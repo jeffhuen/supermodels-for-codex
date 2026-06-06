@@ -29,6 +29,27 @@ test("collectGitContext includes untracked files in working-tree reviews", async
   }
 });
 
+test("collectGitContext diff summary matches staged diff body", async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-git-staged-summary-"));
+  try {
+    git(workspaceRoot, ["init"]);
+    await writeFile(path.join(workspaceRoot, "README.md"), "tracked\n");
+    git(workspaceRoot, ["add", "README.md"]);
+    git(workspaceRoot, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"]);
+
+    await writeFile(path.join(workspaceRoot, "README.md"), "tracked\nstaged\n");
+    git(workspaceRoot, ["add", "README.md"]);
+
+    const context = await collectGitContext({ workspaceRoot });
+
+    assert.match(context.diff, /^\+staged$/m);
+    assert.match(context.diffSummary, /1 file changed/);
+    assert.doesNotMatch(context.diffSummary, /No diff summary available/);
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("collectGitContext omits oversized unreadable untracked files before reading", async () => {
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-git-large-"));
   try {

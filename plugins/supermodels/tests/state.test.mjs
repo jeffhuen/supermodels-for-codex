@@ -209,6 +209,38 @@ test("state recovers stale job locks", async () => {
   }
 });
 
+test("state recovers stale empty job locks", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-state-empty-stale-lock-"));
+  try {
+    const state = createState({
+      workspaceRoot: "/tmp/workspace",
+      dataRoot,
+      staleLockMs: 20,
+      lockWaitMs: 500,
+    });
+    const job = await createJob(state, {
+      command: "review",
+      mode: "review",
+      requestedProviders: ["claude"],
+      background: false,
+    });
+    const lockPath = `${jobPath(state, job.id)}.lock`;
+    await writeFile(lockPath, "");
+    const staleAt = new Date(Date.now() - 60_000);
+    await utimes(lockPath, staleAt, staleAt);
+
+    await updateJob(state, job.id, (current) => ({
+      ...current,
+      emptyStaleLockRecovered: true,
+    }));
+
+    const reloaded = await readJob(state, job.id);
+    assert.equal(reloaded.emptyStaleLockRecovered, true);
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
 test("state recovers locks before the wait timeout", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-state-short-stale-lock-"));
   try {

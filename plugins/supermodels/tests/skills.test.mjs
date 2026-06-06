@@ -9,6 +9,7 @@ test("review skills use one live command instead of manual polling", async () =>
   for (const skill of ["review", "adversarial-review"]) {
     const body = await readFile(path.join(pluginRoot, "skills", skill, "SKILL.md"), "utf8");
     assert.match(body, /--live/);
+    assert.match(body, /--live -- "\$@"/);
     assert.doesNotMatch(body, /--background/);
     assert.doesNotMatch(body, /watch <job-id>/);
     assert.doesNotMatch(body, /status <job-id>/);
