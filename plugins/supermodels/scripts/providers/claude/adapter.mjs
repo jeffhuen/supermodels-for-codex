@@ -205,7 +205,7 @@ async function runClaudePrompt(input, options = {}) {
     cwd: options.cwd,
     input: input.prompt,
     timeoutMs: options.timeoutMs ?? 20 * 60 * 1000,
-    exitOnForwardSignal: options.exitOnForwardSignal,
+    controller: options.controller,
     signalKillMs: options.signalKillMs,
     onStart: options.onStart,
     onStdout: (chunk) => streamParser.push(chunk),
@@ -215,7 +215,9 @@ async function runClaudePrompt(input, options = {}) {
 
   return {
     provider: "claude",
-    exitCode: result.exitCode ?? 0,
+    exitCode: result.exitCode ?? null,
+    signal: result.signal ?? null,
+    timedOut: result.timedOut ?? false,
     rawText: parsed.text || result.stdout,
     stderr: result.stderr,
     sessionId: parsed.sessionId,

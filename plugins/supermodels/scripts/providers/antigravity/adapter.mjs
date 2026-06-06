@@ -156,7 +156,7 @@ async function runAntigravityPrompt(input, options = {}) {
   const result = await runCommand(command, {
     cwd: options.cwd,
     timeoutMs: options.timeoutMs ?? 20 * 60 * 1000,
-    exitOnForwardSignal: options.exitOnForwardSignal,
+    controller: options.controller,
     signalKillMs: options.signalKillMs,
     onStart: options.onStart,
   });
@@ -166,7 +166,9 @@ async function runAntigravityPrompt(input, options = {}) {
 
   return {
     provider: "antigravity",
-    exitCode: result.exitCode ?? 0,
+    exitCode: result.exitCode ?? null,
+    signal: result.signal ?? null,
+    timedOut: result.timedOut ?? false,
     rawText: result.stdout.trim(),
     stderr: result.stderr,
     sessionId: parsed.sessionId,

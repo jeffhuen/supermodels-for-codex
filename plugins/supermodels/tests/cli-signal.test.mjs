@@ -39,8 +39,9 @@ test("live review force-kills provider child before exiting on Ctrl+C", { skip: 
     });
 
     await waitForStdout(cli, "Claude Code: running");
+    const closedPromise = onceClosed(cli, 3000);
     cli.kill("SIGINT");
-    const closed = await onceClosed(cli, 3000);
+    const closed = await closedPromise;
     assert.equal(closed.code, 130);
     await sleep(1800);
 
@@ -87,13 +88,17 @@ test("foreground review records Ctrl+C as cancelled", { skip: process.platform =
     });
 
     await waitForFile(providerPidPath);
+    const closedPromise = onceClosed(cli, 3000);
     cli.kill("SIGINT");
-    const closed = await onceClosed(cli, 3000);
+    const closed = await closedPromise;
     assert.equal(closed.code, 130);
 
     const jobs = await listJobs(createState({ workspaceRoot: repoRoot, dataRoot }));
     assert.equal(jobs.length, 1);
     assert.equal(jobs[0].status, "cancelled");
+    assert.equal(jobs[0].providerRuns.claude.status, "cancelled");
+    assert.equal(jobs[0].providerRuns.claude.exitCode, null);
+    assert.equal(jobs[0].providerRuns.claude.signal, "SIGKILL");
   } finally {
     if (cli?.pid) {
       signalProcessTree(cli.pid, "SIGKILL");
@@ -106,8 +111,72 @@ test("foreground review records Ctrl+C as cancelled", { skip: process.platform =
   }
 });
 
-async function writeFakeClaude(binDir, { providerPidPath, markerPath }) {
+test("foreground review records fast signal-exiting provider as cancelled", { skip: process.platform === "win32" }, async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-fast-signal-"));
+  const binDir = path.join(tempDir, "bin");
+  const dataRoot = path.join(tempDir, "data");
+  const providerPidPath = path.join(tempDir, "provider.pid");
+  const repoRoot = path.resolve(import.meta.dirname, "../../..");
+  let cli;
+  try {
+    await mkdir(binDir, { recursive: true });
+    await writeFakeClaude(binDir, { providerPidPath, exitOnSignal: true });
+
+    const scriptPath = path.resolve(import.meta.dirname, "../scripts/supermodels.mjs");
+    cli = spawn(process.execPath, [
+      scriptPath,
+      "review",
+      "--provider",
+      "claude",
+      "--data-root",
+      dataRoot,
+    ], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    await waitForFile(providerPidPath);
+    const closedPromise = onceClosed(cli, 3000);
+    cli.kill("SIGINT");
+    const closed = await closedPromise;
+    assert.equal(closed.code, 130);
+
+    const jobs = await listJobs(createState({ workspaceRoot: repoRoot, dataRoot }));
+    assert.equal(jobs.length, 1);
+    assert.equal(jobs[0].status, "cancelled");
+    assert.equal(jobs[0].providerRuns.claude.status, "cancelled");
+    assert.equal(jobs[0].providerRuns.claude.exitCode, 0);
+    assert.equal(jobs[0].providerRuns.claude.signal, null);
+  } finally {
+    if (cli?.pid) {
+      signalProcessTree(cli.pid, "SIGKILL");
+    }
+    const providerPid = await readFile(providerPidPath, "utf8").catch(() => "");
+    if (providerPid) {
+      signalProcessTree(Number(providerPid), "SIGKILL");
+    }
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+async function writeFakeClaude(binDir, { providerPidPath, markerPath, exitOnSignal = false }) {
   const fakeClaude = path.join(binDir, "claude");
+  const cleanResult = JSON.stringify({
+    type: "result",
+    subtype: "success",
+    session_id: "fast-exit-session",
+    structured_output: {
+      verdict: "clean",
+      summary: "No findings.",
+      findings: [],
+      assumptions: [],
+      verification_gaps: [],
+    },
+  });
   await writeFile(fakeClaude, [
     "#!/usr/bin/env node",
     "const { writeFileSync } = require('node:fs');",
@@ -118,12 +187,14 @@ async function writeFakeClaude(binDir, { providerPidPath, markerPath }) {
     "  process.exit(0);",
     "}",
     `writeFileSync(${JSON.stringify(providerPidPath)}, String(process.pid));`,
-    "const markSurvival = () => setTimeout(() => writeFileSync(",
-    `  ${JSON.stringify(markerPath)},`,
-    "  'survived',",
-    "), 1500);",
-    "process.on('SIGINT', markSurvival);",
-    "process.on('SIGTERM', markSurvival);",
+    exitOnSignal
+      ? `const onSignal = () => { console.log(${JSON.stringify(cleanResult)}); process.exit(0); };`
+      : "const onSignal = () => setTimeout(() => writeFileSync("
+        + `${JSON.stringify(markerPath)},`
+        + "'survived'"
+        + "), 1500);",
+    "process.on('SIGINT', onSignal);",
+    "process.on('SIGTERM', onSignal);",
     "setInterval(() => {}, 1000);",
   ].join("\n"));
   await chmod(fakeClaude, 0o755);

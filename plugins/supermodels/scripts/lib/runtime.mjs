@@ -3,6 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { collectGitContext } from "./git.mjs";
 import { commandLine, isProcessAlive, processStartedAt } from "./process.mjs";
 import { renderReviewPrompt, renderTaskPrompt } from "./prompts.mjs";
+import { createRunController, signalExitCode } from "./run-control.mjs";
 import {
   normalizeStructuredReview,
   parseStructuredReviewText,
@@ -222,7 +223,8 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
       background: false,
       focus,
     });
-  const cleanupSignalCancellation = installJobSignalCancellation(state, job.id);
+  const controller = createRunController();
+  const cleanupSignalCancellation = installJobSignalCancellation(state, job.id, controller);
   try {
     const started = await markJobRunning(state, job.id, {
       selectedProviders: providerPlan.selected,
@@ -281,7 +283,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
         promptDir: job.dir,
         dataRoot: state.dataRoot,
         timeoutMs,
-        exitOnForwardSignal: true,
+        controller,
         onStart: recordStart,
         onEvent: recordEvent,
       }));
@@ -296,8 +298,10 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
       });
       const providerRun = {
         provider,
-        status: providerRunStatus(run, normalized),
+        status: providerRunStatus(run, normalized, { cancelled: controller.cancelled }),
         exitCode: run.exitCode,
+        signal: run.signal ?? null,
+        timedOut: run.timedOut ?? false,
         rawText: run.rawText,
         stderr: run.stderr,
         sessionId: run.sessionId,
@@ -321,7 +325,11 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
     }
 
     const synthesis = synthesizeProviderResults(providerResults);
-    const completed = await updateJob(state, job.id, (current) => finalizeJob(current, providerRuns, synthesis));
+    const completed = await updateJob(
+      state,
+      job.id,
+      (current) => finalizeJob(current, providerRuns, synthesis, { controller }),
+    );
 
     return {
       job: completed,
@@ -369,7 +377,8 @@ export async function runTask({ adapters, providerSelection, options, task, work
       task,
       write: Boolean(options.write),
     });
-  const cleanupSignalCancellation = installJobSignalCancellation(state, job.id);
+  const controller = createRunController();
+  const cleanupSignalCancellation = installJobSignalCancellation(state, job.id, controller);
   try {
     const started = await markJobRunning(state, job.id, {
       selectedProviders: providerPlan.selected,
@@ -422,7 +431,7 @@ export async function runTask({ adapters, providerSelection, options, task, work
         dataRoot: state.dataRoot,
         timeoutMs,
         write: Boolean(options.write),
-        exitOnForwardSignal: true,
+        controller,
         onStart: recordStart,
         onEvent: recordEvent,
       }));
@@ -436,8 +445,10 @@ export async function runTask({ adapters, providerSelection, options, task, work
       });
       const providerRun = {
         provider,
-        status: providerRunStatus(command, normalized),
+        status: providerRunStatus(command, normalized, { cancelled: controller.cancelled }),
         exitCode: command.exitCode,
+        signal: command.signal ?? null,
+        timedOut: command.timedOut ?? false,
         rawText: command.rawText,
         stderr: command.stderr,
         sessionId: command.sessionId,
@@ -461,7 +472,11 @@ export async function runTask({ adapters, providerSelection, options, task, work
     }
 
     const synthesis = synthesizeProviderResults(providerResults);
-    const completed = await updateJob(state, job.id, (current) => finalizeJob(current, providerRuns, synthesis));
+    const completed = await updateJob(
+      state,
+      job.id,
+      (current) => finalizeJob(current, providerRuns, synthesis, { controller }),
+    );
 
     return {
       job: completed,
@@ -571,28 +586,16 @@ async function markJobRunning(state, jobId, requestPatch) {
   });
 }
 
-function installJobSignalCancellation(state, jobId) {
+function installJobSignalCancellation(state, jobId, controller) {
   let handling = false;
   const mark = (signal) => {
     if (handling) {
       return;
     }
     handling = true;
-    updateJob(state, jobId, (current) => {
-      if (["cancelled", "completed", "partial", "failed"].includes(current.status)) {
-        return current;
-      }
-      const now = new Date().toISOString();
-      return {
-        ...current,
-        status: "cancelled",
-        completedAt: now,
-        cancellation: {
-          signal,
-          at: now,
-        },
-      };
-    }).catch(() => {});
+    controller?.cancel(signal);
+    process.exitCode = signalExitCode(signal);
+    updateJob(state, jobId, (current) => markJobCancelledForSignal(current, signal, controller)).catch(() => {});
   };
   const onSigint = () => mark("SIGINT");
   const onSigterm = () => mark("SIGTERM");
@@ -626,6 +629,8 @@ async function runProviderSafely(provider, operation) {
     return {
       provider,
       exitCode: 1,
+      signal: null,
+      timedOut: false,
       failedBeforeOutput: true,
       rawText: `Provider ${provider} failed before producing review output.`,
       stderr: error?.stack || error?.message || String(error),
@@ -739,14 +744,23 @@ function pushFindingDetail(lines, label, value) {
   }
 }
 
-function providerRunStatus(command, normalized) {
+function providerRunStatus(command, normalized, options = {}) {
   if (command.failedBeforeOutput) {
     return "failed";
+  }
+  if (command.timedOut) {
+    return "failed";
+  }
+  if (options.cancelled || command.signal) {
+    return "cancelled";
   }
   if (normalized?.output_valid === false || normalized?.verdict === "invalid-output") {
     return "invalid-output";
   }
-  if ((command.exitCode ?? 0) !== 0) {
+  if (command.exitCode === null || command.exitCode === undefined) {
+    return "failed";
+  }
+  if (command.exitCode !== 0) {
     return "failed";
   }
   return "completed";
@@ -755,7 +769,11 @@ function providerRunStatus(command, normalized) {
 function finalJobStatus(providerRuns) {
   const hasCompleted = providerRuns.some((run) => run.status === "completed");
   const hasProblem = providerRuns.some((run) => run.status === "failed" || run.status === "invalid-output");
-  if (hasCompleted && hasProblem) {
+  const hasCancelled = providerRuns.some((run) => run.status === "cancelled");
+  if (hasCancelled && !hasCompleted && !hasProblem) {
+    return "cancelled";
+  }
+  if (hasCompleted && (hasProblem || hasCancelled)) {
     return "partial";
   }
   if (hasProblem) {
@@ -764,7 +782,10 @@ function finalJobStatus(providerRuns) {
   return "completed";
 }
 
-function finalizeJob(current, providerRuns, synthesis) {
+function finalizeJob(current, providerRuns, synthesis, options = {}) {
+  if (options.controller?.cancelled) {
+    return markJobCancelledForSignal(current, options.controller.signal, options.controller);
+  }
   if (current.status === "cancelled") {
     return current;
   }
@@ -774,6 +795,23 @@ function finalizeJob(current, providerRuns, synthesis) {
     stage: "synthesis-ready",
     completedAt: new Date().toISOString(),
     synthesis,
+  };
+}
+
+function markJobCancelledForSignal(job, signal, controller) {
+  if (job.status === "cancelled") {
+    return job;
+  }
+  const now = controller?.cancelledAt ?? new Date().toISOString();
+  return {
+    ...job,
+    status: "cancelled",
+    completedAt: job.completedAt ?? now,
+    cancellation: {
+      ...(job.cancellation ?? {}),
+      signal: signal ?? controller?.signal ?? job.cancellation?.signal ?? "SIGTERM",
+      at: controller?.cancelledAt ?? job.cancellation?.at ?? now,
+    },
   };
 }
 

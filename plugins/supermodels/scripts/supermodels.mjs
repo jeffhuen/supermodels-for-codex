@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { parseRuntimeArgs, resolveProviderIds } from "./lib/args.mjs";
 import { buildBackgroundChildArgs, markBackgroundJobRunning } from "./lib/background.mjs";
-import { abortLiveJob, cancelJob } from "./lib/cancellation.mjs";
+import { cancelJob } from "./lib/cancellation.mjs";
 import { findExecutable, signalProcessTree } from "./lib/process.mjs";
 import {
   checkProviders,
@@ -19,7 +19,6 @@ import { createAntigravityAdapter } from "./providers/antigravity/adapter.mjs";
 import { createClaudeAdapter } from "./providers/claude/adapter.mjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
-const LIVE_SIGNAL_EXIT_GRACE_MS = 1200;
 
 const adapters = {
   claude: createClaudeAdapter(),
@@ -174,35 +173,30 @@ async function runLiveReview({ parsed, providerSelection, focus }) {
     focus,
   });
   writeText(`Started Supermodels live ${parsed.command} ${job.id}\n`);
-  const cleanupAbortHandlers = installLiveAbortHandlers({ state, jobId: job.id });
 
-  try {
-    const runPromise = runReview({
-      adapters,
-      providerSelection,
-      mode: parsed.command,
-      options: {
-        ...parsed.options,
-        background: false,
-        live: false,
-        "job-id": job.id,
-      },
-      focus,
-      workspaceRoot,
-    });
+  const runPromise = runReview({
+    adapters,
+    providerSelection,
+    mode: parsed.command,
+    options: {
+      ...parsed.options,
+      background: false,
+      live: false,
+      "job-id": job.id,
+    },
+    focus,
+    workspaceRoot,
+  });
 
-    await watchLiveProgress({
-      state,
-      jobId: job.id,
-      runPromise,
-      intervalMs: Math.max(1, Number(parsed.options.interval || 5)) * 1000,
-      heartbeatMs: 60 * 1000,
-    });
+  await watchLiveProgress({
+    state,
+    jobId: job.id,
+    runPromise,
+    intervalMs: Math.max(1, Number(parsed.options.interval || 5)) * 1000,
+    heartbeatMs: 60 * 1000,
+  });
 
-    return await runPromise;
-  } finally {
-    cleanupAbortHandlers();
-  }
+  return await runPromise;
 }
 
 async function handleTask(parsed) {
@@ -322,7 +316,10 @@ async function watchLiveProgress({ state, jobId, runPromise, intervalMs, heartbe
       lastSignature = signature;
       lastHeartbeatAt = now;
     }
-    await sleep(intervalMs);
+    if (done) {
+      break;
+    }
+    await sleep(Math.min(intervalMs, 250));
   }
 
   if (error) {
@@ -388,44 +385,6 @@ async function startBackgroundJob(input) {
   });
   child.unref();
   return await updateJob(state, job.id, (current) => markBackgroundJobRunning(current, child.pid));
-}
-
-function installLiveAbortHandlers({ state, jobId }) {
-  let active = true;
-  let handling = false;
-  const cleanup = () => {
-    if (!active) {
-      return;
-    }
-    active = false;
-    process.off("SIGINT", onSigint);
-    process.off("SIGTERM", onSigterm);
-  };
-  const onSignal = (signal) => {
-    if (handling) {
-      return;
-    }
-    handling = true;
-    cleanup();
-    handleLiveAbort({ state, jobId, signal }).finally(() => {
-      setTimeout(() => {
-        process.exit(signal === "SIGINT" ? 130 : 143);
-      }, LIVE_SIGNAL_EXIT_GRACE_MS);
-    });
-  };
-  const onSigint = () => onSignal("SIGINT");
-  const onSigterm = () => onSignal("SIGTERM");
-  process.once("SIGINT", onSigint);
-  process.once("SIGTERM", onSigterm);
-  return cleanup;
-}
-
-async function handleLiveAbort({ state, jobId, signal }) {
-  await abortLiveJob({
-    state,
-    jobId,
-    signal,
-  });
 }
 
 function renderSetup(output) {

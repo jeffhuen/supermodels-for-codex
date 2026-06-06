@@ -6,6 +6,8 @@ import { constants } from "node:fs";
 import { spawn } from "node:child_process";
 import { promisify } from "node:util";
 
+import { PROVIDER_SIGKILL_MS } from "./run-control.mjs";
+
 const execFileAsync = promisify(execFile);
 
 export async function findExecutable(bin, options = {}) {
@@ -37,7 +39,6 @@ async function runSpawnedCommand(command, options = {}) {
   const timeoutMs = options.timeoutMs ?? 10 * 60 * 1000;
   const env = { ...process.env, ...(options.env ?? {}) };
   const killProcessGroup = process.platform !== "win32";
-  const exitOnForwardSignal = options.exitOnForwardSignal ?? isBackgroundWorkerProcess(env);
 
   return await new Promise((resolve) => {
     const child = spawn(command.bin, command.args ?? [], {
@@ -53,15 +54,32 @@ async function runSpawnedCommand(command, options = {}) {
     let timedOut = false;
     let timer;
     let killTimer;
-
-    const signalHandlers = installForwardSignalHandlers(child, {
-      exitOnForwardSignal,
-      signalKillMs: options.signalKillMs,
-    });
+    const signalKillMs = options.signalKillMs ?? PROVIDER_SIGKILL_MS;
+    let controllerUnsubscribe = () => {};
+    let forwardedSignal = false;
+    const forwardSignal = (signal) => {
+      if (forwardedSignal) {
+        return;
+      }
+      forwardedSignal = true;
+      signalProcessTree(child.pid, signal);
+      if (signalKillMs <= 0) {
+        signalProcessTree(child.pid, "SIGKILL");
+      } else {
+        killTimer = setTimeout(() => signalProcessTree(child.pid, "SIGKILL"), signalKillMs);
+        killTimer.unref();
+      }
+    };
+    if (options.controller) {
+      controllerUnsubscribe = options.controller.onCancel(forwardSignal);
+      if (options.controller.cancelled) {
+        forwardSignal(options.controller.signal ?? "SIGTERM");
+      }
+    }
     const cleanup = () => {
       clearTimeout(timer);
       clearTimeout(killTimer);
-      signalHandlers.cleanup();
+      controllerUnsubscribe();
     };
 
     timer = setTimeout(() => {
@@ -125,61 +143,6 @@ async function runSpawnedCommand(command, options = {}) {
       child.stdin.destroy();
     }
   });
-}
-
-function installForwardSignalHandlers(child, options = {}) {
-  const signalKillMs = options.signalKillMs ?? 1000;
-  let forwarded = false;
-  let forceTimer;
-  let exitTimer;
-  const forward = (signal) => {
-    if (forwarded) {
-      return;
-    }
-    forwarded = true;
-    if (!child.pid) {
-      if (options.exitOnForwardSignal) {
-        process.exit(signalExitCode(signal));
-      }
-      return;
-    }
-    signalProcessTree(child.pid, signal);
-    if (signalKillMs <= 0) {
-      signalProcessTree(child.pid, "SIGKILL");
-    } else {
-      forceTimer = setTimeout(() => {
-        signalProcessTree(child.pid, "SIGKILL");
-      }, signalKillMs);
-      forceTimer.unref();
-    }
-    if (options.exitOnForwardSignal) {
-      exitTimer = setTimeout(() => {
-        process.exit(signalExitCode(signal));
-      }, signalKillMs + 100);
-    }
-  };
-  const onSigint = () => forward("SIGINT");
-  const onSigterm = () => forward("SIGTERM");
-  process.once("SIGINT", onSigint);
-  process.once("SIGTERM", onSigterm);
-  return {
-    cleanup() {
-      clearTimeout(forceTimer);
-      if (!forwarded || !options.exitOnForwardSignal) {
-        clearTimeout(exitTimer);
-      }
-      process.off("SIGINT", onSigint);
-      process.off("SIGTERM", onSigterm);
-    },
-  };
-}
-
-function signalExitCode(signal) {
-  return signal === "SIGINT" ? 130 : 143;
-}
-
-function isBackgroundWorkerProcess(env = process.env) {
-  return env.SUPERMODELS_BACKGROUND_WORKER === "1";
 }
 
 export function commandLine(command) {

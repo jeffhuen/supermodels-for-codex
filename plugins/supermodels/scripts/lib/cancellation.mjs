@@ -1,7 +1,8 @@
 import { isProcessAlive, processStartedAt } from "./process.mjs";
+import { CANCEL_GRACE_MS } from "./run-control.mjs";
 import { createState, readJob, updateJob } from "./state.mjs";
 
-export const CANCEL_GRACE_MS = 1500;
+export { CANCEL_GRACE_MS };
 
 const TERMINAL_STATUSES = new Set(["cancelled", "completed", "partial", "failed"]);
 

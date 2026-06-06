@@ -16,6 +16,7 @@ Initial public release.
 - Private state/run artifacts and Antigravity prompt artifacts using `0700` directories and `0600` files.
 - Background cancel transitions queued/running jobs to cancelled and signals the Supermodels worker when available.
 - Active workers and foreground/live runs forward `SIGINT`/`SIGTERM` to the current direct provider child and escalate to `SIGKILL` when it ignores graceful termination.
+- Foreground/live cancellation now uses a single run controller; provider runners no longer own process-level exit timers and interrupted provider runs preserve signal metadata.
 - Already-terminal jobs, including already-cancelled jobs, are treated as no-ops and are not signaled again.
 - Centralized worker cancellation lifecycle handling, with contract tests plus process-level signal regression coverage.
 
