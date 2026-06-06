@@ -41,7 +41,14 @@ Install the plugin:
 codex plugin add supermodels@supermodels
 ```
 
-After installing or upgrading a plugin, start a fresh Codex session so updated skills and runtime files are loaded.
+To update an existing install after this repository changes:
+
+```bash
+codex plugin marketplace upgrade supermodels
+codex plugin add supermodels@supermodels
+```
+
+After installing or upgrading, start a fresh Codex session so updated skills and runtime files are loaded.
 
 ## Setup
 
@@ -161,9 +168,10 @@ Update the plugin cachebuster before publishing a new development build:
 python3 /Users/jeffhuen/.codex/skills/.system/plugin-creator/scripts/update_plugin_cachebuster.py plugins/supermodels
 ```
 
-Then commit, push `main`, and reinstall:
+Then commit, push `main`, refresh the marketplace snapshot, and reinstall:
 
 ```bash
+codex plugin marketplace upgrade supermodels
 codex plugin add supermodels@supermodels
 ```
 
