@@ -173,7 +173,7 @@ test("runReview records provider progress before every provider has finished", a
 });
 
 test("runReview records provider subprocess pid while provider is running", async () => {
-  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-provider-pid-"));
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-provider-child-"));
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-workspace-"));
   try {
     const state = createState({ workspaceRoot, dataRoot });

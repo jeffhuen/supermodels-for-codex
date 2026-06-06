@@ -27,4 +27,4 @@ Initial public release.
 
 ### Known Limitations
 
-- Additional providers such as Grok are intentionally out of scope for `0.1.0`.
+- Additional providers are intentionally out of scope for `0.1.0`.

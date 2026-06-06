@@ -1027,8 +1027,8 @@ test("getStatus does not fail live jobs when ps lookup is temporarily unavailabl
 });
 
 test("getStatus ignores provider metadata pids when no worker pid is recorded", async () => {
-  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-provider-pid-ignored-"));
-  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-provider-pid-ignored-workspace-"));
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-provider-metadata-ignored-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-provider-metadata-ignored-workspace-"));
   try {
     const state = createState({ workspaceRoot, dataRoot });
     const job = await createJob(state, {

@@ -204,7 +204,6 @@ plugins/supermodels/skills/            Codex skills
 plugins/supermodels/scripts/           Runtime CLI and provider adapters
 plugins/supermodels/prompts/           Shared review prompts
 plugins/supermodels/tests/             Node test suite
-docs/                                  Design notes and implementation plans
 ```
 
 ## License
