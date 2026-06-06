@@ -69,11 +69,13 @@ Validate the plugin from the repository root:
 python3 /Users/jeffhuen/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py plugins/supermodels
 ```
 
-Update the manifest cachebuster before publishing a new development build:
+For local development builds only, update the manifest cachebuster before reinstalling from a local marketplace:
 
 ```bash
 python3 /Users/jeffhuen/.codex/skills/.system/plugin-creator/scripts/update_plugin_cachebuster.py plugins/supermodels
 ```
+
+Release builds should use a plain SemVer manifest version such as `0.1.0`.
 
 ## License
 

@@ -1,6 +1,6 @@
 {
   "name": "supermodels",
-  "version": "0.1.0+codex.20260606013219",
+  "version": "0.1.0",
   "description": "Call Claude Code and Antigravity from Codex for independent code review and task delegation.",
   "author": {
     "name": "Jeff Huen",

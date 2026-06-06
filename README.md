@@ -23,13 +23,13 @@ Supermodels is designed for that workflow:
 
 ## Installation
 
-Add this repository as a Codex plugin marketplace:
+Add this repository as a Codex plugin marketplace. The stable release channel is pinned to `v0.1.0`:
 
 ```bash
-codex plugin marketplace add jeffhuen/supermodels-for-codex
+codex plugin marketplace add jeffhuen/supermodels-for-codex --ref v0.1.0
 ```
 
-To pin the marketplace to `main` explicitly:
+For development builds from `main`:
 
 ```bash
 codex plugin marketplace add jeffhuen/supermodels-for-codex --ref main
@@ -41,10 +41,9 @@ Install the plugin:
 codex plugin add supermodels@supermodels
 ```
 
-To update an existing install after this repository changes:
+To reinstall from the configured marketplace:
 
 ```bash
-codex plugin marketplace upgrade supermodels
 codex plugin add supermodels@supermodels
 ```
 
@@ -162,28 +161,33 @@ Validate the plugin:
 python3 /Users/jeffhuen/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py plugins/supermodels
 ```
 
-Update the plugin cachebuster before publishing a new development build:
+For local development builds only, update the plugin cachebuster before reinstalling from a local marketplace:
 
 ```bash
 python3 /Users/jeffhuen/.codex/skills/.system/plugin-creator/scripts/update_plugin_cachebuster.py plugins/supermodels
 ```
 
-Then commit, push `main`, refresh the marketplace snapshot, and reinstall:
+Then reinstall from the configured marketplace:
 
 ```bash
-codex plugin marketplace upgrade supermodels
 codex plugin add supermodels@supermodels
 ```
 
 ## Versioning
 
-During active development, the plugin manifest uses a Codex cachebuster suffix:
+Release versions use normal SemVer. The first public release is:
+
+```text
+0.1.0
+```
+
+During active local development, the plugin manifest may temporarily use a Codex cachebuster suffix:
 
 ```text
 0.1.0+codex.YYYYMMDDHHMMSS
 ```
 
-This forces Codex to install a fresh plugin copy. Once the plugin stabilizes, releases should move toward normal SemVer tags such as `v0.1.0`, `v0.2.0`, and `v1.0.0`.
+This forces Codex to install a fresh plugin copy while iterating. Remove the cachebuster before tagging a release.
 
 ## Repository Layout
 
