@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, open, readFile, rm, unlink, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, readdir, rm, unlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -11,6 +11,7 @@ import {
   readJob,
   updateJob,
   validateJobId,
+  writeFileAtomic,
   writeProviderResult,
   jobPath,
 } from "../scripts/lib/state.mjs";
@@ -81,6 +82,46 @@ test("listJobs skips malformed job files", async () => {
     assert.equal(jobs[0].id, job.id);
   } finally {
     await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("listJobs skips valid non-object job JSON", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-state-nonobject-list-"));
+  try {
+    const state = createState({
+      workspaceRoot: "/tmp/workspace",
+      dataRoot,
+    });
+    const job = await createJob(state, {
+      command: "review",
+      mode: "review",
+      requestedProviders: ["claude"],
+      background: false,
+    });
+    await writeFile(path.join(state.jobsDir, "job-20260606000000-deadbe.json"), "null");
+    await writeFile(path.join(state.jobsDir, "job-20260606000000-badbad.json"), "[]");
+
+    const jobs = await listJobs(state);
+
+    assert.equal(jobs.length, 1);
+    assert.equal(jobs[0].id, job.id);
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("writeFileAtomic removes temp files when rename fails", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "supermodels-state-atomic-cleanup-"));
+  try {
+    const finalPath = path.join(dir, "target");
+    await mkdir(finalPath);
+
+    await assert.rejects(() => writeFileAtomic(finalPath, "payload"), /EISDIR|ENOTEMPTY|is a directory/i);
+
+    const entries = await readdir(dir);
+    assert.deepEqual(entries, ["target"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });
 

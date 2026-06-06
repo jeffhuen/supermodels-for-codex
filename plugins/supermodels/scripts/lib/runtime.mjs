@@ -22,6 +22,7 @@ import {
 } from "./state.mjs";
 
 const SUMMARY_LIMIT = 4000;
+const NO_PID_STALE_MS = 5 * 60 * 1000;
 
 export function selectProviders(input) {
   const requested = input.requested ?? [];
@@ -184,6 +185,7 @@ export async function setupProviders(adapters, options = {}) {
 }
 
 export async function runReview({ adapters, providerSelection, mode, options, focus, workspaceRoot }) {
+  const timeoutMs = providerTimeoutMs(options.timeout);
   const state = createState({
     workspaceRoot,
     dataRoot: options["data-root"],
@@ -215,6 +217,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
       ...current,
       status: "running",
       stage: "calling-providers",
+      pid: process.pid,
       request: {
         ...current.request,
         selectedProviders: providerPlan.selected,
@@ -225,7 +228,6 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
 
     const writeQueue = createSerializedWriteQueue();
     const enqueueWrite = writeQueue.enqueue;
-    const timeoutMs = providerTimeoutMs(options.timeout);
     const providerRuns = await Promise.all(providerPlan.selected.map(async (provider) => {
       const adapter = adapters[provider];
       const check = checks[provider] ?? {};
@@ -324,6 +326,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
 }
 
 export async function runTask({ adapters, providerSelection, options, task, workspaceRoot }) {
+  const timeoutMs = providerTimeoutMs(options.timeout);
   const state = createState({
     workspaceRoot,
     dataRoot: options["data-root"],
@@ -351,6 +354,7 @@ export async function runTask({ adapters, providerSelection, options, task, work
       ...current,
       status: "running",
       stage: "calling-providers",
+      pid: process.pid,
       request: {
         ...current.request,
         selectedProviders: providerPlan.selected,
@@ -361,7 +365,6 @@ export async function runTask({ adapters, providerSelection, options, task, work
 
     const writeQueue = createSerializedWriteQueue();
     const enqueueWrite = writeQueue.enqueue;
-    const timeoutMs = providerTimeoutMs(options.timeout);
     const providerRuns = await Promise.all(providerPlan.selected.map(async (provider) => {
       const adapter = adapters[provider];
       const check = checks[provider] ?? {};
@@ -719,7 +722,10 @@ async function reconcileJobStatus(state, job) {
     return job;
   }
   const pids = jobProcessPids(job);
-  if (!pids.length || pids.some(isProcessAlive)) {
+  if (pids.some(isProcessAlive)) {
+    return job;
+  }
+  if (!pids.length && !isRunningJobStaleWithoutPid(job)) {
     return job;
   }
   try {
@@ -727,11 +733,29 @@ async function reconcileJobStatus(state, job) {
       if (current.status !== "running") {
         return current;
       }
-      return markJobFailed(current, "Job process is no longer running.");
+      const currentPids = jobProcessPids(current);
+      if (currentPids.some(isProcessAlive)) {
+        return current;
+      }
+      if (!currentPids.length && !isRunningJobStaleWithoutPid(current)) {
+        return current;
+      }
+      const reason = currentPids.length
+        ? "Job process is no longer running."
+        : "Job has no recorded worker process and has not updated recently.";
+      return markJobFailed(current, reason);
     });
   } catch {
     return job;
   }
+}
+
+function isRunningJobStaleWithoutPid(job) {
+  const timestamp = Date.parse(job.updatedAt ?? job.createdAt ?? "");
+  if (!Number.isFinite(timestamp)) {
+    return false;
+  }
+  return Date.now() - timestamp > NO_PID_STALE_MS;
 }
 
 function isProcessAlive(pid) {

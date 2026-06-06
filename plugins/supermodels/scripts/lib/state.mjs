@@ -93,7 +93,11 @@ export async function listJobs(state) {
   for (const entry of entries.filter((name) => name.endsWith(".json"))) {
     try {
       const payload = await readFile(path.join(state.jobsDir, entry), "utf8");
-      jobs.push(JSON.parse(payload));
+      const job = JSON.parse(payload);
+      if (!isJobRecord(job)) {
+        continue;
+      }
+      jobs.push(job);
     } catch {
       // Ignore malformed or partially-written job files so one bad record does not
       // break status listing for the rest of the workspace.
@@ -209,8 +213,25 @@ function timestampId() {
 
 export async function writeFileAtomic(finalPath, payload) {
   const tempPath = `${finalPath}.${process.pid}.${Date.now().toString(36)}.${crypto.randomBytes(3).toString("hex")}.tmp`;
-  await writeFile(tempPath, payload);
-  await rename(tempPath, finalPath);
+  try {
+    await writeFile(tempPath, payload);
+    await rename(tempPath, finalPath);
+  } catch (error) {
+    await unlink(tempPath).catch(() => {});
+    throw error;
+  }
+}
+
+function isJobRecord(job) {
+  if (!job || typeof job !== "object" || Array.isArray(job)) {
+    return false;
+  }
+  try {
+    validateJobId(job.id);
+  } catch {
+    return false;
+  }
+  return typeof job.createdAt === "string";
 }
 
 async function withJobLock(state, jobId, operation) {

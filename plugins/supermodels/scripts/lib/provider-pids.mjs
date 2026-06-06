@@ -9,8 +9,12 @@ export function writeProviderPid(job, provider, pid) {
   if (!job?.dir || !Number.isFinite(numericPid) || numericPid <= 0) {
     return false;
   }
-  writeFileSync(providerPidPath(job.dir, provider), `${numericPid}\n`, { mode: 0o600 });
-  return true;
+  try {
+    writeFileSync(providerPidPath(job.dir, provider), `${numericPid}\n`, { mode: 0o600 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function jobProcessPids(job) {
@@ -43,11 +47,22 @@ function readProviderPidSidecars(job) {
     return [];
   }
   const pids = [];
-  for (const entry of readdirSync(job.dir, { withFileTypes: true })) {
+  let entries;
+  try {
+    entries = readdirSync(job.dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  for (const entry of entries) {
     if (!entry.isFile() || !entry.name.startsWith(PID_FILE_PREFIX) || !entry.name.endsWith(PID_FILE_SUFFIX)) {
       continue;
     }
-    const text = readFileSync(path.join(job.dir, entry.name), "utf8").trim();
+    let text;
+    try {
+      text = readFileSync(path.join(job.dir, entry.name), "utf8").trim();
+    } catch {
+      continue;
+    }
     const pid = Number(text);
     if (Number.isFinite(pid) && pid > 0) {
       pids.push(pid);

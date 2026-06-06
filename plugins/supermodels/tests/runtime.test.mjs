@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -15,7 +15,7 @@ import {
   selectProviders,
   synthesizeProviderResults,
 } from "../scripts/lib/runtime.mjs";
-import { createJob, createState, listJobs, updateJob } from "../scripts/lib/state.mjs";
+import { createJob, createState, jobPath, listJobs, updateJob } from "../scripts/lib/state.mjs";
 
 const checks = {
   claude: {
@@ -364,6 +364,70 @@ test("runTask stores provider progress events from adapters", async () => {
   }
 });
 
+test("runReview records orchestrator pid so concurrent status does not fail live jobs", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-live-status-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-live-status-workspace-"));
+  try {
+    let observedStatus;
+    let observedPid;
+    const adapters = {
+      claude: {
+        check: async () => ({
+          provider: "claude",
+          ready: true,
+          installed: true,
+          auth: "ok",
+          path: "/tmp/claude",
+        }),
+        review: async (input, options) => {
+          const status = await getStatus({
+            workspaceRoot,
+            dataRoot,
+            jobId: path.basename(options.promptDir),
+          });
+          observedStatus = status.status;
+          observedPid = status.pid;
+          return {
+            exitCode: 0,
+            rawText: JSON.stringify({
+              verdict: "clean",
+              summary: "No findings.",
+              findings: [],
+              assumptions: [],
+              verification_gaps: [],
+            }),
+            stderr: "",
+            sessionId: "claude-session",
+            commandLine: "claude -p",
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+          };
+        },
+      },
+    };
+
+    await runReview({
+      adapters,
+      providerSelection: {
+        requested: ["claude"],
+        explicit: true,
+      },
+      mode: "review",
+      options: {
+        "data-root": dataRoot,
+      },
+      focus: "",
+      workspaceRoot,
+    });
+
+    assert.equal(observedStatus, "running");
+    assert.equal(observedPid, process.pid);
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("runReview marks schema-invalid provider output as invalid-output even when provider exits nonzero", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-invalid-review-"));
   try {
@@ -649,6 +713,81 @@ test("getStatus marks running jobs failed when stored process pids are dead", as
     assert.equal(status.status, "failed");
     assert.equal(status.stage, "failed");
     assert.match(status.error, /no longer running/i);
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("getStatus marks stale running jobs failed when no process pid was recorded", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-stale-no-pid-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-stale-no-pid-workspace-"));
+  try {
+    const state = createState({ workspaceRoot, dataRoot });
+    const job = await createJob(state, {
+      command: "review",
+      mode: "review",
+      requestedProviders: ["claude"],
+      background: true,
+    });
+    const staleJob = {
+      ...job,
+      status: "running",
+      stage: "calling-providers",
+      pid: null,
+      updatedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+    };
+    await writeFile(jobPath(state, job.id), `${JSON.stringify(staleJob, null, 2)}\n`);
+
+    const status = await getStatus({ workspaceRoot, dataRoot, jobId: job.id });
+
+    assert.equal(status.status, "failed");
+    assert.equal(status.stage, "failed");
+    assert.match(status.error, /no recorded worker process/i);
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("runTask rejects invalid timeout before creating a job", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-timeout-before-job-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-timeout-before-job-workspace-"));
+  try {
+    const adapters = {
+      claude: {
+        check: async () => ({
+          provider: "claude",
+          ready: true,
+          installed: true,
+          auth: "ok",
+          path: "/tmp/claude",
+        }),
+        task: async () => {
+          throw new Error("adapter should not be called");
+        },
+      },
+    };
+
+    await assert.rejects(
+      () => runTask({
+        adapters,
+        providerSelection: {
+          requested: ["claude"],
+          explicit: true,
+        },
+        options: {
+          "data-root": dataRoot,
+          timeout: "abc",
+        },
+        task: "inspect only",
+        workspaceRoot,
+      }),
+      /positive number of seconds/i,
+    );
+
+    const jobs = await listJobs(createState({ workspaceRoot, dataRoot }));
+    assert.deepEqual(jobs, []);
   } finally {
     await rm(dataRoot, { recursive: true, force: true });
     await rm(workspaceRoot, { recursive: true, force: true });

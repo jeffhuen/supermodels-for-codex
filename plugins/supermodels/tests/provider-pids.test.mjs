@@ -29,6 +29,19 @@ test("jobProcessPids includes provider pid sidecars when state has not caught up
   }
 });
 
+test("writeProviderPid is best-effort when the job dir is missing", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "supermodels-provider-pids-missing-"));
+  await rm(dir, { recursive: true, force: true });
+  const job = {
+    pid: 111,
+    dir,
+    providerRuns: {},
+  };
+
+  assert.equal(writeProviderPid(job, "claude", 222), false);
+  assert.deepEqual(jobProcessPids(job), [111]);
+});
+
 test("signalJobProcesses signals job and sidecar provider process groups", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "supermodels-signal-pids-"));
   try {
