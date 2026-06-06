@@ -105,31 +105,25 @@ test("parseAnthropicSseLines yields Anthropic data payloads", () => {
   }]);
 });
 
-test("ClaudeOAuthMessagesTransport retries retryable 429 responses", async () => {
+test("ClaudeOAuthMessagesTransport surfaces 429 responses without blind retry", async () => {
   let calls = 0;
   const transport = new ClaudeOAuthMessagesTransport({
     credentials: { accessToken: async () => "access-token", forceRefresh: async () => {} },
-    retryBaseDelayMs: 1,
     fetchImpl: async () => {
       calls += 1;
-      if (calls === 1) {
-        return new Response(JSON.stringify({ error: { type: "rate_limit_error", message: "reset after 0s" } }), {
-          status: 429,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response([
-        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
-        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}",
-        "data: [DONE]",
-      ].join("\n"), { status: 200, headers: { "content-type": "text/event-stream" } });
+      return new Response(JSON.stringify({ error: { type: "rate_limit_error", message: "Error" } }), {
+        status: 429,
+        headers: { "content-type": "application/json" },
+      });
     },
   });
 
-  const result = await transport.messages({ model: "claude-test", messages: [] }, { timeoutMs: 5000 });
+  await assert.rejects(
+    () => transport.messages({ model: "claude-test", messages: [] }, { timeoutMs: 5000 }),
+    /Anthropic Messages request failed: 429/,
+  );
 
-  assert.equal(calls, 2);
-  assert.equal(result.text, "ok");
+  assert.equal(calls, 1);
 });
 
 test("AntigravityCredentials reads CLI token envelope and refreshes through native AGY", async () => {
@@ -262,6 +256,38 @@ test("AntigravityCredentials prefers macOS keychain over stale default token fil
     });
 
     assert.equal(await credentials.accessToken(), "fresh-keychain-access");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("AntigravityCredentials does not silently fall back to token file when macOS keychain fails", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "supermodels-agy-oauth-keychain-fails-"));
+  const tokenDir = path.join(dir, ".gemini", "antigravity-cli");
+  const file = path.join(tokenDir, "antigravity-oauth-token");
+  try {
+    await mkdir(tokenDir, { recursive: true });
+    await writeFile(file, JSON.stringify({
+      token: {
+        access_token: "file-access",
+        refresh_token: "file-refresh",
+        expiry: "2099-01-01T00:00:00.000Z",
+      },
+      auth_method: "consumer",
+    }), "utf8");
+    const credentials = new AntigravityCredentials({
+      env: { HOME: dir },
+      platform: "darwin",
+      keychainReader: async () => {
+        throw new Error("keychain unavailable");
+      },
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+
+    await assert.rejects(
+      () => credentials.accessToken(),
+      /keychain credential read failed.*ANTIGRAVITY_OAUTH_CREDS_PATH/is,
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -414,6 +440,53 @@ test("AntigravityCodeAssistTransport wraps requests in the Code Assist envelope"
   assert.match(requests[0].headers.Authorization, /^Bearer /);
 });
 
+test("AntigravityCodeAssistTransport forces native refresh before retrying generateContent 401", async () => {
+  const authorizations = [];
+  let refreshed = false;
+  let calls = 0;
+  const transport = new AntigravityCodeAssistTransport({
+    credentials: {
+      accessToken: async () => refreshed ? "new-token" : "old-token",
+      forceRefresh: async () => {
+        refreshed = true;
+      },
+      forceReload: () => {
+        throw new Error("forceReload should not handle rejected access tokens");
+      },
+    },
+    rateLimiter: noRateLimit,
+    projectId: "project-1",
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("v1internal:generateContent")) {
+        calls += 1;
+        authorizations.push(init.headers.Authorization);
+        if (calls === 1) {
+          return new Response(JSON.stringify({ error: { code: 401, message: "stale token" } }), {
+            status: 401,
+            headers: { "content-type": "application/json" },
+          });
+        }
+      }
+      return new Response(JSON.stringify({
+        response: {
+          candidates: [{ content: { parts: [{ text: "ok" }] } }],
+          usageMetadata: {},
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+
+  const response = await transport.messages({
+    model: "gemini-2.5-pro",
+    messages: [{ role: "user", content: [{ type: "text", text: "review" }] }],
+    tools: [],
+  });
+
+  assert.equal(response.text, "ok");
+  assert.equal(calls, 2);
+  assert.deepEqual(authorizations, ["Bearer old-token", "Bearer new-token"]);
+});
+
 test("AntigravityCodeAssistTransport discovers project id before generateContent", async () => {
   const requests = [];
   const transport = new AntigravityCodeAssistTransport({
@@ -445,6 +518,55 @@ test("AntigravityCodeAssistTransport discovers project id before generateContent
   assert.match(requests[0].url, /v1internal:loadCodeAssist$/);
   assert.match(requests[1].url, /v1internal:generateContent$/);
   assert.equal(requests[1].body.project, "discovered-project");
+});
+
+test("AntigravityCodeAssistTransport forces native refresh before retrying project discovery 401", async () => {
+  const authorizations = [];
+  let refreshed = false;
+  let discoveryCalls = 0;
+  const transport = new AntigravityCodeAssistTransport({
+    credentials: {
+      accessToken: async () => refreshed ? "new-token" : "old-token",
+      forceRefresh: async () => {
+        refreshed = true;
+      },
+      forceReload: () => {
+        throw new Error("forceReload should not handle rejected access tokens");
+      },
+    },
+    rateLimiter: noRateLimit,
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("v1internal:loadCodeAssist")) {
+        discoveryCalls += 1;
+        authorizations.push(init.headers.Authorization);
+        if (discoveryCalls === 1) {
+          return new Response(JSON.stringify({ error: { code: 401, message: "stale token" } }), {
+            status: 401,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({
+          cloudaicompanionProject: "project-1",
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({
+        response: {
+          candidates: [{ content: { parts: [{ text: "ok" }] } }],
+          usageMetadata: {},
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+
+  const response = await transport.messages({
+    model: "gemini-2.5-pro",
+    messages: [{ role: "user", content: [{ type: "text", text: "review" }] }],
+    tools: [],
+  });
+
+  assert.equal(response.text, "ok");
+  assert.equal(discoveryCalls, 2);
+  assert.deepEqual(authorizations, ["Bearer old-token", "Bearer new-token"]);
 });
 
 test("AntigravityCodeAssistTransport retries retryable 429 responses", async () => {

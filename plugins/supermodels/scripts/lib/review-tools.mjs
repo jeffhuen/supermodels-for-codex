@@ -284,7 +284,7 @@ async function changedFilesFromGitStatus(workspaceRoot, controller) {
   });
   throwIfCancelled(controller);
   if (status.exitCode !== 0) {
-    return [];
+    throw new Error(`git status failed: ${status.stderr || status.stdout || `exit ${status.exitCode}`}`);
   }
   return parseGitStatus(status.stdout);
 }

@@ -297,6 +297,20 @@ test("normalizeProviderResult marks required structured reviews invalid when out
   assert.match(normalized.summary, /did not return the required structured review/i);
 });
 
+test("normalizeProviderResult marks provider rate limits distinctly from invalid output", () => {
+  const normalized = normalizeProviderResult({
+    provider: "claude",
+    rawText: "Provider claude failed before producing review output.",
+    stderr: "Error: Anthropic Messages request failed: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}",
+    requireStructured: true,
+  });
+
+  assert.equal(normalized.verdict, "rate-limited");
+  assert.equal(normalized.output_valid, false);
+  assert.match(normalized.summary, /rate-limited/i);
+  assert.match(normalized.verification_gaps.join("\n"), /quota window/i);
+});
+
 test("normalizeProviderResult recognizes clean negated review output", () => {
   const normalized = normalizeProviderResult({
     provider: "claude",
@@ -861,6 +875,70 @@ test("runReview records partial status when at least one provider returns usable
     assert.equal(output.job.status, "partial");
     assert.equal(output.job.providerRuns.claude.status, "completed");
     assert.equal(output.job.providerRuns.antigravity.status, "failed");
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("runReview records provider rate limits as rate-limited partial results", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-rate-limited-review-"));
+  try {
+    const adapters = {
+      claude: {
+        check: async () => ({
+          provider: "claude",
+          ready: true,
+          installed: true,
+          auth: "ok",
+        }),
+        review: async () => {
+          throw new Error("Anthropic Messages request failed: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Error\"}}");
+        },
+      },
+      antigravity: {
+        check: async () => ({
+          provider: "antigravity",
+          ready: true,
+          installed: true,
+          auth: "ok",
+        }),
+        review: async () => ({
+          exitCode: 0,
+          rawText: JSON.stringify({
+            verdict: "clean",
+            summary: "No blocking issues.",
+            findings: [],
+            assumptions: [],
+            verification_gaps: [],
+          }),
+          stderr: "",
+          sessionId: "",
+          commandLine: "agy code-assist messages",
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+        }),
+      },
+    };
+
+    const output = await runReview({
+      adapters,
+      providerSelection: {
+        requested: ["claude", "antigravity"],
+        explicit: false,
+      },
+      mode: "review",
+      options: {
+        "data-root": dataRoot,
+      },
+      focus: "",
+      workspaceRoot: "/tmp/workspace",
+    });
+
+    assert.equal(output.job.status, "partial");
+    assert.equal(output.job.providerRuns.claude.status, "rate-limited");
+    assert.equal(output.job.providerRuns.claude.normalized.verdict, "rate-limited");
+    assert.match(output.synthesis, /rate-limited/i);
+    assert.equal(output.job.providerRuns.antigravity.status, "completed");
   } finally {
     await rm(dataRoot, { recursive: true, force: true });
   }

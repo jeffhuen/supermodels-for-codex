@@ -86,6 +86,19 @@ export function normalizeProviderResult(input) {
   }
 
   if (input.requireStructured) {
+    if (isRateLimitError(`${input.stderr ?? ""}\n${rawText}`)) {
+      return {
+        provider: input.provider,
+        verdict: "rate-limited",
+        summary: `${providerLabel(input.provider)} was rate-limited before returning structured review output. Other provider results, if any, were preserved.`,
+        findings: [],
+        assumptions: [],
+        verification_gaps: ["Retry after the provider quota window resets, or run with a different provider."],
+        output_valid: false,
+        provider_session_id: input.sessionId ?? "",
+        raw_result_path: input.rawResultPath ?? "",
+      };
+    }
     return {
       provider: input.provider,
       verdict: "invalid-output",
@@ -769,6 +782,9 @@ function providerRunStatus(command, normalized, options = {}) {
   if (options.cancelled) {
     return "cancelled";
   }
+  if (normalized?.verdict === "rate-limited") {
+    return "rate-limited";
+  }
   if (command.failedBeforeOutput) {
     return "failed";
   }
@@ -792,7 +808,7 @@ function providerRunStatus(command, normalized, options = {}) {
 
 function finalJobStatus(providerRuns) {
   const hasCompleted = providerRuns.some((run) => run.status === "completed");
-  const hasProblem = providerRuns.some((run) => run.status === "failed" || run.status === "invalid-output");
+  const hasProblem = providerRuns.some((run) => ["failed", "invalid-output", "rate-limited"].includes(run.status));
   const hasCancelled = providerRuns.some((run) => run.status === "cancelled");
   if (hasCancelled && !hasCompleted && !hasProblem) {
     return "cancelled";
@@ -963,6 +979,10 @@ function summarizeError(stderr) {
     .map((line) => line.trim())
     .find((line) => line && !line.startsWith("at "));
   return summarize(firstUsefulLine || text);
+}
+
+function isRateLimitError(value) {
+  return /\b(?:429|rate[_ -]?limit|rate limited|too many requests|quota)\b/i.test(String(value ?? ""));
 }
 
 function classifyVerdict(rawText, findings) {

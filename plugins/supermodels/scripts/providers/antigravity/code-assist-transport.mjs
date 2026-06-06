@@ -71,7 +71,7 @@ export class AntigravityCodeAssistTransport {
         signal: signal.signal,
       });
       if (response.status === 401 && !refreshed) {
-        this.credentials.forceReload?.();
+        await refreshCredentials(this.credentials);
         return await this.request(body, options, true);
       }
       if (!response.ok) {
@@ -138,7 +138,7 @@ export class AntigravityCodeAssistTransport {
       signal: options.signal,
     });
     if (response.status === 401 && !refreshed) {
-      this.credentials.forceReload?.();
+      await refreshCredentials(this.credentials);
       return await this.postJson(path, body, options, true);
     }
     if (!response.ok) {
@@ -515,6 +515,14 @@ function throwIfAborted(signal) {
   if (signal?.aborted) {
     throw signal.reason ?? new Error("Request aborted.");
   }
+}
+
+async function refreshCredentials(credentials) {
+  if (credentials.forceRefresh) {
+    await credentials.forceRefresh();
+    return;
+  }
+  credentials.forceReload?.();
 }
 
 function combineAbortSignals(parentSignal, timeoutMs) {

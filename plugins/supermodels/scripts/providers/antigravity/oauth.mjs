@@ -70,9 +70,7 @@ export class AntigravityCredentials {
       try {
         return await this.readKeychain();
       } catch (error) {
-        if (!existsSync(this.credentialsPath)) {
-          throw error;
-        }
+        throw new Error(`Antigravity keychain credential read failed; refusing to fall back to local token file. Run \`agy\` once interactively or set ANTIGRAVITY_OAUTH_CREDS_PATH explicitly. ${error?.message || String(error)}`);
       }
     }
     const parsed = JSON.parse(await readFile(this.credentialsPath, "utf8"));

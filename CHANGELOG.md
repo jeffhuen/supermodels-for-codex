@@ -27,6 +27,10 @@ Initial public release.
 - Reviews run through a shared Supermodels-owned tool loop, so Claude Code and Antigravity both inspect repository evidence with the same read-only tools before returning structured findings.
 - Review/task runs check only the requested providers, so an unavailable unrequested provider cannot block a single-provider run.
 - Antigravity readiness on macOS prefers the native Keychain token store over stale default token files, while explicit/fake `HOME` credential paths remain hermetic.
+- Claude Code OAuth review rate limits are surfaced as provider `rate-limited` results instead of invalid structured output.
+- Antigravity rejected-token `401` responses force native AGY refresh before retrying the request.
+- Preloaded review context now fails explicitly when changed-file discovery fails, and unreadable snippets no longer satisfy the review inspection gate.
+- macOS Antigravity keychain read failures no longer silently fall back to local token files unless a file path is explicitly configured.
 
 ### Scope
 

@@ -98,6 +98,20 @@ test("get_review_context returns diff, changed files, and bounded file snippets"
   }
 });
 
+test("get_review_context surfaces git status failures instead of returning incomplete context", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-context-not-git-"));
+  try {
+    const tools = createReviewTools({ workspaceRoot: workspace });
+
+    await assert.rejects(
+      () => tools.execute("get_review_context"),
+      /git status failed/i,
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("tool commands observe cancellation before shelling out", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-tools-cancel-"));
   try {

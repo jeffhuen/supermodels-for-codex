@@ -538,6 +538,9 @@ function providerLiveStatus(run, now) {
   if (run.status === "invalid-output") {
     return `invalid output${run.lastEvent ? ` - ${run.lastEvent}` : ""}`;
   }
+  if (run.status === "rate-limited") {
+    return `rate limited${run.lastEvent ? ` - ${run.lastEvent}` : ""}`;
+  }
   return run.status ?? "unknown";
 }
 
@@ -583,7 +586,8 @@ function providerProgressSummary(job) {
   const completed = runs.filter((run) => run.status === "completed").length;
   const failed = runs.filter((run) => run.status === "failed").length;
   const invalid = runs.filter((run) => run.status === "invalid-output").length;
-  return `${completed}/${runs.length} providers completed${failed ? `, ${failed} failed` : ""}${invalid ? `, ${invalid} invalid` : ""}`;
+  const rateLimited = runs.filter((run) => run.status === "rate-limited").length;
+  return `${completed}/${runs.length} providers completed${failed ? `, ${failed} failed` : ""}${invalid ? `, ${invalid} invalid` : ""}${rateLimited ? `, ${rateLimited} rate-limited` : ""}`;
 }
 
 function providerLabel(provider) {
@@ -609,6 +613,9 @@ function providerStatusText(run) {
   }
   if (run.status === "invalid-output") {
     return `invalid output${run.rawResultPath ? `, raw ${run.rawResultPath}` : ""}`;
+  }
+  if (run.status === "rate-limited") {
+    return `rate limited${run.stderrPath ? `, see ${run.stderrPath}` : ""}`;
   }
   return run.status ?? "unknown";
 }

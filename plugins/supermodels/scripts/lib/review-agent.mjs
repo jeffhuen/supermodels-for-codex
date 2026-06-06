@@ -240,7 +240,7 @@ function updateInspection(inspection, name, result) {
   if (name === "get_review_context") {
     inspection.diff = Boolean(result.diff || result.diffSummary);
     inspection.fileOrSearch = Array.isArray(result.fileSnippets)
-      && result.fileSnippets.some((snippet) => snippet.content || snippet.error);
+      && result.fileSnippets.some((snippet) => snippet.content);
     return;
   }
   if (name === "get_diff") {

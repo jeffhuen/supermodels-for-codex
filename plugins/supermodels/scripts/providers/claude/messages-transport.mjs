@@ -7,8 +7,6 @@ export class ClaudeOAuthMessagesTransport {
     this.credentials = options.credentials;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.url = options.url ?? process.env.SUPERMODELS_CLAUDE_MESSAGES_URL ?? ANTHROPIC_MESSAGES_URL;
-    this.maxRetries = options.maxRetries ?? 2;
-    this.retryBaseDelayMs = options.retryBaseDelayMs ?? 2000;
   }
 
   async messages(body, options = {}) {
@@ -40,11 +38,6 @@ export class ClaudeOAuthMessagesTransport {
       }
       if (!response.ok) {
         const bodyText = await response.text();
-        const attempt = options.retryAttempt ?? 0;
-        if (isRetryableStatus(response.status) && attempt < this.maxRetries) {
-          await sleep(retryDelayMs(response, bodyText, this.retryBaseDelayMs, attempt), signal.signal);
-          return await this.request(body, { ...options, retryAttempt: attempt + 1 }, refreshed);
-        }
         throw new Error(`Anthropic Messages request failed: ${response.status} ${bodyText}`);
       }
       return collectClaudeMessageEvents(parseAnthropicSseLines((await response.text()).split(/\r?\n/)));
@@ -229,35 +222,4 @@ async function refreshCredentials(credentials) {
     return;
   }
   credentials.forceReload?.();
-}
-
-function isRetryableStatus(status) {
-  return status === 429 || (status >= 500 && status < 600);
-}
-
-function retryDelayMs(response, bodyText, fallbackMs, attempt) {
-  const header = response.headers.get("retry-after") ?? response.headers.get("Retry-After");
-  const headerSeconds = Number(header);
-  if (Number.isFinite(headerSeconds) && headerSeconds >= 0) {
-    return headerSeconds * 1000;
-  }
-  const match = String(bodyText ?? "").match(/reset after\s+(\d+)\s*s/i);
-  if (match) {
-    return Number(match[1]) * 1000;
-  }
-  return fallbackMs * (attempt + 1);
-}
-
-function sleep(ms, signal) {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(signal.reason ?? new Error("Request aborted."));
-      return;
-    }
-    const timer = setTimeout(resolve, Math.max(0, ms));
-    signal?.addEventListener?.("abort", () => {
-      clearTimeout(timer);
-      reject(signal.reason ?? new Error("Request aborted."));
-    }, { once: true });
-  });
 }

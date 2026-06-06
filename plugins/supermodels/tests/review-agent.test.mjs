@@ -304,6 +304,40 @@ test("runReviewAgent does not treat changed-file lists as file inspection", asyn
   );
 });
 
+test("runReviewAgent does not treat unreadable preloaded snippets as file inspection", async () => {
+  const fakeTransport = {
+    async messages() {
+      return responseWithTool("submit_1", "submit_review", cleanReview("unreadable snippets only"));
+    },
+  };
+  const fakeTools = {
+    schemas: [],
+    async execute(name) {
+      if (name === "get_review_context") {
+        return {
+          ok: true,
+          diff: "diff",
+          diffSummary: "1 file changed",
+          changedFiles: [{ status: "D", path: "deleted.mjs" }],
+          fileSnippets: [{ path: "deleted.mjs", error: "Path is not a regular file." }],
+        };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+
+  await assert.rejects(
+    () => runReviewAgent({
+      provider: "antigravity",
+      transport: fakeTransport,
+      tools: fakeTools,
+      preloadTools: ["get_review_context"],
+      maxRounds: 1,
+    }),
+    /review did not complete/i,
+  );
+});
+
 function responseWithTool(id, name, input) {
   return {
     content: [{ type: "tool_use", id, name, input }],
