@@ -354,7 +354,8 @@ async function handleCancel(parsed) {
     jobId,
   });
   await sleep(1500);
-  signalJobProcesses(job, { signal: "SIGKILL", signaler: signalProcessTree });
+  const latestJob = await readJob(state, jobId).catch(() => job);
+  signalJobProcesses(latestJob, { signal: "SIGKILL", signaler: signalProcessTree, verifyIdentity: true });
   writeOutput(parsed, output, `Cancelled Supermodels job ${jobId}`);
 }
 
@@ -421,7 +422,7 @@ function installLiveAbortHandlers({ state, jobId }) {
 async function handleLiveAbort({ state, jobId, signal }) {
   const job = await readJob(state, jobId).catch(() => null);
   if (job) {
-    signalJobProcesses(job, { signal: "SIGTERM", signaler: signalProcessTree });
+    signalJobProcesses(job, { signal: "SIGTERM", signaler: signalProcessTree, excludePids: [process.pid] });
   }
   await updateJob(state, jobId, (current) => ({
     ...current,
@@ -434,7 +435,13 @@ async function handleLiveAbort({ state, jobId, signal }) {
   })).catch(() => null);
   if (job) {
     await sleep(1500);
-    signalJobProcesses(job, { signal: "SIGKILL", signaler: signalProcessTree });
+    const latestJob = await readJob(state, jobId).catch(() => job);
+    signalJobProcesses(latestJob, {
+      signal: "SIGKILL",
+      signaler: signalProcessTree,
+      excludePids: [process.pid],
+      verifyIdentity: true,
+    });
   }
 }
 

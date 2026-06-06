@@ -17,6 +17,7 @@ Initial public release.
 - Private supervisor handoff files that avoid serialized env/prompt leakage and are removed after provider startup.
 - Private state/run artifacts and Antigravity prompt artifacts using `0700` directories and `0600` files.
 - Cancel escalation from `SIGTERM` to `SIGKILL` for provider processes that ignore graceful termination.
+- Foreground/live aborts exclude the current orchestrator process, re-read job state before escalation, and verify recorded PID start signatures before `SIGKILL`.
 
 ### Scope
 

@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 
 const PID_FILE_PREFIX = "provider-";
@@ -52,8 +53,17 @@ export function jobProcessDescriptors(job) {
 export function signalJobProcesses(job, options = {}) {
   const signal = options.signal ?? "SIGTERM";
   const signaler = options.signaler;
+  const excludePids = new Set((options.excludePids ?? []).map((pid) => Number(pid)));
+  const verifyIdentity = Boolean(options.verifyIdentity);
   const signalled = [];
-  for (const pid of jobProcessPids(job)) {
+  for (const descriptor of jobProcessDescriptors(job)) {
+    const pid = Number(descriptor.pid);
+    if (excludePids.has(pid)) {
+      continue;
+    }
+    if (verifyIdentity && !descriptorIdentityMatches(descriptor)) {
+      continue;
+    }
     if (signaler?.(pid, signal)) {
       signalled.push(pid);
     }
@@ -123,4 +133,27 @@ function parseProviderPidSidecar(text) {
     };
   }
   return null;
+}
+
+function descriptorIdentityMatches(descriptor) {
+  if (!descriptor.pidStartedAt) {
+    return true;
+  }
+  const observedStartedAt = processStartedAtSync(descriptor.pid);
+  return observedStartedAt === descriptor.pidStartedAt;
+}
+
+function processStartedAtSync(pid) {
+  if (!Number.isFinite(Number(pid)) || Number(pid) <= 0 || process.platform === "win32") {
+    return "";
+  }
+  try {
+    return execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 1000,
+    }).trim().replace(/\s+/g, " ");
+  } catch {
+    return "";
+  }
 }
