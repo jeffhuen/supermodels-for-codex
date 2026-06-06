@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  jobProcessDescriptors,
   jobProcessPids,
   signalJobProcesses,
   writeProviderPid,
@@ -40,6 +41,28 @@ test("writeProviderPid is best-effort when the job dir is missing", async () => 
 
   assert.equal(writeProviderPid(job, "claude", 222), false);
   assert.deepEqual(jobProcessPids(job), [111]);
+});
+
+test("provider pid sidecars preserve process start signatures", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "supermodels-provider-pids-signature-"));
+  try {
+    const job = {
+      pid: 111,
+      pidStartedAt: "Mon Jan 1 00:00:00 2024",
+      dir,
+      providerRuns: {},
+    };
+
+    writeProviderPid(job, "claude", 222, { pidStartedAt: "Tue Jan 2 00:00:00 2024" });
+
+    assert.deepEqual(jobProcessDescriptors(job), [
+      { pid: 111, pidStartedAt: "Mon Jan 1 00:00:00 2024", source: "job" },
+      { pid: 222, pidStartedAt: "Tue Jan 2 00:00:00 2024", source: "provider-sidecar" },
+    ]);
+    assert.deepEqual(jobProcessPids(job), [111, 222]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("signalJobProcesses signals job and sidecar provider process groups", async () => {

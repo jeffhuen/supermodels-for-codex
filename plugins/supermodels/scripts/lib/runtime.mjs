@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 
 import { collectGitContext } from "./git.mjs";
 import { commandLine } from "./process.mjs";
-import { jobProcessPids, writeProviderPid } from "./provider-pids.mjs";
+import { jobProcessDescriptors, writeProviderPid } from "./provider-pids.mjs";
 import { renderReviewPrompt, renderTaskPrompt } from "./prompts.mjs";
 import {
   normalizeStructuredReview,
@@ -625,6 +625,13 @@ function createProviderStartRecorder({ state, jobId, job, provider, enqueueWrite
     }
     writeProviderPid(job, provider, pid);
     enqueueWrite(() => updateProviderRun(state, jobId, provider, { pid }), { critical: false });
+    processStartedAt(pid).then((pidStartedAt) => {
+      if (!pidStartedAt) {
+        return;
+      }
+      writeProviderPid(job, provider, pid, { pidStartedAt });
+      enqueueWrite(() => updateProviderRun(state, jobId, provider, { pid, pidStartedAt }), { critical: false });
+    }).catch(() => {});
   };
 }
 
@@ -771,11 +778,11 @@ async function reconcileJobStatus(state, job) {
   if (job?.status !== "running") {
     return job;
   }
-  const pids = jobProcessPids(job);
-  if (await jobHasLiveProcess(job, pids)) {
+  const processes = jobProcessDescriptors(job);
+  if (await jobHasLiveProcess(job, processes)) {
     return job;
   }
-  if (!pids.length && !isRunningJobStaleWithoutPid(job)) {
+  if (!processes.length && !isRunningJobStaleWithoutPid(job)) {
     return job;
   }
   try {
@@ -783,14 +790,14 @@ async function reconcileJobStatus(state, job) {
       if (current.status !== "running") {
         return current;
       }
-      const currentPids = jobProcessPids(current);
-      if (await jobHasLiveProcess(current, currentPids)) {
+      const currentProcesses = jobProcessDescriptors(current);
+      if (await jobHasLiveProcess(current, currentProcesses)) {
         return current;
       }
-      if (!currentPids.length && !isRunningJobStaleWithoutPid(current)) {
+      if (!currentProcesses.length && !isRunningJobStaleWithoutPid(current)) {
         return current;
       }
-      const reason = currentPids.length
+      const reason = currentProcesses.length
         ? "Job process is no longer running."
         : "Job has no recorded worker process and has not updated recently.";
       return markJobFailed(current, reason);
@@ -800,15 +807,18 @@ async function reconcileJobStatus(state, job) {
   }
 }
 
-async function jobHasLiveProcess(job, pids) {
-  for (const pid of pids) {
-    if (pid === Number(job.pid) && job.pidStartedAt) {
-      if (await processStartedAt(pid) === job.pidStartedAt) {
+async function jobHasLiveProcess(job, processes) {
+  for (const descriptor of processes) {
+    const pid = Number(descriptor.pid);
+    const pidStartedAt = descriptor.pidStartedAt
+      || (pid === Number(job.pid) ? job.pidStartedAt : "");
+    if (pidStartedAt) {
+      if (await processStartedAt(pid) === pidStartedAt) {
         return true;
       }
       continue;
     }
-    if (isProcessAlive(pid)) {
+    if (descriptor.source === "job" && isProcessAlive(pid)) {
       return true;
     }
   }

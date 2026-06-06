@@ -4,13 +4,16 @@ import path from "node:path";
 const PID_FILE_PREFIX = "provider-";
 const PID_FILE_SUFFIX = ".pid";
 
-export function writeProviderPid(job, provider, pid) {
+export function writeProviderPid(job, provider, pid, options = {}) {
   const numericPid = Number(pid);
   if (!job?.dir || !Number.isFinite(numericPid) || numericPid <= 0) {
     return false;
   }
   try {
-    writeFileSync(providerPidPath(job.dir, provider), `${numericPid}\n`, { mode: 0o600 });
+    const payload = options.pidStartedAt
+      ? `${JSON.stringify({ pid: numericPid, pidStartedAt: options.pidStartedAt })}\n`
+      : `${numericPid}\n`;
+    writeFileSync(providerPidPath(job.dir, provider), payload, { mode: 0o600 });
     return true;
   } catch {
     return false;
@@ -18,11 +21,32 @@ export function writeProviderPid(job, provider, pid) {
 }
 
 export function jobProcessPids(job) {
-  return [...new Set([
-    Number(job?.pid),
-    ...Object.values(job?.providerRuns ?? {}).map((run) => Number(run.pid)),
+  return jobProcessDescriptors(job).map((entry) => entry.pid);
+}
+
+export function jobProcessDescriptors(job) {
+  const descriptors = [
+    {
+      pid: Number(job?.pid),
+      pidStartedAt: job?.pidStartedAt ?? "",
+      source: "job",
+    },
+    ...Object.values(job?.providerRuns ?? {}).map((run) => ({
+      pid: Number(run.pid),
+      pidStartedAt: run.pidStartedAt ?? "",
+      source: "provider",
+    })),
     ...readProviderPidSidecars(job),
-  ].filter((pid) => Number.isFinite(pid) && pid > 0))];
+  ].filter((entry) => Number.isFinite(entry.pid) && entry.pid > 0);
+
+  const byPid = new Map();
+  for (const entry of descriptors) {
+    const existing = byPid.get(entry.pid);
+    if (!existing || (!existing.pidStartedAt && entry.pidStartedAt)) {
+      byPid.set(entry.pid, entry);
+    }
+  }
+  return [...byPid.values()];
 }
 
 export function signalJobProcesses(job, options = {}) {
@@ -63,10 +87,40 @@ function readProviderPidSidecars(job) {
     } catch {
       continue;
     }
-    const pid = Number(text);
-    if (Number.isFinite(pid) && pid > 0) {
-      pids.push(pid);
+    const parsed = parseProviderPidSidecar(text);
+    if (parsed) {
+      pids.push(parsed);
     }
   }
   return pids;
+}
+
+function parseProviderPidSidecar(text) {
+  if (!text) {
+    return null;
+  }
+  if (text.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(text);
+      const pid = Number(parsed.pid);
+      if (Number.isFinite(pid) && pid > 0) {
+        return {
+          pid,
+          pidStartedAt: parsed.pidStartedAt ?? "",
+          source: "provider-sidecar",
+        };
+      }
+    } catch {
+      return null;
+    }
+  }
+  const pid = Number(text);
+  if (Number.isFinite(pid) && pid > 0) {
+    return {
+      pid,
+      pidStartedAt: "",
+      source: "provider-sidecar",
+    };
+  }
+  return null;
 }
