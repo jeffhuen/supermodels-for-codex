@@ -194,8 +194,8 @@ test("runReviewAgent can force required inspection tools before final review", a
         return responseWithTool("diff_1", "get_diff", {});
       }
       if (this.calls === 2) {
-        assert.deepEqual(body.tool_choice, { type: "tool", name: "list_changed_files" });
-        return responseWithTool("files_1", "list_changed_files", {});
+        assert.deepEqual(body.tool_choice, { type: "tool", name: "search" });
+        return responseWithTool("search_1", "search", { query: "runtime" });
       }
       assert.deepEqual(body.tool_choice, { type: "tool", name: "submit_review" });
       return responseWithTool("submit_1", "submit_review", cleanReview("forced"));
@@ -207,8 +207,8 @@ test("runReviewAgent can force required inspection tools before final review", a
       if (name === "get_diff") {
         return { ok: true, diff: "diff", diffSummary: "1 file changed" };
       }
-      if (name === "list_changed_files") {
-        return { ok: true, output: "M runtime.mjs" };
+      if (name === "search") {
+        return { ok: true, query: "runtime", output: "runtime.mjs:1:export {}" };
       }
       throw new Error(`unexpected tool ${name}`);
     },
@@ -226,7 +226,7 @@ test("runReviewAgent can force required inspection tools before final review", a
   assert.equal(result.verdict, "clean");
   assert.deepEqual(seenChoices, [
     { type: "tool", name: "get_diff" },
-    { type: "tool", name: "list_changed_files" },
+    { type: "tool", name: "search" },
     { type: "tool", name: "submit_review" },
   ]);
 });
@@ -245,11 +245,14 @@ test("runReviewAgent can preload required inspection tools before first provider
     schemas: [],
     async execute(name) {
       executed.push(name);
-      if (name === "get_diff") {
-        return { ok: true, diff: "diff", diffSummary: "1 file changed" };
-      }
-      if (name === "list_changed_files") {
-        return { ok: true, files: ["M runtime.mjs"] };
+      if (name === "get_review_context") {
+        return {
+          ok: true,
+          diff: "diff",
+          diffSummary: "1 file changed",
+          changedFiles: [{ status: "M", path: "runtime.mjs" }],
+          fileSnippets: [{ path: "runtime.mjs", content: "1: export {};" }],
+        };
       }
       throw new Error(`unexpected tool ${name}`);
     },
@@ -259,16 +262,46 @@ test("runReviewAgent can preload required inspection tools before first provider
     provider: "antigravity",
     transport: fakeTransport,
     tools: fakeTools,
-    preloadTools: ["get_diff", "list_changed_files"],
+    preloadTools: ["get_review_context"],
     forceAfterRounds: 1,
     maxRounds: 1,
   });
 
   assert.equal(result.verdict, "clean");
-  assert.deepEqual(executed, ["get_diff", "list_changed_files"]);
-  assert.equal(result.toolUsage.get_diff, 1);
-  assert.equal(result.toolUsage.list_changed_files, 1);
+  assert.deepEqual(executed, ["get_review_context"]);
+  assert.equal(result.toolUsage.get_review_context, 1);
   assert.match(JSON.stringify(firstBody.messages), /Codex preloaded/);
+});
+
+test("runReviewAgent does not treat changed-file lists as file inspection", async () => {
+  const fakeTransport = {
+    async messages() {
+      return responseWithTool("submit_1", "submit_review", cleanReview("status only"));
+    },
+  };
+  const fakeTools = {
+    schemas: [],
+    async execute(name) {
+      if (name === "get_diff") {
+        return { ok: true, diff: "diff", diffSummary: "1 file changed" };
+      }
+      if (name === "list_changed_files") {
+        return { ok: true, output: "M plugins/supermodels/scripts/lib/runtime.mjs" };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+
+  await assert.rejects(
+    () => runReviewAgent({
+      provider: "antigravity",
+      transport: fakeTransport,
+      tools: fakeTools,
+      preloadTools: ["get_diff", "list_changed_files"],
+      maxRounds: 1,
+    }),
+    /review did not complete/i,
+  );
 });
 
 function responseWithTool(id, name, input) {

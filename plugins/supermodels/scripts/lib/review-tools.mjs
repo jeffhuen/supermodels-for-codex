@@ -6,6 +6,8 @@ import { runCommand } from "./process.mjs";
 
 const DEFAULT_MAX_FILE_BYTES = 80_000;
 const DEFAULT_MAX_TOOL_BYTES = 120_000;
+const DEFAULT_CONTEXT_FILE_LIMIT = 6;
+const DEFAULT_CONTEXT_FILE_BYTES = 12_000;
 
 export function createReviewTools(options = {}) {
   const workspaceRoot = path.resolve(options.workspaceRoot ?? process.cwd());
@@ -32,6 +34,9 @@ export function createReviewTools(options = {}) {
           diff: context.diff,
         }, maxToolBytes);
       }
+      if (name === "get_review_context") {
+        return await getReviewContext(workspaceRoot, options, maxToolBytes, activeController);
+      }
       if (name === "list_changed_files") {
         return await listChangedFiles(workspaceRoot, maxToolBytes, activeController);
       }
@@ -54,6 +59,15 @@ function reviewToolSchemas() {
     {
       name: "get_diff",
       description: "Return the current git diff and diff summary for the workspace.",
+      input_schema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "get_review_context",
+      description: "Return the current diff, changed files, and bounded snippets from changed files.",
       input_schema: {
         type: "object",
         properties: {},
@@ -107,6 +121,52 @@ function reviewToolSchemas() {
       },
     },
   ];
+}
+
+async function getReviewContext(workspaceRoot, options, maxToolBytes, controller) {
+  throwIfCancelled(controller);
+  const context = await collectGitContext({
+    workspaceRoot,
+    scope: options.scope ?? "working-tree",
+    baseRef: options.baseRef ?? "",
+  });
+  throwIfCancelled(controller);
+  const changedFiles = await changedFilesFromGitStatus(workspaceRoot, controller);
+  const fileLimit = options.contextFileLimit ?? DEFAULT_CONTEXT_FILE_LIMIT;
+  const fileBytes = options.contextFileBytes ?? DEFAULT_CONTEXT_FILE_BYTES;
+  const fileSnippets = [];
+  for (const changed of changedFiles.slice(0, fileLimit)) {
+    throwIfCancelled(controller);
+    const snippet = await readWorkspaceFile(workspaceRoot, {
+      path: changed.path,
+      start_line: 1,
+      end_line: 200,
+    }, fileBytes, controller).catch((error) => ({
+      ok: false,
+      error: error?.message || String(error),
+      path: changed.path,
+    }));
+    fileSnippets.push({
+      status: changed.status,
+      path: changed.path,
+      ...(snippet.ok
+        ? {
+          start_line: snippet.start_line,
+          end_line: snippet.end_line,
+          truncated: snippet.truncated,
+          content: snippet.content,
+        }
+        : { error: snippet.error ?? "could not read file" }),
+    });
+  }
+  return truncateObject({
+    ok: true,
+    workspaceRoot,
+    diffSummary: context.diffSummary,
+    diff: context.diff,
+    changedFiles,
+    fileSnippets,
+  }, maxToolBytes);
 }
 
 async function readWorkspaceFile(workspaceRoot, input, maxBytes, controller) {
@@ -198,6 +258,22 @@ async function listFiles(workspaceRoot, input, maxBytes, controller) {
 
 async function listChangedFiles(workspaceRoot, maxBytes, controller) {
   throwIfCancelled(controller);
+  const files = await changedFilesFromGitStatus(workspaceRoot, controller);
+  return {
+    ok: true,
+    changedFiles: files,
+    output: truncateText(
+      files.length
+        ? files.map((file) => `${file.status.padEnd(2)} ${file.path}`).join("\n")
+        : "(no changed files)",
+      maxBytes,
+    ),
+    truncated: Buffer.byteLength(files.map((file) => `${file.status} ${file.path}`).join("\n"), "utf8") > maxBytes,
+  };
+}
+
+async function changedFilesFromGitStatus(workspaceRoot, controller) {
+  throwIfCancelled(controller);
   const status = await runCommand({
     bin: "git",
     args: ["status", "--short"],
@@ -208,13 +284,39 @@ async function listChangedFiles(workspaceRoot, maxBytes, controller) {
   });
   throwIfCancelled(controller);
   if (status.exitCode !== 0) {
-    return { ok: false, error: status.stderr || "git status failed" };
+    return [];
   }
-  return {
-    ok: true,
-    output: truncateText(status.stdout || "(no changed files)", maxBytes),
-    truncated: Buffer.byteLength(status.stdout ?? "", "utf8") > maxBytes,
-  };
+  return parseGitStatus(status.stdout);
+}
+
+function parseGitStatus(stdout) {
+  return String(stdout ?? "")
+    .split(/\r?\n/)
+    .filter((line) => line.trim())
+    .map((line) => {
+      const status = line.slice(0, 2).trim() || line.slice(0, 2);
+      let filePath = line.slice(3).trim();
+      const renameIndex = filePath.lastIndexOf(" -> ");
+      if (renameIndex >= 0) {
+        filePath = filePath.slice(renameIndex + " -> ".length);
+      }
+      return {
+        status,
+        path: unquoteGitPath(filePath),
+      };
+    })
+    .filter((file) => file.path);
+}
+
+function unquoteGitPath(filePath) {
+  if (filePath.startsWith('"') && filePath.endsWith('"')) {
+    try {
+      return JSON.parse(filePath);
+    } catch {
+      return filePath.slice(1, -1);
+    }
+  }
+  return filePath;
 }
 
 async function safeWorkspacePath(workspaceRoot, requestedPath) {
@@ -248,11 +350,28 @@ function truncateObject(value, maxBytes) {
   if (Buffer.byteLength(text, "utf8") <= maxBytes) {
     return value;
   }
-  return {
+  const out = {
     ...value,
-    diff: truncateText(value.diff ?? "", maxBytes),
     truncated: true,
   };
+  if (typeof out.diff === "string") {
+    out.diff = truncateText(out.diff, Math.floor(maxBytes * 0.55));
+  }
+  if (Array.isArray(out.fileSnippets) && out.fileSnippets.length) {
+    const snippetBudget = Math.max(1000, Math.floor((maxBytes * 0.35) / out.fileSnippets.length));
+    out.fileSnippets = out.fileSnippets.map((snippet) => ({
+      ...snippet,
+      content: truncateText(snippet.content ?? "", snippetBudget),
+      truncated: snippet.truncated || Buffer.byteLength(snippet.content ?? "", "utf8") > snippetBudget,
+    }));
+  }
+  while (Buffer.byteLength(JSON.stringify(out), "utf8") > maxBytes && out.fileSnippets?.length) {
+    out.fileSnippets.pop();
+  }
+  if (Buffer.byteLength(JSON.stringify(out), "utf8") > maxBytes && typeof out.diff === "string") {
+    out.diff = truncateText(out.diff, Math.floor(maxBytes * 0.2));
+  }
+  return out;
 }
 
 function truncateText(value, maxBytes) {

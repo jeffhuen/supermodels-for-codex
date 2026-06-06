@@ -228,7 +228,7 @@ function nextForcedInspectionTool(inspection, required) {
     return "get_diff";
   }
   if (required.fileOrSearch && !inspection.fileOrSearch) {
-    return "list_changed_files";
+    return "search";
   }
   return "";
 }
@@ -237,10 +237,16 @@ function updateInspection(inspection, name, result) {
   if (!result?.ok) {
     return;
   }
+  if (name === "get_review_context") {
+    inspection.diff = Boolean(result.diff || result.diffSummary);
+    inspection.fileOrSearch = Array.isArray(result.fileSnippets)
+      && result.fileSnippets.some((snippet) => snippet.content || snippet.error);
+    return;
+  }
   if (name === "get_diff") {
     inspection.diff = true;
   }
-  if (["read_file", "search", "list_files", "list_changed_files"].includes(name)) {
+  if (["read_file", "search"].includes(name)) {
     inspection.fileOrSearch = true;
   }
 }
@@ -268,9 +274,9 @@ function initialPrompt({ provider, brief, focus, mode }) {
     "- Do not report vague concerns, stylistic preferences, or issues that are already covered by tests unless the tests are insufficient.",
     "",
     "Suggested flow:",
-    "1. Call get_diff.",
-    "2. Call list_changed_files.",
-    "3. Search/read the most relevant files and tests.",
+    "1. Start from the preloaded review context when present, otherwise call get_review_context.",
+    "2. Search/read the most relevant files and tests if the preloaded snippets are insufficient.",
+    "3. Cross-check findings against tests or adjacent code.",
     "4. Call submit_review with the final structured review.",
     "",
     "User focus:",

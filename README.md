@@ -101,11 +101,11 @@ node scripts/supermodels.mjs status
 
 ### Claude Code
 
-Claude Code reviews use Claude Code OAuth credentials with Anthropic's Messages transport and Supermodels-owned read-only repository tools. Task paths use the installed `claude` CLI with constrained permissions. Write tasks are only allowed when explicitly requested with `--write`, and v1 refuses multi-provider write tasks.
+Claude Code reviews use Claude Code OAuth credentials with Anthropic's Messages transport and Supermodels-owned read-only repository tools. Supermodels preloads bounded review context before the first model call, including the diff, changed files, and snippets from changed files, then Claude may request additional tools. Task paths use the installed `claude` CLI with constrained permissions. Write tasks are only allowed when explicitly requested with `--write`, and v1 refuses multi-provider write tasks.
 
 ### Antigravity
 
-Antigravity reviews use the AGY/Code Assist OAuth credential store and Gemini-style function calling with the same Supermodels-owned read-only repository tools. Supermodels preloads the diff and changed-file list before the first Code Assist call so AGY always reviews real repository evidence, then AGY may request additional read-only tools. Direct review mode defaults to `gemini-2.5-pro`; native `agy` model aliases are still used for task delegation. Code Assist calls are paced conservatively by default; advanced users can tune `SUPERMODELS_ANTIGRAVITY_RPM` and `SUPERMODELS_ANTIGRAVITY_BURST`.
+Antigravity reviews use the AGY/Code Assist OAuth credential store and Gemini-style function calling with the same Supermodels-owned read-only repository tools. Supermodels preloads bounded review context before the first Code Assist call, including the diff, changed files, and snippets from changed files, then AGY may request additional read-only tools. Direct review mode defaults to `gemini-2.5-pro`; native `agy` model aliases are still used for task delegation. Code Assist calls use the reference transport pacing defaults and can be tuned with `SUPERMODELS_ANTIGRAVITY_RPM` and `SUPERMODELS_ANTIGRAVITY_BURST`.
 
 Antigravity write tasks use the installed `agy` CLI's native default write behavior. The current `agy` CLI exposes a read-only `--sandbox` mode and a broad `--dangerously-skip-permissions` mode, but not a Claude-style edit allow-list. Use `--write --provider antigravity` only when that native CLI permission model is acceptable.
 

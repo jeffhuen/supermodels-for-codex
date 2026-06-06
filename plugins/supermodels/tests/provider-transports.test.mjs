@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -195,6 +195,74 @@ test("AntigravityCredentials fails clearly when native AGY does not refresh an e
     );
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("AntigravityCredentials wraps native AGY refresh failures with setup guidance", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "supermodels-agy-oauth-refresh-fails-"));
+  const file = path.join(dir, "antigravity-oauth-token");
+  const fakeAgy = path.join(dir, "agy");
+  try {
+    await writeFile(file, JSON.stringify({
+      token: {
+        access_token: "old-access",
+        refresh_token: "old-refresh",
+        expiry: "2000-01-01T00:00:00.000Z",
+      },
+      auth_method: "consumer",
+    }), "utf8");
+    await writeFile(fakeAgy, [
+      "#!/usr/bin/env node",
+      "console.error('native auth expired');",
+      "process.exit(42);",
+      "",
+    ].join("\n"));
+    await chmod(fakeAgy, 0o755);
+    const credentials = new AntigravityCredentials({
+      credentialsPath: file,
+      refreshBin: fakeAgy,
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+
+    await assert.rejects(
+      () => credentials.accessToken(),
+      /agy models.*native auth expired.*run `agy`/is,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("AntigravityCodeAssistTransport defaults to reference pacing with env overrides", () => {
+  const previousRpm = process.env.SUPERMODELS_ANTIGRAVITY_RPM;
+  const previousBurst = process.env.SUPERMODELS_ANTIGRAVITY_BURST;
+  try {
+    delete process.env.SUPERMODELS_ANTIGRAVITY_RPM;
+    delete process.env.SUPERMODELS_ANTIGRAVITY_BURST;
+    const defaults = new AntigravityCodeAssistTransport({
+      credentials: { accessToken: async () => "access-token" },
+    });
+    assert.equal(defaults.rateLimiter.rpm, 12);
+    assert.equal(defaults.rateLimiter.capacity, 2);
+
+    process.env.SUPERMODELS_ANTIGRAVITY_RPM = "6";
+    process.env.SUPERMODELS_ANTIGRAVITY_BURST = "3";
+    const overridden = new AntigravityCodeAssistTransport({
+      credentials: { accessToken: async () => "access-token" },
+    });
+    assert.equal(overridden.rateLimiter.rpm, 6);
+    assert.equal(overridden.rateLimiter.capacity, 3);
+  } finally {
+    if (previousRpm === undefined) {
+      delete process.env.SUPERMODELS_ANTIGRAVITY_RPM;
+    } else {
+      process.env.SUPERMODELS_ANTIGRAVITY_RPM = previousRpm;
+    }
+    if (previousBurst === undefined) {
+      delete process.env.SUPERMODELS_ANTIGRAVITY_BURST;
+    } else {
+      process.env.SUPERMODELS_ANTIGRAVITY_BURST = previousBurst;
+    }
   }
 });
 

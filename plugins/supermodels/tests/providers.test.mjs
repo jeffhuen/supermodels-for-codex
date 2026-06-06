@@ -156,6 +156,58 @@ test("Claude adapter runs reviews through the direct tool-loop transport", async
   assert.equal(result.structured.verdict, "clean");
 });
 
+test("Claude direct reviews preload repository context before the first model turn", async () => {
+  const executed = [];
+  let firstRequest;
+  const adapter = createClaudeAdapter({
+    reviewTransport: {
+      async messages(body) {
+        firstRequest ??= body;
+        return directToolResponse("submit_1", "submit_review", {
+          verdict: "clean",
+          summary: "preloaded context was enough",
+          findings: [],
+          assumptions: [],
+          verification_gaps: [],
+        });
+      },
+    },
+    reviewTools: {
+      schemas: [],
+      async execute(name) {
+        executed.push(name);
+        if (name === "get_review_context") {
+          return {
+            ok: true,
+            diffSummary: "1 file changed",
+            diff: "diff --git a/plugins/supermodels/scripts/lib/review-agent.mjs b/plugins/supermodels/scripts/lib/review-agent.mjs",
+            changedFiles: [{ status: "M", path: "plugins/supermodels/scripts/lib/review-agent.mjs" }],
+            fileSnippets: [{
+              path: "plugins/supermodels/scripts/lib/review-agent.mjs",
+              content: "1: export async function runReviewAgent() {}",
+            }],
+          };
+        }
+        throw new Error(`unexpected tool ${name}`);
+      },
+    },
+  });
+
+  const result = await adapter.review({
+    mode: "review",
+    focus: "inspect direct transport",
+    context: {},
+    prompt: "brief",
+  }, {
+    cwd: process.cwd(),
+    timeoutMs: 5000,
+  });
+
+  assert.equal(result.structured.verdict, "clean");
+  assert.deepEqual(executed, ["get_review_context"]);
+  assert.match(JSON.stringify(firstRequest.messages), /Codex preloaded/);
+});
+
 test("Antigravity model aliases keep review defaults on Flash High and typo-like aliases fail", () => {
   assert.equal(resolveAntigravityModelAlias("pro"), "Gemini 3.5 Flash (High)");
   assert.equal(
@@ -588,6 +640,18 @@ function fakeDirectReviewFactory(provider) {
     reviewTools: {
       schemas: [],
       async execute(name) {
+        if (name === "get_review_context") {
+          return {
+            ok: true,
+            diffSummary: "1 file changed",
+            diff: "diff --git a/plugins/supermodels/scripts/lib/runtime.mjs b/plugins/supermodels/scripts/lib/runtime.mjs",
+            changedFiles: [{ status: "M", path: "plugins/supermodels/scripts/lib/runtime.mjs" }],
+            fileSnippets: [{
+              path: "plugins/supermodels/scripts/lib/runtime.mjs",
+              content: "1: export {};",
+            }],
+          };
+        }
         if (name === "get_diff") {
           return { ok: true, diffSummary: "1 file changed", diff: "diff --git a/a b/a" };
         }

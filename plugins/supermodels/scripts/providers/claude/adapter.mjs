@@ -258,6 +258,7 @@ async function runClaudeReview(input, options = {}, factoryOptions = {}) {
     focus: input.focus,
     mode: input.mode,
     model,
+    preloadTools: factoryOptions.preloadTools ?? ["get_review_context"],
     timeoutMs: options.timeoutMs ?? 20 * 60 * 1000,
     controller: options.controller,
     onEvent: options.onEvent,

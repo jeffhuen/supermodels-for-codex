@@ -9,7 +9,8 @@ Initial public release.
 - Codex plugin package for Claude Code and Google Antigravity reviews.
 - Skills for setup, providers, review, adversarial review, task, status, result, and cancel.
 - Direct review transports for Claude Code OAuth and AGY/Code Assist OAuth, plus native CLI adapters for task delegation.
-- Deterministic preloaded diff/change context for Antigravity reviews, with conservative Code Assist request pacing.
+- Deterministic preloaded review context for Claude Code and Antigravity reviews, including diff, changed files, and bounded snippets from changed files.
+- Reference-aligned Code Assist request pacing with `SUPERMODELS_ANTIGRAVITY_RPM` and `SUPERMODELS_ANTIGRAVITY_BURST` overrides.
 - Live review mode with provider progress, persisted job state, and attributed provider output.
 - Structured review parsing, provider artifact preservation, and synthesis with provider attribution.
 - Read-only review/task defaults and explicit `--write` handling for bounded task delegation.

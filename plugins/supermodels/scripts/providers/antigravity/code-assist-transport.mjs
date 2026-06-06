@@ -6,8 +6,11 @@ import { randomBytes } from "node:crypto";
 const DEFAULT_BASE_URL = "https://daily-cloudcode-pa.googleapis.com";
 const USER_AGENT = "google-cloud-sdk vscode_cloudshelleditor/0.1";
 const API_CLIENT = "gl-node/22.17.0";
-const DEFAULT_RPM = 3;
-const DEFAULT_BURST = 1;
+// Match the proven TradingAgents AGY transport defaults: slow enough to avoid
+// clustered Code Assist quota spikes, but not so slow that a short review looks
+// stalled. Users can still lower these with SUPERMODELS_ANTIGRAVITY_RPM/BURST.
+const DEFAULT_RPM = 12;
+const DEFAULT_BURST = 2;
 const MIN_RATE_LIMIT_WAIT_MS = 8_000;
 const MAX_RATE_LIMIT_WAIT_MS = 90_000;
 const CLIENT_METADATA = JSON.stringify({
@@ -343,6 +346,9 @@ function stripForGemini(schema) {
     return schema;
   }
   const blocked = new Set([
+    // Code Assist function declarations accept a Gemini subset, not full JSON
+    // Schema. These metadata/validation keys can make otherwise valid tools
+    // fail request validation; property names are handled before this filter.
     "$schema",
     "$defs",
     "definitions",

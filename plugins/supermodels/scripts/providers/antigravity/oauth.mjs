@@ -100,11 +100,24 @@ export class AntigravityCredentials {
       await this.refreshAuth();
       return;
     }
-    await execFileAsync(this.refreshBin, ["models"], {
-      env: refreshCommandEnv(this.env),
-      timeout: 30_000,
-      maxBuffer: 1024 * 1024,
-    });
+    try {
+      await execFileAsync(this.refreshBin, ["models"], {
+        env: refreshCommandEnv(this.env),
+        timeout: 30_000,
+        maxBuffer: 1024 * 1024,
+      });
+    } catch (error) {
+      const detail = [
+        error?.stderr,
+        error?.stdout,
+        error?.message,
+      ].map((part) => String(part ?? "").trim()).filter(Boolean).join("\n");
+      throw new Error([
+        `Antigravity native auth refresh failed while running \`${this.refreshBin} models\`.`,
+        detail,
+        "Run `agy` once interactively to refresh the native Antigravity login, then retry Supermodels.",
+      ].filter(Boolean).join("\n"));
+    }
   }
 }
 

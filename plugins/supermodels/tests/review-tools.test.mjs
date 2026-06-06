@@ -1,10 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import { createReviewTools } from "../scripts/lib/review-tools.mjs";
+
+const execFileAsync = promisify(execFile);
 
 test("read_file returns numbered bounded slices inside workspace", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-tools-"));
@@ -66,6 +70,34 @@ test("search returns bounded line matches", async () => {
   }
 });
 
+test("get_review_context returns diff, changed files, and bounded file snippets", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-context-"));
+  try {
+    await runGit(workspace, ["init"]);
+    await runGit(workspace, ["config", "user.email", "test@example.com"]);
+    await runGit(workspace, ["config", "user.name", "Test User"]);
+    await mkdir(path.join(workspace, "src"));
+    await writeFile(path.join(workspace, "src", "app.mjs"), "export const value = 1;\n", "utf8");
+    await runGit(workspace, ["add", "."]);
+    await runGit(workspace, ["commit", "-m", "initial"]);
+    await writeFile(path.join(workspace, "src", "app.mjs"), "export const value = 2;\n", "utf8");
+    await writeFile(path.join(workspace, "src", "new.mjs"), "export const created = true;\n", "utf8");
+    const tools = createReviewTools({ workspaceRoot: workspace });
+
+    const result = await tools.execute("get_review_context");
+
+    assert.equal(result.ok, true);
+    assert.match(result.diff, /export const value = 2/);
+    assert(result.changedFiles.some((file) => file.path === "src/app.mjs"));
+    assert(result.changedFiles.some((file) => file.path === "src/new.mjs"));
+    assert(result.fileSnippets.some((snippet) => {
+      return snippet.path === "src/app.mjs" && snippet.content.includes("1: export const value = 2;");
+    }));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("tool commands observe cancellation before shelling out", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-tools-cancel-"));
   try {
@@ -80,3 +112,7 @@ test("tool commands observe cancellation before shelling out", async () => {
     await rm(workspace, { recursive: true, force: true });
   }
 });
+
+async function runGit(cwd, args) {
+  await execFileAsync("git", args, { cwd });
+}
