@@ -167,8 +167,22 @@ export function synthesizeProviderResults(results) {
 }
 
 export async function checkProviders(adapters, options = {}) {
+  const providerIds = Array.isArray(options.providerIds) && options.providerIds.length
+    ? options.providerIds
+    : Object.keys(adapters);
   const entries = await Promise.all(
-    Object.entries(adapters).map(async ([id, adapter]) => {
+    providerIds.map(async (id) => {
+      const adapter = adapters[id];
+      if (!adapter) {
+        return [id, {
+          provider: id,
+          ready: false,
+          installed: false,
+          auth: "missing",
+          error: "Provider adapter is not configured.",
+          capabilities: {},
+        }];
+      }
       const check = await adapter.check(options);
       return [id, {
         ...check,
@@ -202,7 +216,10 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
     workspaceRoot,
     dataRoot: options["data-root"],
   });
-  const checks = await checkProviders(adapters, { dataRoot: state.dataRoot });
+  const checks = await checkProviders(adapters, {
+    dataRoot: state.dataRoot,
+    providerIds: providerSelection.requested,
+  });
   const providerPlan = selectProviders({
     requested: providerSelection.requested,
     explicit: providerSelection.explicit,
@@ -354,7 +371,10 @@ export async function runTask({ adapters, providerSelection, options, task, work
     workspaceRoot,
     dataRoot: options["data-root"],
   });
-  const checks = await checkProviders(adapters, { dataRoot: state.dataRoot });
+  const checks = await checkProviders(adapters, {
+    dataRoot: state.dataRoot,
+    providerIds: providerSelection.requested,
+  });
   const providerPlan = selectProviders({
     requested: providerSelection.requested,
     explicit: providerSelection.explicit,

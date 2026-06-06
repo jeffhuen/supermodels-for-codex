@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import { signalProcessTree } from "../scripts/lib/process.mjs";
 import { createState, listJobs } from "../scripts/lib/state.mjs";
+
+const execFileAsync = promisify(execFile);
 
 test("foreground review runs in a dedicated worker process", { skip: process.platform === "win32" }, async () => {
   const fixture = await createFixture("supermodels-worker-foreground-");
@@ -39,7 +42,7 @@ async function createFixture(prefix) {
   const binDir = path.join(tempDir, "bin");
   const dataRoot = path.join(tempDir, "data");
   const credentialsPath = path.join(tempDir, "claude-credentials.json");
-  const repoRoot = path.resolve(import.meta.dirname, "../../..");
+  const repoRoot = await createWorkspaceRepo(tempDir);
   const server = await createBlockingMessagesServer();
   await mkdir(binDir, { recursive: true });
   await writeFakeClaudeStatus(binDir);
@@ -56,6 +59,19 @@ async function createFixture(prefix) {
       await rm(tempDir, { recursive: true, force: true });
     },
   };
+}
+
+async function createWorkspaceRepo(tempDir) {
+  const repoRoot = path.join(tempDir, "workspace");
+  await mkdir(repoRoot, { recursive: true });
+  await execFileAsync("git", ["init"], { cwd: repoRoot });
+  await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: repoRoot });
+  await execFileAsync("git", ["config", "user.name", "Test User"], { cwd: repoRoot });
+  await writeFile(path.join(repoRoot, "sample.mjs"), "export const value = 1;\n", "utf8");
+  await execFileAsync("git", ["add", "."], { cwd: repoRoot });
+  await execFileAsync("git", ["commit", "-m", "initial"], { cwd: repoRoot });
+  await writeFile(path.join(repoRoot, "sample.mjs"), "export const value = 2;\n", "utf8");
+  return await realpath(repoRoot);
 }
 
 function spawnReview(fixture) {

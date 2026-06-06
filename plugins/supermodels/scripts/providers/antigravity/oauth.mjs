@@ -18,6 +18,7 @@ export class AntigravityCredentials {
     this.env = options.env ?? process.env;
     this.refreshAuth = options.refreshAuth;
     this.refreshBin = options.refreshBin ?? "agy";
+    this.keychainReader = options.keychainReader;
     this.now = options.now ?? (() => Date.now());
     this.platform = options.platform ?? process.platform;
     this.cache = null;
@@ -65,8 +66,14 @@ export class AntigravityCredentials {
   }
 
   async readEnvelope() {
-    if (this.useKeychain() && !existsSync(this.credentialsPath)) {
-      return await this.readKeychain();
+    if (this.useKeychain()) {
+      try {
+        return await this.readKeychain();
+      } catch (error) {
+        if (!existsSync(this.credentialsPath)) {
+          throw error;
+        }
+      }
     }
     const parsed = JSON.parse(await readFile(this.credentialsPath, "utf8"));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -76,6 +83,9 @@ export class AntigravityCredentials {
   }
 
   async readKeychain() {
+    if (this.keychainReader) {
+      return await this.keychainReader();
+    }
     const { stdout } = await execFileAsync("security", [
       "find-generic-password",
       "-s",
@@ -92,6 +102,12 @@ export class AntigravityCredentials {
   }
 
   useKeychain() {
+    if (this.keychainReader) {
+      return true;
+    }
+    if (this.env?.HOME && process.env.HOME && this.env.HOME !== process.env.HOME) {
+      return false;
+    }
     return this.platform === "darwin" && !this.credentialsPathExplicit;
   }
 

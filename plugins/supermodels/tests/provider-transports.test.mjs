@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -228,6 +228,40 @@ test("AntigravityCredentials wraps native AGY refresh failures with setup guidan
       () => credentials.accessToken(),
       /agy models.*native auth expired.*run `agy`/is,
     );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("AntigravityCredentials prefers macOS keychain over stale default token file", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "supermodels-agy-oauth-keychain-"));
+  const tokenDir = path.join(dir, ".gemini", "antigravity-cli");
+  const file = path.join(tokenDir, "antigravity-oauth-token");
+  try {
+    await mkdir(tokenDir, { recursive: true });
+    await writeFile(file, JSON.stringify({
+      token: {
+        access_token: "stale-file-access",
+        refresh_token: "stale-file-refresh",
+        expiry: "2000-01-01T00:00:00.000Z",
+      },
+      auth_method: "consumer",
+    }), "utf8");
+    const credentials = new AntigravityCredentials({
+      env: { HOME: dir },
+      platform: "darwin",
+      keychainReader: async () => ({
+        token: {
+          access_token: "fresh-keychain-access",
+          refresh_token: "fresh-keychain-refresh",
+          expiry: "2099-01-01T00:00:00.000Z",
+        },
+        auth_method: "consumer",
+      }),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+
+    assert.equal(await credentials.accessToken(), "fresh-keychain-access");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

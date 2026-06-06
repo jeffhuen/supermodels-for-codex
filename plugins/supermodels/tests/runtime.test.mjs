@@ -591,6 +591,121 @@ test("runReview records orchestrator pid so concurrent status does not fail live
   }
 });
 
+test("runReview checks only requested providers", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-requested-review-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-requested-review-workspace-"));
+  try {
+    let antigravityChecked = false;
+    const adapters = {
+      claude: {
+        check: async () => ({
+          provider: "claude",
+          ready: true,
+          installed: true,
+          auth: "ok",
+          path: "/tmp/claude",
+        }),
+        review: async () => ({
+          exitCode: 0,
+          rawText: JSON.stringify({
+            verdict: "clean",
+            summary: "No findings.",
+            findings: [],
+            assumptions: [],
+            verification_gaps: [],
+          }),
+          stderr: "",
+          sessionId: "claude-session",
+          commandLine: "claude oauth messages",
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+        }),
+      },
+      antigravity: {
+        check: async () => {
+          antigravityChecked = true;
+          throw new Error("unrequested provider should not be checked");
+        },
+      },
+    };
+
+    const output = await runReview({
+      adapters,
+      providerSelection: {
+        requested: ["claude"],
+        explicit: true,
+      },
+      mode: "review",
+      options: {
+        "data-root": dataRoot,
+      },
+      focus: "",
+      workspaceRoot,
+    });
+
+    assert.equal(output.job.status, "completed");
+    assert.equal(antigravityChecked, false);
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("runTask checks only requested providers", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-requested-task-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-requested-task-workspace-"));
+  try {
+    let antigravityChecked = false;
+    const adapters = {
+      claude: {
+        capabilities: () => ({ writeTask: true }),
+        check: async () => ({
+          provider: "claude",
+          ready: true,
+          installed: true,
+          auth: "ok",
+          path: "/tmp/claude",
+        }),
+        task: async () => ({
+          exitCode: 0,
+          rawText: "done",
+          stderr: "",
+          sessionId: "claude-session",
+          commandLine: "claude -p",
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+        }),
+      },
+      antigravity: {
+        capabilities: () => ({ writeTask: true }),
+        check: async () => {
+          antigravityChecked = true;
+          throw new Error("unrequested provider should not be checked");
+        },
+      },
+    };
+
+    const output = await runTask({
+      adapters,
+      providerSelection: {
+        requested: ["claude"],
+        explicit: true,
+      },
+      options: {
+        "data-root": dataRoot,
+      },
+      task: "do the thing",
+      workspaceRoot,
+    });
+
+    assert.equal(output.job.status, "completed");
+    assert.equal(antigravityChecked, false);
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("runReview does not start providers for jobs already cancelled", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-cancelled-before-start-"));
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-cancelled-before-start-workspace-"));
