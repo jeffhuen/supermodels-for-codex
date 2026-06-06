@@ -21,7 +21,7 @@ async function main() {
 
   const child = spawn(spec.command.bin, spec.command.args ?? [], {
     cwd: spec.cwd || process.cwd(),
-    env: spec.env || process.env,
+    env: process.env,
     detached: false,
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -42,14 +42,8 @@ async function main() {
     process.exit(exitCode ?? signalExitCode(signal));
   });
 
-  try {
-    if (spec.inputPath) {
-      child.stdin.write(await readFile(spec.inputPath));
-    }
-    child.stdin.end();
-  } catch (error) {
-    child.stdin.destroy(error);
-  }
+  child.stdin.on("error", () => {});
+  process.stdin.pipe(child.stdin);
 }
 
 async function waitForStartSignal(armPath, abortPath, timeoutMs) {

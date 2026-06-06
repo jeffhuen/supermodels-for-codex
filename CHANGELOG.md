@@ -14,6 +14,7 @@ Initial public release.
 - Read-only review/task defaults and explicit `--write` handling for bounded task delegation.
 - Job state locking, stale lock recovery, cancellation terminality, PID identity checks, and provider process signaling.
 - Provider process supervisor handshake so provider CLIs do not start until a signalable supervisor PID has been recorded.
+- Private supervisor handoff files that avoid serialized env/prompt leakage and are removed after provider startup.
 
 ### Scope
 

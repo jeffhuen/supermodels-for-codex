@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -35,6 +36,55 @@ test("runCommand supervised mode starts after pid recording is accepted", async 
 
     assert.equal(result.exitCode, 0);
     assert.equal(await readFile(markerPath, "utf8"), "started");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("runCommand supervised mode keeps handoff files private and removes them", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-supervised-private-"));
+  const markerPath = path.join(tempDir, "payload.json");
+  const secret = "SUPERMODELS_TEST_SECRET_VALUE";
+  const prompt = "sensitive prompt and diff content";
+  let guardDir = "";
+  try {
+    const childScript = [
+      "const fs = require('node:fs');",
+      "let input = '';",
+      "process.stdin.setEncoding('utf8');",
+      "process.stdin.on('data', chunk => { input += chunk; });",
+      `process.stdin.on('end', () => fs.writeFileSync(${JSON.stringify(markerPath)}, JSON.stringify({ secret: process.env.SUPERMODELS_TEST_SECRET, input })));`,
+    ].join(" ");
+    const result = await runCommand({
+      bin: process.execPath,
+      args: ["-e", childScript],
+    }, {
+      supervised: true,
+      guardDir: tempDir,
+      input: prompt,
+      env: { SUPERMODELS_TEST_SECRET: secret },
+      timeoutMs: 5_000,
+      onStart: ({ pid }) => {
+        const dirs = readdirSync(tempDir).filter((entry) => entry.startsWith(".supermodels-supervisor-"));
+        assert.equal(dirs.length, 1);
+        guardDir = path.join(tempDir, dirs[0]);
+        const specPath = path.join(guardDir, "spec.json");
+        const specText = readFileSync(specPath, "utf8");
+        assert.equal(statSync(guardDir).mode & 0o777, 0o700);
+        assert.equal(statSync(specPath).mode & 0o777, 0o600);
+        assert.equal(specText.includes(secret), false);
+        assert.equal(specText.includes(prompt), false);
+        assert.equal(existsSync(path.join(guardDir, "stdin.txt")), false);
+        return Number.isFinite(Number(pid)) && Number(pid) > 0;
+      },
+    });
+
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(await readFile(markerPath, "utf8"));
+    assert.deepEqual(payload, { secret, input: prompt });
+    assert.equal(existsSync(guardDir), false);
+    const remaining = (await readdir(tempDir)).filter((entry) => entry.startsWith(".supermodels-supervisor-"));
+    assert.deepEqual(remaining, []);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
