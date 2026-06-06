@@ -1,0 +1,342 @@
+import assert from "node:assert/strict";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import {
+  buildClaudeCommand,
+  parseClaudeOutput,
+} from "../scripts/providers/claude/adapter.mjs";
+import {
+  createAntigravityAdapter,
+  buildAntigravityCommand,
+  parseAntigravitySessionMetadata,
+  resolveAntigravityModelAlias,
+} from "../scripts/providers/antigravity/adapter.mjs";
+
+test("parseClaudeOutput extracts stream-json text and session id", () => {
+  const output = [
+    JSON.stringify({ type: "system", session_id: "claude-session-1" }),
+    JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "Finding one" }] },
+    }),
+    JSON.stringify({ type: "result", result: "Final review" }),
+  ].join("\n");
+
+  const parsed = parseClaudeOutput(output);
+
+  assert.equal(parsed.sessionId, "claude-session-1");
+  assert.match(parsed.text, /Finding one/);
+  assert.match(parsed.text, /Final review/);
+});
+
+test("parseClaudeOutput does not duplicate identical assistant and result text", () => {
+  const output = [
+    JSON.stringify({ type: "system", session_id: "claude-session-1" }),
+    JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "High: duplicate finding" }] },
+    }),
+    JSON.stringify({ type: "result", result: "High: duplicate finding" }),
+  ].join("\n");
+
+  const parsed = parseClaudeOutput(output);
+
+  assert.equal(parsed.text, "High: duplicate finding");
+});
+
+test("parseClaudeOutput extracts Claude CLI structured_output from result event", () => {
+  const structured = {
+    verdict: "clean",
+    summary: "No findings.",
+    findings: [],
+    assumptions: [],
+    verification_gaps: [],
+  };
+  const output = [
+    JSON.stringify({ type: "system", session_id: "claude-session-1" }),
+    JSON.stringify({
+      type: "result",
+      result: "```json\n{}\n```",
+      structured_output: structured,
+      usage: { input_tokens: 1, output_tokens: 2 },
+    }),
+  ].join("\n");
+
+  const parsed = parseClaudeOutput(output);
+
+  assert.deepEqual(parsed.structured, structured);
+  assert.deepEqual(parsed.usage, { input_tokens: 1, output_tokens: 2 });
+});
+
+test("parseClaudeOutput falls back to plain stdout", () => {
+  const parsed = parseClaudeOutput("plain review text");
+  assert.equal(parsed.sessionId, "");
+  assert.equal(parsed.text, "plain review text");
+});
+
+test("buildClaudeCommand uses print mode and passes review prompt through stdin", () => {
+  const command = buildClaudeCommand({ mode: "review", model: "claude-opus-4-8" });
+  assert.equal(command.bin, "claude");
+  assert.deepEqual(command.args.slice(0, 4), ["-p", "--output-format", "stream-json", "--verbose"]);
+  assert.equal(command.stdin, true);
+  assert(command.args.includes("claude-opus-4-8"));
+});
+
+test("buildClaudeCommand asks Claude CLI for schema-validated review output", () => {
+  const command = buildClaudeCommand({ mode: "review" });
+  const schemaIndex = command.args.indexOf("--json-schema");
+
+  assert(schemaIndex >= 0);
+  const schema = JSON.parse(command.args[schemaIndex + 1]);
+  assert.equal(schema.type, "object");
+  assert.deepEqual(schema.required, [
+    "verdict",
+    "summary",
+    "findings",
+    "assumptions",
+    "verification_gaps",
+  ]);
+});
+
+test("buildClaudeCommand constrains read-only review and task sessions", () => {
+  const command = buildClaudeCommand({ mode: "review" });
+  assert(command.args.includes("--allowedTools"));
+  assert(command.args.includes("Read,Grep,Glob,LS"));
+  assert.deepEqual(
+    command.args.slice(command.args.indexOf("--permission-mode"), command.args.indexOf("--permission-mode") + 2),
+    ["--permission-mode", "plan"],
+  );
+  assert(!command.args.includes("--no-session-persistence"));
+
+  const task = buildClaudeCommand({ mode: "task" });
+  assert(task.args.includes("--allowedTools"));
+  assert(task.args.includes("Read,Grep,Glob,LS"));
+});
+
+test("buildClaudeCommand leaves write tasks write-capable", () => {
+  const command = buildClaudeCommand({ mode: "task", write: true });
+  assert(command.args.includes("--allowedTools"));
+  assert(command.args.includes("Read,Grep,Glob,LS,Edit,MultiEdit,Write"));
+  assert.deepEqual(
+    command.args.slice(command.args.indexOf("--permission-mode"), command.args.indexOf("--permission-mode") + 2),
+    ["--permission-mode", "acceptEdits"],
+  );
+});
+
+test("buildClaudeCommand supports opus alias and explicit max effort", () => {
+  const command = buildClaudeCommand({ model: "opus", effort: "max" });
+  assert(command.args.includes("claude-opus-4-8"));
+  assert.deepEqual(command.args.slice(-4), ["--model", "claude-opus-4-8", "--effort", "max"]);
+});
+
+test("buildClaudeCommand defaults review effort to high", () => {
+  const command = buildClaudeCommand({ model: "opus" });
+  assert.deepEqual(command.args.slice(-4), ["--model", "claude-opus-4-8", "--effort", "high"]);
+});
+
+test("Antigravity model aliases keep review defaults on Flash High and typo-like aliases fail", () => {
+  assert.equal(resolveAntigravityModelAlias("pro"), "Gemini 3.5 Flash (High)");
+  assert.equal(
+    resolveAntigravityModelAlias("Gemini 3.5 Flash (High)"),
+    "Gemini 3.5 Flash (High)",
+  );
+  assert.throws(() => resolveAntigravityModelAlias("proo"), /unknown antigravity model/i);
+});
+
+test("parseAntigravitySessionMetadata captures trusted native ids", () => {
+  const parsed = parseAntigravitySessionMetadata("conversation_id: agy-123\nReview text", {
+    trusted: true,
+  });
+  assert.equal(parsed.sessionId, "agy-123");
+});
+
+test("parseAntigravitySessionMetadata ignores model-generated session-looking text", () => {
+  const parsed = parseAntigravitySessionMetadata("Finding: conversation_id: test is spoofed");
+  assert.equal(parsed.sessionId, "");
+});
+
+test("buildAntigravityCommand builds native CLI command", () => {
+  const command = buildAntigravityCommand({ model: "pro", promptPath: "/tmp/supermodels-prompt.md" });
+  assert.equal(command.bin, "agy");
+  assert.deepEqual(command.args, [
+    "-p",
+    "Read the Supermodels prompt from this file and follow it exactly: /tmp/supermodels-prompt.md",
+    "--model",
+    "Gemini 3.5 Flash (High)",
+    "--print-timeout",
+    "20m",
+  ]);
+  assert.equal(command.stdin, false);
+});
+
+test("buildAntigravityCommand defaults review modes to Gemini Flash High", () => {
+  const review = buildAntigravityCommand({ mode: "review", promptPath: "/tmp/review.md" });
+  assert.deepEqual(review.args, [
+    "-p",
+    "Read the Supermodels prompt from this file and follow it exactly: /tmp/review.md",
+    "--sandbox",
+    "--model",
+    "Gemini 3.5 Flash (High)",
+    "--print-timeout",
+    "20m",
+  ]);
+
+  const adversarial = buildAntigravityCommand({ mode: "adversarial-review", promptPath: "/tmp/adversarial.md" });
+  assert.deepEqual(adversarial.args, [
+    "-p",
+    "Read the Supermodels prompt from this file and follow it exactly: /tmp/adversarial.md",
+    "--sandbox",
+    "--model",
+    "Gemini 3.5 Flash (High)",
+    "--print-timeout",
+    "20m",
+  ]);
+});
+
+test("buildAntigravityCommand sandboxes read-only tasks on CLI default", () => {
+  const command = buildAntigravityCommand({ mode: "task", promptPath: "/tmp/task.md" });
+  assert.deepEqual(command.args, [
+    "-p",
+    "Read the Supermodels prompt from this file and follow it exactly: /tmp/task.md",
+    "--sandbox",
+    "--print-timeout",
+    "20m",
+  ]);
+});
+
+test("buildAntigravityCommand leaves write tasks write-capable", () => {
+  const command = buildAntigravityCommand({ mode: "task", write: true, promptPath: "/tmp/task.md" });
+  assert.deepEqual(command.args, [
+    "-p",
+    "Read the Supermodels prompt from this file and follow it exactly: /tmp/task.md",
+    "--print-timeout",
+    "20m",
+  ]);
+});
+
+test("buildAntigravityCommand rejects missing prompt path", () => {
+  assert.throws(
+    () => buildAntigravityCommand({ mode: "review" }),
+    /prompt path/i,
+  );
+});
+
+test("parseAntigravitySessionMetadata ignores CLI help text", () => {
+  const parsed = parseAntigravitySessionMetadata("  --conversation                  Resume a previous conversation by ID", {
+    trusted: true,
+  });
+  assert.equal(parsed.sessionId, "");
+});
+
+test("buildAntigravityCommand uses prompt file instead of full prompt argv", () => {
+  const command = buildAntigravityCommand({ mode: "review", promptPath: "/tmp/supermodels-prompt.md" });
+  assert.equal(command.stdin, false);
+  assert.equal(command.args[0], "-p");
+  assert.match(command.args[1], /\/tmp\/supermodels-prompt\.md/);
+  assert(command.args.includes("--sandbox"));
+  assert(!command.args.some((arg) => /SENTINEL_SUPERMODELS_PROMPT/.test(arg)));
+});
+
+test("Antigravity check detects native CLI when local CLI config exists", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-agy-cli-check-"));
+  try {
+    const fakeAgy = path.join(tempDir, "agy");
+    const configDir = path.join(tempDir, ".gemini", "antigravity-cli");
+    await mkdir(configDir, { recursive: true });
+    await writeFile(path.join(configDir, "antigravity-oauth-token"), "{}\n");
+    await writeFile(fakeAgy, [
+      "#!/usr/bin/env node",
+      "if (process.argv.includes('--version')) console.log('1.2.3-test');",
+      "",
+    ].join("\n"));
+    await chmod(fakeAgy, 0o755);
+
+    const adapter = createAntigravityAdapter();
+    const check = await adapter.check({
+      env: {
+        PATH: tempDir,
+        HOME: tempDir,
+      },
+    });
+
+    assert.equal(check.ready, true);
+    assert.equal(check.path, fakeAgy);
+    assert.equal(check.auth, "local-config");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("Antigravity check does not treat an empty config directory as ready", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-agy-empty-config-"));
+  try {
+    const fakeAgy = path.join(tempDir, "agy");
+    await mkdir(path.join(tempDir, ".gemini", "antigravity-cli"), { recursive: true });
+    await writeFile(fakeAgy, [
+      "#!/usr/bin/env node",
+      "if (process.argv.includes('--version')) console.log('1.2.3-test');",
+      "",
+    ].join("\n"));
+    await chmod(fakeAgy, 0o755);
+
+    const adapter = createAntigravityAdapter();
+    const check = await adapter.check({
+      env: {
+        PATH: tempDir,
+        HOME: tempDir,
+      },
+    });
+
+    assert.equal(check.ready, false);
+    assert.equal(check.auth, "missing");
+    assert.match(check.error, /no local auth\/config/i);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("runAntigravityPrompt defaults reviews to native CLI and writes prompt file", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-agy-prompt-file-"));
+  try {
+    const recordPath = path.join(tempDir, "record.json");
+    const fakeAgy = path.join(tempDir, "agy");
+    await writeFile(fakeAgy, [
+      "#!/usr/bin/env node",
+      "import { writeFileSync } from 'node:fs';",
+      "let stdin = '';",
+      "process.stdin.setEncoding('utf8');",
+      "process.stdin.on('data', (chunk) => { stdin += chunk; });",
+      "process.stdin.on('end', () => {",
+      `  writeFileSync(${JSON.stringify(recordPath)}, JSON.stringify({ argv: process.argv.slice(2), stdin }));`,
+      "  console.log('FAKE_ANTIGRAVITY_OK');",
+      "});",
+      "",
+    ].join("\n"));
+    await chmod(fakeAgy, 0o755);
+
+    const adapter = createAntigravityAdapter();
+    const result = await adapter.review({
+      mode: "review",
+      prompt: "SENTINEL_SUPERMODELS_PROMPT",
+    }, {
+      bin: fakeAgy,
+      cwd: tempDir,
+      promptDir: tempDir,
+      timeoutMs: 5000,
+    });
+
+    const record = JSON.parse(await readFile(recordPath, "utf8"));
+    assert.equal(result.rawText, "FAKE_ANTIGRAVITY_OK");
+    assert.equal(record.stdin, "");
+    assert.equal(record.argv[0], "-p");
+    const promptPath = record.argv[1].match(/exactly: (.+)$/)?.[1];
+    assert(promptPath);
+    assert.equal(await readFile(promptPath, "utf8"), "SENTINEL_SUPERMODELS_PROMPT");
+    assert(!record.argv.includes("SENTINEL_SUPERMODELS_PROMPT"));
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});

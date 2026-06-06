@@ -1,0 +1,703 @@
+import assert from "node:assert/strict";
+import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import {
+  markCancelled,
+  normalizeProviderResult,
+  runReview,
+  runTask,
+  selectProviders,
+  synthesizeProviderResults,
+} from "../scripts/lib/runtime.mjs";
+import { createState, listJobs } from "../scripts/lib/state.mjs";
+
+const checks = {
+  claude: {
+    provider: "claude",
+    ready: true,
+    installed: true,
+    auth: "ok",
+  },
+  antigravity: {
+    provider: "antigravity",
+    ready: false,
+    installed: true,
+    auth: "missing",
+    error: "not authenticated",
+  },
+};
+
+test("selectProviders skips unavailable providers for --all", () => {
+  const selected = selectProviders({
+    requested: ["claude", "antigravity"],
+    explicit: false,
+    checks,
+  });
+
+  assert.deepEqual(selected.selected, ["claude"]);
+  assert.deepEqual(selected.skipped.map((item) => item.provider), ["antigravity"]);
+});
+
+test("selectProviders preserves concrete provider readiness errors", () => {
+  const selected = selectProviders({
+    requested: ["claude", "antigravity"],
+    explicit: false,
+    checks: {
+      claude: {
+        provider: "claude",
+        ready: false,
+        installed: false,
+        auth: "missing",
+        error: "claude binary not found",
+      },
+      antigravity: {
+        provider: "antigravity",
+        ready: true,
+        installed: true,
+        auth: "ok",
+      },
+    },
+  });
+
+  assert.deepEqual(selected.selected, ["antigravity"]);
+  assert.equal(selected.skipped[0].reason, "claude binary not found");
+});
+
+test("selectProviders fails explicit unavailable provider", () => {
+  assert.throws(
+    () =>
+      selectProviders({
+        requested: ["antigravity"],
+        explicit: true,
+        checks,
+      }),
+    /not ready/i,
+  );
+});
+
+test("selectProviders skips unavailable providers for explicit multi-provider requests", () => {
+  const selected = selectProviders({
+    requested: ["claude", "antigravity"],
+    explicit: true,
+    checks,
+  });
+
+  assert.deepEqual(selected.selected, ["claude"]);
+  assert.deepEqual(selected.skipped.map((item) => item.provider), ["antigravity"]);
+});
+
+test("normalizeProviderResult conservatively preserves raw output", () => {
+  const normalized = normalizeProviderResult({
+    provider: "claude",
+    rawText: "High: app.js:12 can lose data",
+    sessionId: "s1",
+    rawResultPath: "/tmp/raw.txt",
+  });
+
+  assert.equal(normalized.provider, "claude");
+  assert.equal(normalized.verdict, "needs-attention");
+  assert.equal(normalized.provider_session_id, "s1");
+  assert.match(normalized.summary, /High: app\.js/);
+});
+
+test("normalizeProviderResult prefers schema-validated structured review output", () => {
+  const normalized = normalizeProviderResult({
+    provider: "antigravity",
+    rawText: "raw provider prose",
+    structured: {
+      verdict: "needs-attention",
+      summary: "Structured issue.",
+      findings: [
+        {
+          severity: "high",
+          title: "Race condition",
+          evidence: "state.mjs:60 direct write",
+          impact: "Live reads can fail.",
+          recommendation: "Use atomic writes.",
+          file: "state.mjs",
+          line_start: 60,
+          line_end: 60,
+          confidence: "high",
+        },
+      ],
+      assumptions: ["Workspace is writable."],
+      verification_gaps: ["No live smoke test."],
+    },
+  });
+
+  assert.equal(normalized.verdict, "needs-attention");
+  assert.equal(normalized.output_valid, true);
+  assert.equal(normalized.summary, "Structured issue.");
+  assert.equal(normalized.findings[0].title, "Race condition");
+  assert.equal(normalized.findings[0].file, "state.mjs");
+});
+
+test("normalizeProviderResult marks required structured reviews invalid when output is irrelevant", () => {
+  const normalized = normalizeProviderResult({
+    provider: "antigravity",
+    rawText: "Usage of agy:\n  --model string",
+    requireStructured: true,
+  });
+
+  assert.equal(normalized.verdict, "invalid-output");
+  assert.equal(normalized.output_valid, false);
+  assert.match(normalized.summary, /did not return the required structured review/i);
+});
+
+test("normalizeProviderResult recognizes clean negated review output", () => {
+  const normalized = normalizeProviderResult({
+    provider: "claude",
+    rawText: "No bugs, security issues, or data loss risks found.",
+  });
+
+  assert.equal(normalized.verdict, "clean");
+  assert.deepEqual(normalized.findings, []);
+});
+
+test("normalizeProviderResult does not let an early clean sentence hide later critical findings", () => {
+  const normalized = normalizeProviderResult({
+    provider: "claude",
+    rawText: [
+      "No issues were found in the first quick scan.",
+      "",
+      "### CRITICAL - `runtime.mjs:377` marks provider output clean before parsing later findings.",
+    ].join("\n"),
+  });
+
+  assert.equal(normalized.verdict, "needs-attention");
+  assert.equal(normalized.findings.length, 1);
+  assert.equal(normalized.findings[0].severity, "critical");
+  assert.equal(normalized.findings[0].file, "runtime.mjs");
+  assert.equal(normalized.findings[0].line_start, 377);
+});
+
+test("normalizeProviderResult extracts markdown review findings", () => {
+  const normalized = normalizeProviderResult({
+    provider: "antigravity",
+    rawText: [
+      "Findings",
+      "",
+      "- High: `runtime.mjs:50` drops provider findings during normalization.",
+      "- Medium: adapter.mjs passes full prompt as argv.",
+    ].join("\n"),
+  });
+
+  assert.equal(normalized.verdict, "needs-attention");
+  assert.equal(normalized.findings.length, 2);
+  assert.equal(normalized.findings[0].severity, "high");
+  assert.match(normalized.findings[0].body, /drops provider findings/);
+});
+
+test("synthesizeProviderResults preserves longer unstructured provider output", () => {
+  const raw = [
+    "The provider returned a long unstructured review.",
+    "a".repeat(700),
+    "unique-tail-finding",
+  ].join(" ");
+  const normalized = normalizeProviderResult({
+    provider: "antigravity",
+    rawText: raw,
+  });
+  const text = synthesizeProviderResults([normalized]);
+
+  assert(normalized.summary.length > 500);
+  assert.match(text, /unique-tail-finding/);
+});
+
+test("synthesizeProviderResults groups provider output without cross-examining", () => {
+  const text = synthesizeProviderResults([
+    {
+      provider: "claude",
+      verdict: "needs-attention",
+      summary: "Claude found a bug",
+      findings: [],
+    },
+    {
+      provider: "antigravity",
+      verdict: "inconclusive",
+      summary: "Antigravity found no concrete issue",
+      findings: [],
+    },
+  ]);
+
+  assert.match(text, /Provider Results/);
+  assert.match(text, /Claude Code/);
+  assert.match(text, /Antigravity/);
+  assert.doesNotMatch(text, /cross-exam/i);
+});
+
+test("synthesizeProviderResults preserves provider attribution and full finding details", () => {
+  const text = synthesizeProviderResults([
+    {
+      provider: "claude",
+      verdict: "needs-attention",
+      summary: "Claude found a race.",
+      findings: [
+        {
+          severity: "high",
+          confidence: "high",
+          title: "State update race",
+          evidence: "state.mjs writes without a lock.",
+          impact: "Concurrent live reads can fail.",
+          recommendation: "Serialize writes through the job lock.",
+          file: "plugins/supermodels/scripts/lib/state.mjs",
+          line_start: 60,
+          line_end: 64,
+        },
+      ],
+      assumptions: ["Concurrent readers exist."],
+      verification_gaps: ["No live race smoke test."],
+    },
+    {
+      provider: "antigravity",
+      verdict: "clean",
+      summary: "Antigravity found no material issues.",
+      findings: [],
+    },
+  ]);
+
+  assert.match(text, /# Supermodels Review/);
+  assert.match(text, /## Claude Code/);
+  assert.match(text, /\[high\]\[high confidence\] State update race/);
+  assert.match(text, /plugins\/supermodels\/scripts\/lib\/state\.mjs:60-64/);
+  assert.match(text, /Evidence: state\.mjs writes without a lock\./);
+  assert.match(text, /Impact: Concurrent live reads can fail\./);
+  assert.match(text, /Recommendation: Serialize writes through the job lock\./);
+  assert.match(text, /## Antigravity/);
+  assert.match(text, /No material findings reported by Antigravity\./);
+  assert.doesNotMatch(text, /Codex should synthesize/i);
+});
+
+test("runTask stores provider progress events from adapters", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-events-"));
+  try {
+    const adapters = {
+      antigravity: {
+        check: async () => ({
+          provider: "antigravity",
+          ready: true,
+          installed: true,
+          auth: "ok",
+          path: "/tmp/agy",
+        }),
+        task: async (input, options) => {
+          options.onEvent?.({
+            type: "text",
+            message: "streamed first token",
+            at: "2026-06-05T00:00:00.000Z",
+          });
+          return {
+            exitCode: 0,
+            rawText: "No bugs found.",
+            stderr: "",
+            sessionId: "",
+            commandLine: "agy -p",
+            events: [
+              {
+                type: "finish",
+                message: "structured finish",
+                at: "2026-06-05T00:00:01.000Z",
+              },
+            ],
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+          };
+        },
+      },
+    };
+
+    const output = await runTask({
+      adapters,
+      providerSelection: {
+        requested: ["antigravity"],
+        explicit: true,
+      },
+      options: {
+        "data-root": dataRoot,
+      },
+      task: "inspect only",
+      workspaceRoot: "/tmp/workspace",
+    });
+
+    const run = output.job.providerRuns.antigravity;
+    assert.equal(run.lastEvent, "structured finish");
+    assert.deepEqual(run.events.map((event) => event.message), [
+      "streamed first token",
+      "structured finish",
+    ]);
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("runReview marks schema-invalid provider output as invalid-output even when provider exits nonzero", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-invalid-review-"));
+  try {
+    const adapters = {
+      antigravity: {
+        check: async () => ({
+          provider: "antigravity",
+          ready: true,
+          installed: true,
+          auth: "ok",
+          path: "/tmp/agy",
+        }),
+        review: async () => ({
+          exitCode: 1,
+          rawText: "Usage of agy:\n  --model string",
+          stderr: "schema invalid",
+          sessionId: "",
+          commandLine: "agy -p",
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+        }),
+      },
+    };
+
+    const output = await runReview({
+      adapters,
+      providerSelection: {
+        requested: ["antigravity"],
+        explicit: true,
+      },
+      mode: "review",
+      options: {
+        "data-root": dataRoot,
+      },
+      focus: "",
+      workspaceRoot: "/tmp/workspace",
+    });
+
+    assert.equal(output.job.status, "failed");
+    assert.equal(output.job.providerRuns.antigravity.status, "invalid-output");
+    assert.equal(output.job.providerRuns.antigravity.normalized.verdict, "invalid-output");
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("runReview records partial status when at least one provider returns usable output", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-partial-review-"));
+  try {
+    const adapters = {
+      claude: {
+        check: async () => ({
+          provider: "claude",
+          ready: true,
+          installed: true,
+          auth: "ok",
+        }),
+        review: async () => ({
+          exitCode: 0,
+          rawText: JSON.stringify({
+            verdict: "clean",
+            summary: "No blocking issues.",
+            findings: [],
+            assumptions: [],
+            verification_gaps: [],
+          }),
+          stderr: "",
+          sessionId: "claude-session",
+          commandLine: "claude -p",
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+        }),
+      },
+      antigravity: {
+        check: async () => ({
+          provider: "antigravity",
+          ready: true,
+          installed: true,
+          auth: "ok",
+        }),
+        review: async () => {
+          throw new Error("transport crashed before provider output");
+        },
+      },
+    };
+
+    const output = await runReview({
+      adapters,
+      providerSelection: {
+        requested: ["claude", "antigravity"],
+        explicit: false,
+      },
+      mode: "review",
+      options: {
+        "data-root": dataRoot,
+      },
+      focus: "",
+      workspaceRoot: "/tmp/workspace",
+    });
+
+    assert.equal(output.job.status, "partial");
+    assert.equal(output.job.providerRuns.claude.status, "completed");
+    assert.equal(output.job.providerRuns.antigravity.status, "failed");
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("runReview marks provider crashes as failed, not invalid-output", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-crash-review-"));
+  try {
+    const adapters = {
+      antigravity: {
+        check: async () => ({
+          provider: "antigravity",
+          ready: true,
+          installed: true,
+          auth: "ok",
+          path: "/tmp/agy",
+        }),
+        review: async () => {
+          throw new Error("transport crashed before provider output");
+        },
+      },
+    };
+
+    const output = await runReview({
+      adapters,
+      providerSelection: {
+        requested: ["antigravity"],
+        explicit: true,
+      },
+      mode: "review",
+      options: {
+        "data-root": dataRoot,
+      },
+      focus: "",
+      workspaceRoot: "/tmp/workspace",
+    });
+
+    assert.equal(output.job.status, "failed");
+    assert.equal(output.job.providerRuns.antigravity.status, "failed");
+    assert.equal(output.job.providerRuns.antigravity.normalized.verdict, "invalid-output");
+    assert.match(output.job.providerRuns.antigravity.normalized.summary, /transport crashed before provider output/);
+    assert.match(output.synthesis, /transport crashed before provider output/);
+    assert.equal(output.job.providerRuns.antigravity.exitCode, 1);
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("runReview does not overwrite a cancelled job when providers finish", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-review-cancel-"));
+  try {
+    const workspaceRoot = "/tmp/workspace";
+    const adapters = {
+      claude: {
+        check: async () => ({
+          provider: "claude",
+          ready: true,
+          installed: true,
+          auth: "ok",
+          path: "/tmp/claude",
+        }),
+        review: async (input, options) => {
+          await markCancelled({
+            workspaceRoot,
+            dataRoot,
+            jobId: path.basename(options.promptDir),
+          });
+          return {
+            exitCode: 0,
+            rawText: JSON.stringify({
+              verdict: "clean",
+              summary: "No findings.",
+              findings: [],
+              assumptions: [],
+              verification_gaps: [],
+            }),
+            stderr: "",
+            sessionId: "claude-session",
+            commandLine: "claude -p",
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+          };
+        },
+      },
+    };
+
+    const output = await runReview({
+      adapters,
+      providerSelection: {
+        requested: ["claude"],
+        explicit: true,
+      },
+      mode: "review",
+      options: {
+        "data-root": dataRoot,
+      },
+      focus: "",
+      workspaceRoot,
+    });
+
+    assert.equal(output.job.status, "cancelled");
+    assert.equal(output.job.providerRuns.claude.status, "completed");
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("runTask passes task mode into provider adapters", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-task-"));
+  try {
+    let receivedInput;
+    let receivedOptions;
+    const adapters = {
+      antigravity: {
+        check: async () => ({
+          provider: "antigravity",
+          ready: true,
+          installed: true,
+          auth: "ok",
+          path: "fake-agy",
+        }),
+        task: async (input, options) => {
+          receivedInput = input;
+          receivedOptions = options;
+          return {
+            exitCode: 0,
+            rawText: "No bugs found.",
+            stderr: "",
+            sessionId: "",
+            commandLine: "fake-agy",
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+          };
+        },
+      },
+    };
+
+    await runTask({
+      adapters,
+      providerSelection: {
+        requested: ["antigravity"],
+        explicit: true,
+      },
+      options: {
+        dataRoot,
+      },
+      task: "inspect only",
+      workspaceRoot: "/tmp/workspace",
+    });
+
+    assert.equal(receivedInput.mode, "task");
+    assert.equal(receivedOptions.write, false);
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("runTask does not overwrite a cancelled job when providers finish", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-task-cancel-"));
+  try {
+    const workspaceRoot = "/tmp/workspace";
+    const adapters = {
+      antigravity: {
+        check: async () => ({
+          provider: "antigravity",
+          ready: true,
+          installed: true,
+          auth: "ok",
+          path: "/tmp/agy",
+        }),
+        task: async (input, options) => {
+          await markCancelled({
+            workspaceRoot,
+            dataRoot,
+            jobId: path.basename(options.promptDir),
+          });
+          return {
+            exitCode: 0,
+            rawText: "Task completed.",
+            stderr: "",
+            sessionId: "agy-session",
+            commandLine: "agy -p",
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+          };
+        },
+      },
+    };
+
+    const output = await runTask({
+      adapters,
+      providerSelection: {
+        requested: ["antigravity"],
+        explicit: true,
+      },
+      options: {
+        "data-root": dataRoot,
+      },
+      task: "inspect only",
+      workspaceRoot,
+    });
+
+    assert.equal(output.job.status, "cancelled");
+    assert.equal(output.job.providerRuns.antigravity.status, "completed");
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("runTask marks foreground jobs failed when an internal state write fails", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-foreground-fail-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-foreground-workspace-"));
+  const state = createState({ workspaceRoot, dataRoot });
+  try {
+    const adapters = {
+      claude: {
+        check: async () => ({
+          provider: "claude",
+          ready: true,
+          installed: true,
+          auth: "ok",
+          path: "/tmp/claude",
+        }),
+        task: async () => {
+          await chmod(state.jobsDir, 0o500);
+          return {
+            exitCode: 0,
+            rawText: "Task completed.",
+            stderr: "",
+            sessionId: "claude-session",
+            commandLine: "claude -p",
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+          };
+        },
+      },
+    };
+
+    await assert.rejects(
+      () => runTask({
+        adapters,
+        providerSelection: {
+          requested: ["claude"],
+          explicit: true,
+        },
+        options: {
+          "data-root": dataRoot,
+        },
+        task: "trigger state write failure",
+        workspaceRoot,
+      }),
+      /EACCES|permission denied/i,
+    );
+
+    await chmod(state.jobsDir, 0o700);
+    const [job] = await listJobs(state);
+    assert.equal(job.status, "failed");
+    assert.equal(job.stage, "failed");
+    assert.match(job.error, /EACCES|permission denied/i);
+  } finally {
+    await chmod(state.jobsDir, 0o700).catch(() => {});
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});

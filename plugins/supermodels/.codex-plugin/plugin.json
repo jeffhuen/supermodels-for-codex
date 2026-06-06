@@ -1,0 +1,39 @@
+{
+  "name": "supermodels",
+  "version": "0.1.0+codex.20260606001427",
+  "description": "Call Claude Code and Antigravity from Codex for independent code review and task delegation.",
+  "author": {
+    "name": "Jeff Huen",
+    "url": "https://github.com/jeffhuen"
+  },
+  "homepage": "https://github.com/jeffhuen/supermodels-for-codex",
+  "repository": "https://github.com/jeffhuen/supermodels-for-codex",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "plugin",
+    "code-review",
+    "claude-code",
+    "antigravity"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Supermodels",
+    "shortDescription": "Use external coding agents as adversarial reviewers from Codex.",
+    "longDescription": "Supermodels lets Codex ask Claude Code and Google Antigravity for independent reviews or delegated tasks through their native CLIs, preserving local auth and provider session continuity.",
+    "developerName": "Jeff Huen",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use supermodels:review to review the current working tree.",
+      "Use supermodels:adversarial-review to ask Claude Code and Antigravity for a strict review."
+    ],
+    "brandColor": "#111827",
+    "composerIcon": "./assets/icon.svg",
+    "logo": "./assets/logo.svg"
+  }
+}

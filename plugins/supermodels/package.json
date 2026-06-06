@@ -1,0 +1,20 @@
+{
+  "name": "supermodels",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Codex plugin runtime for external model review through native CLIs.",
+  "author": "Jeff Huen",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "supermodels": "node scripts/supermodels.mjs"
+  },
+  "keywords": [
+    "codex",
+    "plugin",
+    "code-review",
+    "claude-code",
+    "antigravity"
+  ]
+}

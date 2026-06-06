@@ -1,0 +1,8 @@
+{
+  "defaultModel": "claude-opus-4-8",
+  "defaultEffort": "high",
+  "aliases": {
+    "opus": "claude-opus-4-8",
+    "default": "cli-default"
+  }
+}
