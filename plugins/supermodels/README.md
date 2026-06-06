@@ -47,9 +47,9 @@ Job state and provider artifacts are stored outside the repository under the Cod
 ~/.codex/plugins/data/supermodels
 ```
 
-The plugin does not embed provider API keys or OAuth secrets. Provider CLIs use their own local auth and session storage.
+The plugin does not embed provider API keys, provider account credentials, or AGY OAuth client metadata. Reviews reuse local Claude Code and AGY OAuth credentials. Claude tokens refresh through Claude Code's OAuth store; AGY token refresh is delegated to the native `agy` CLI and then reread from the native token store. Antigravity review calls are paced conservatively and can be tuned with `SUPERMODELS_ANTIGRAVITY_RPM` and `SUPERMODELS_ANTIGRAVITY_BURST`.
 
-All review and task execution modes run through a dedicated Supermodels worker process. Foreground and live commands wait on that worker, while background commands return the job id immediately. Cancellation is worker-scoped in v1. The worker forwards termination to the direct provider child process it starts, but the plugin does not claim provider-native interrupt or durable provider session ownership.
+All review and task execution modes run through a dedicated Supermodels worker process. Foreground and live commands wait on that worker, while background commands return the job id immediately. Review cancellation aborts in-process provider HTTP requests through the shared run controller. Task cancellation forwards termination to the provider CLI child process when one is running.
 
 Antigravity write tasks use the installed `agy` CLI's native default write behavior. Use `--write --provider antigravity` only when that native CLI permission model is acceptable.
 

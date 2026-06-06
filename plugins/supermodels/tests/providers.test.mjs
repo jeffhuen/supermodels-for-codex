@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   buildClaudeCommand,
+  createClaudeAdapter,
   parseClaudeOutput,
 } from "../scripts/providers/claude/adapter.mjs";
 import {
@@ -137,6 +138,24 @@ test("buildClaudeCommand defaults review effort to high", () => {
   assert.deepEqual(command.args.slice(-4), ["--model", "claude-opus-4-8", "--effort", "high"]);
 });
 
+test("Claude adapter runs reviews through the direct tool-loop transport", async () => {
+  const adapter = createClaudeAdapter(fakeDirectReviewFactory("claude"));
+
+  const result = await adapter.review({
+    mode: "review",
+    focus: "inspect cancellation",
+    context: {},
+    prompt: "legacy prompt should not be sent to claude -p",
+  }, {
+    cwd: process.cwd(),
+    timeoutMs: 5000,
+  });
+
+  assert.equal(result.provider, "claude");
+  assert.equal(result.commandLine, "claude oauth messages");
+  assert.equal(result.structured.verdict, "clean");
+});
+
 test("Antigravity model aliases keep review defaults on Flash High and typo-like aliases fail", () => {
   assert.equal(resolveAntigravityModelAlias("pro"), "Gemini 3.5 Flash (High)");
   assert.equal(
@@ -266,7 +285,14 @@ test("Antigravity check detects native CLI when local CLI config exists", async 
     const fakeAgy = path.join(tempDir, "agy");
     const configDir = path.join(tempDir, ".gemini", "antigravity-cli");
     await mkdir(configDir, { recursive: true });
-    await writeFile(path.join(configDir, "antigravity-oauth-token"), "{}\n");
+    await writeFile(path.join(configDir, "antigravity-oauth-token"), JSON.stringify({
+      token: {
+        access_token: "access",
+        refresh_token: "refresh",
+        expiry: "2099-01-01T00:00:00.000Z",
+      },
+      auth_method: "consumer",
+    }));
     await writeFile(fakeAgy, [
       "#!/usr/bin/env node",
       "if (process.argv.includes('--version')) console.log('1.2.3-test');",
@@ -284,7 +310,7 @@ test("Antigravity check detects native CLI when local CLI config exists", async 
 
     assert.equal(check.ready, true);
     assert.equal(check.path, fakeAgy);
-    assert.equal(check.auth, "local-config");
+    assert.equal(check.auth, "local-oauth");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -318,7 +344,172 @@ test("Antigravity check does not treat an empty config directory as ready", asyn
   }
 });
 
-test("runAntigravityPrompt defaults reviews to native CLI and writes prompt file", async () => {
+test("Antigravity check treats malformed local credentials as missing", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-agy-malformed-config-"));
+  try {
+    const fakeAgy = path.join(tempDir, "agy");
+    const configDir = path.join(tempDir, ".gemini", "antigravity-cli");
+    await mkdir(configDir, { recursive: true });
+    await writeFile(path.join(configDir, "antigravity-oauth-token"), "{}\n");
+    await writeFile(fakeAgy, [
+      "#!/usr/bin/env node",
+      "if (process.argv.includes('--version')) console.log('1.2.3-test');",
+      "",
+    ].join("\n"));
+    await chmod(fakeAgy, 0o755);
+
+    const adapter = createAntigravityAdapter();
+    const check = await adapter.check({
+      env: {
+        PATH: tempDir,
+        HOME: tempDir,
+      },
+    });
+
+    assert.equal(check.ready, false);
+    assert.equal(check.auth, "missing");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("Antigravity check treats expired credentials without refresh metadata as missing", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-agy-expired-config-"));
+  try {
+    const fakeAgy = path.join(tempDir, "agy");
+    const configDir = path.join(tempDir, ".gemini", "antigravity-cli");
+    await mkdir(configDir, { recursive: true });
+    await writeFile(path.join(configDir, "antigravity-oauth-token"), JSON.stringify({
+      token: {
+        access_token: "access",
+        refresh_token: "refresh",
+        expiry: "2000-01-01T00:00:00.000Z",
+      },
+      auth_method: "consumer",
+    }));
+    await writeFile(fakeAgy, [
+      "#!/usr/bin/env node",
+      "if (process.argv.includes('--version')) console.log('1.2.3-test');",
+      "",
+    ].join("\n"));
+    await chmod(fakeAgy, 0o755);
+
+    const adapter = createAntigravityAdapter();
+    const check = await adapter.check({
+      env: {
+        PATH: tempDir,
+        HOME: tempDir,
+      },
+    });
+
+    assert.equal(check.ready, false);
+    assert.equal(check.auth, "missing");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("Antigravity check refreshes expired credentials through native agy", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-agy-native-refresh-"));
+  try {
+    const fakeAgy = path.join(tempDir, "agy");
+    const tokenPath = path.join(tempDir, "antigravity-oauth-token");
+    await writeFile(tokenPath, JSON.stringify({
+      token: {
+        access_token: "old-access",
+        refresh_token: "refresh",
+        expiry: "2000-01-01T00:00:00.000Z",
+      },
+      auth_method: "consumer",
+    }));
+    await writeFile(fakeAgy, [
+      "#!/usr/bin/env node",
+      "const fs = require('node:fs');",
+      "if (process.argv.includes('--version')) { console.log('1.2.3-test'); process.exit(0); }",
+      "if (process.argv[2] === 'models') {",
+      "  fs.writeFileSync(process.env.ANTIGRAVITY_OAUTH_CREDS_PATH, JSON.stringify({ token: { access_token: 'new-access', refresh_token: 'refresh', expiry: '2099-01-01T00:00:00.000Z' }, auth_method: 'consumer' }));",
+      "  console.log('Gemini 3.5 Flash (High)');",
+      "}",
+      "",
+    ].join("\n"));
+    await chmod(fakeAgy, 0o755);
+
+    const adapter = createAntigravityAdapter();
+    const check = await adapter.check({
+      env: {
+        PATH: tempDir,
+        HOME: tempDir,
+        ANTIGRAVITY_OAUTH_CREDS_PATH: tokenPath,
+      },
+    });
+
+    assert.equal(check.ready, true);
+    assert.equal(check.auth, "local-oauth");
+    const refreshed = JSON.parse(await readFile(tokenPath, "utf8"));
+    assert.equal(refreshed.token.access_token, "new-access");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("Antigravity adapter runs reviews through the direct Code Assist tool-loop transport", async () => {
+  const adapter = createAntigravityAdapter(fakeDirectReviewFactory("antigravity"));
+
+  const result = await adapter.review({
+    mode: "review",
+    focus: "inspect cancellation",
+    context: {},
+    prompt: "legacy prompt should not be sent to agy -p",
+  }, {
+    cwd: process.cwd(),
+    timeoutMs: 5000,
+  });
+
+  assert.equal(result.provider, "antigravity");
+  assert.equal(result.commandLine, "agy code-assist messages");
+  assert.equal(result.structured.verdict, "clean");
+});
+
+test("Antigravity direct reviews default to a Code Assist model id", async () => {
+  let seenModel = "";
+  const adapter = createAntigravityAdapter({
+    ...fakeDirectReviewFactory("antigravity"),
+    reviewTransport: {
+      calls: 0,
+      async messages(body) {
+        seenModel ||= body.model;
+        this.calls += 1;
+        if (this.calls === 1) {
+          return directToolResponse("diff_1", "get_diff", {});
+        }
+        if (this.calls === 2) {
+          return directToolResponse("read_1", "read_file", { path: "plugins/supermodels/scripts/lib/runtime.mjs" });
+        }
+        return directToolResponse("submit_1", "submit_review", {
+          verdict: "clean",
+          summary: "done",
+          findings: [],
+          assumptions: [],
+          verification_gaps: [],
+        });
+      },
+    },
+  });
+
+  await adapter.review({
+    mode: "review",
+    focus: "inspect cancellation",
+    context: {},
+    prompt: "brief",
+  }, {
+    cwd: process.cwd(),
+    timeoutMs: 5000,
+  });
+
+  assert.equal(seenModel, "gemini-2.5-pro");
+});
+
+test("runAntigravityPrompt keeps task delegation on native CLI and writes prompt file", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-agy-prompt-file-"));
   try {
     const recordPath = path.join(tempDir, "record.json");
@@ -344,8 +535,8 @@ test("runAntigravityPrompt defaults reviews to native CLI and writes prompt file
     await chmod(fakeAgy, 0o755);
 
     const adapter = createAntigravityAdapter();
-    const result = await adapter.review({
-      mode: "review",
+    const result = await adapter.task({
+      mode: "task",
       prompt: "SENTINEL_SUPERMODELS_PROMPT",
     }, {
       bin: fakeAgy,
@@ -372,3 +563,50 @@ test("runAntigravityPrompt defaults reviews to native CLI and writes prompt file
     await rm(tempDir, { recursive: true, force: true });
   }
 });
+
+function fakeDirectReviewFactory(provider) {
+  return {
+    reviewTransport: {
+      calls: 0,
+      async messages() {
+        this.calls += 1;
+        if (this.calls === 1) {
+          return directToolResponse("diff_1", "get_diff", {});
+        }
+        if (this.calls === 2) {
+          return directToolResponse("read_1", "read_file", { path: "plugins/supermodels/scripts/lib/runtime.mjs" });
+        }
+        return directToolResponse("submit_1", "submit_review", {
+          verdict: "clean",
+          summary: `${provider} inspected repository tools.`,
+          findings: [],
+          assumptions: [],
+          verification_gaps: [],
+        });
+      },
+    },
+    reviewTools: {
+      schemas: [],
+      async execute(name) {
+        if (name === "get_diff") {
+          return { ok: true, diffSummary: "1 file changed", diff: "diff --git a/a b/a" };
+        }
+        if (name === "read_file") {
+          return { ok: true, path: "plugins/supermodels/scripts/lib/runtime.mjs", content: "1: export {};" };
+        }
+        if (name === "list_changed_files") {
+          return { ok: true, files: ["M plugins/supermodels/scripts/lib/runtime.mjs"] };
+        }
+        throw new Error(`unexpected tool ${name}`);
+      },
+    },
+  };
+}
+
+function directToolResponse(id, name, input) {
+  return {
+    content: [{ type: "tool_use", id, name, input }],
+    tool_calls: [{ id, name, input }],
+    text: "",
+  };
+}

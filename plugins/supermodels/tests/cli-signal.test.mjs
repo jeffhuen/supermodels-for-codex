@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -8,202 +9,167 @@ import test from "node:test";
 import { signalProcessTree } from "../scripts/lib/process.mjs";
 import { createState, listJobs } from "../scripts/lib/state.mjs";
 
-test("live review force-kills provider child before exiting on Ctrl+C", { skip: process.platform === "win32" }, async () => {
-  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-live-signal-"));
-  const binDir = path.join(tempDir, "bin");
-  const dataRoot = path.join(tempDir, "data");
-  const providerPidPath = path.join(tempDir, "provider.pid");
-  const markerPath = path.join(tempDir, "provider-survived.txt");
-  const repoRoot = path.resolve(import.meta.dirname, "../../..");
+test("live review aborts the direct provider request before exiting on Ctrl+C", { skip: process.platform === "win32" }, async () => {
+  const fixture = await createCliFixture("supermodels-live-signal-");
   let cli;
   try {
-    await mkdir(binDir, { recursive: true });
-    await writeFakeClaude(binDir, { providerPidPath, markerPath });
-
-    const scriptPath = path.resolve(import.meta.dirname, "../scripts/supermodels.mjs");
-    cli = spawn(process.execPath, [
-      scriptPath,
-      "review",
-      "--live",
-      "--provider",
-      "claude",
-      "--data-root",
-      dataRoot,
-    ], {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    cli = spawnReview(fixture, ["--live"]);
 
     await waitForStdout(cli, "Claude Code: running");
+    await fixture.server.requested;
     const closedPromise = onceClosed(cli, 3000);
     cli.kill("SIGINT");
     const closed = await closedPromise;
+
     assert.equal(closed.code, 130);
-    await sleep(1800);
+    await withTimeout(fixture.server.requestClosed, 3000, "provider request was not aborted");
 
-    await assert.rejects(() => readFile(markerPath, "utf8"), /ENOENT/);
-  } finally {
-    if (cli?.pid) {
-      signalProcessTree(cli.pid, "SIGKILL");
-    }
-    const providerPid = await readFile(providerPidPath, "utf8").catch(() => "");
-    if (providerPid) {
-      signalProcessTree(Number(providerPid), "SIGKILL");
-    }
-    await rm(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("foreground review records Ctrl+C as cancelled", { skip: process.platform === "win32" }, async () => {
-  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-foreground-signal-"));
-  const binDir = path.join(tempDir, "bin");
-  const dataRoot = path.join(tempDir, "data");
-  const providerPidPath = path.join(tempDir, "provider.pid");
-  const markerPath = path.join(tempDir, "provider-survived.txt");
-  const repoRoot = path.resolve(import.meta.dirname, "../../..");
-  let cli;
-  try {
-    await mkdir(binDir, { recursive: true });
-    await writeFakeClaude(binDir, { providerPidPath, markerPath });
-
-    const scriptPath = path.resolve(import.meta.dirname, "../scripts/supermodels.mjs");
-    cli = spawn(process.execPath, [
-      scriptPath,
-      "review",
-      "--provider",
-      "claude",
-      "--data-root",
-      dataRoot,
-    ], {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    await waitForFile(providerPidPath);
-    const closedPromise = onceClosed(cli, 3000);
-    cli.kill("SIGINT");
-    const closed = await closedPromise;
-    assert.equal(closed.code, 130);
-
-    const jobs = await listJobs(createState({ workspaceRoot: repoRoot, dataRoot }));
+    const jobs = await listJobs(createState({ workspaceRoot: fixture.repoRoot, dataRoot: fixture.dataRoot }));
     assert.equal(jobs.length, 1);
     assert.equal(jobs[0].status, "cancelled");
     assert.equal(jobs[0].providerRuns.claude.status, "cancelled");
-    assert.equal(jobs[0].providerRuns.claude.exitCode, null);
-    assert.equal(jobs[0].providerRuns.claude.signal, "SIGKILL");
   } finally {
-    if (cli?.pid) {
-      signalProcessTree(cli.pid, "SIGKILL");
-    }
-    const providerPid = await readFile(providerPidPath, "utf8").catch(() => "");
-    if (providerPid) {
-      signalProcessTree(Number(providerPid), "SIGKILL");
-    }
-    await rm(tempDir, { recursive: true, force: true });
+    await cleanupCli(cli);
+    await fixture.cleanup();
   }
 });
 
-test("foreground review records fast signal-exiting provider as cancelled", { skip: process.platform === "win32" }, async () => {
-  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-fast-signal-"));
-  const binDir = path.join(tempDir, "bin");
-  const dataRoot = path.join(tempDir, "data");
-  const providerPidPath = path.join(tempDir, "provider.pid");
-  const repoRoot = path.resolve(import.meta.dirname, "../../..");
+test("foreground review records Ctrl+C as cancelled for direct provider requests", { skip: process.platform === "win32" }, async () => {
+  const fixture = await createCliFixture("supermodels-foreground-signal-");
   let cli;
   try {
-    await mkdir(binDir, { recursive: true });
-    await writeFakeClaude(binDir, { providerPidPath, exitOnSignal: true });
+    cli = spawnReview(fixture);
 
-    const scriptPath = path.resolve(import.meta.dirname, "../scripts/supermodels.mjs");
-    cli = spawn(process.execPath, [
-      scriptPath,
-      "review",
-      "--provider",
-      "claude",
-      "--data-root",
-      dataRoot,
-    ], {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    await waitForFile(providerPidPath);
+    await waitForJob(fixture, (job) => job.providerRuns.claude?.status === "running");
+    await fixture.server.requested;
     const closedPromise = onceClosed(cli, 3000);
     cli.kill("SIGINT");
     const closed = await closedPromise;
-    assert.equal(closed.code, 130);
 
-    const jobs = await listJobs(createState({ workspaceRoot: repoRoot, dataRoot }));
+    assert.equal(closed.code, 130);
+    await withTimeout(fixture.server.requestClosed, 3000, "provider request was not aborted");
+
+    const jobs = await listJobs(createState({ workspaceRoot: fixture.repoRoot, dataRoot: fixture.dataRoot }));
     assert.equal(jobs.length, 1);
     assert.equal(jobs[0].status, "cancelled");
     assert.equal(jobs[0].providerRuns.claude.status, "cancelled");
-    assert.equal(jobs[0].providerRuns.claude.exitCode, 0);
-    assert.equal(jobs[0].providerRuns.claude.signal, null);
   } finally {
-    if (cli?.pid) {
-      signalProcessTree(cli.pid, "SIGKILL");
-    }
-    const providerPid = await readFile(providerPidPath, "utf8").catch(() => "");
-    if (providerPid) {
-      signalProcessTree(Number(providerPid), "SIGKILL");
-    }
-    await rm(tempDir, { recursive: true, force: true });
+    await cleanupCli(cli);
+    await fixture.cleanup();
   }
 });
 
-async function writeFakeClaude(binDir, { providerPidPath, markerPath, exitOnSignal = false }) {
-  const fakeClaude = path.join(binDir, "claude");
-  const cleanResult = JSON.stringify({
-    type: "result",
-    subtype: "success",
-    session_id: "fast-exit-session",
-    structured_output: {
-      verdict: "clean",
-      summary: "No findings.",
-      findings: [],
-      assumptions: [],
-      verification_gaps: [],
+async function createCliFixture(prefix) {
+  const tempDir = await mkdtemp(path.join(tmpdir(), prefix));
+  const binDir = path.join(tempDir, "bin");
+  const dataRoot = path.join(tempDir, "data");
+  const credentialsPath = path.join(tempDir, "claude-credentials.json");
+  const repoRoot = path.resolve(import.meta.dirname, "../../..");
+  const server = await createBlockingMessagesServer();
+  await mkdir(binDir, { recursive: true });
+  await writeFakeClaudeStatus(binDir);
+  await writeClaudeCredentials(credentialsPath);
+  return {
+    tempDir,
+    binDir,
+    dataRoot,
+    credentialsPath,
+    repoRoot,
+    server,
+    async cleanup() {
+      await server.close();
+      await rm(tempDir, { recursive: true, force: true });
     },
+  };
+}
+
+function spawnReview(fixture, extraArgs = []) {
+  const scriptPath = path.resolve(import.meta.dirname, "../scripts/supermodels.mjs");
+  return spawn(process.execPath, [
+    scriptPath,
+    "review",
+    ...extraArgs,
+    "--provider",
+    "claude",
+    "--data-root",
+    fixture.dataRoot,
+  ], {
+    cwd: fixture.repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${fixture.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CLAUDE_CODE_AUTH_PATH: fixture.credentialsPath,
+      SUPERMODELS_CLAUDE_MESSAGES_URL: fixture.server.url,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
   });
+}
+
+async function writeFakeClaudeStatus(binDir) {
+  const fakeClaude = path.join(binDir, "claude");
   await writeFile(fakeClaude, [
     "#!/usr/bin/env node",
-    "const { writeFileSync } = require('node:fs');",
     "const args = process.argv.slice(2);",
     "if (args.includes('--version')) { console.log('2.1.162 (Claude Code)'); process.exit(0); }",
     "if (args[0] === 'auth' && args[1] === 'status') {",
     "  console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', subscriptionType: 'max' }));",
     "  process.exit(0);",
     "}",
-    `writeFileSync(${JSON.stringify(providerPidPath)}, String(process.pid));`,
-    exitOnSignal
-      ? `const onSignal = () => { console.log(${JSON.stringify(cleanResult)}); process.exit(0); };`
-      : "const onSignal = () => setTimeout(() => writeFileSync("
-        + `${JSON.stringify(markerPath)},`
-        + "'survived'"
-        + "), 1500);",
-    "process.on('SIGINT', onSignal);",
-    "process.on('SIGTERM', onSignal);",
-    "setInterval(() => {}, 1000);",
+    "console.error('unexpected fake claude invocation: ' + args.join(' '));",
+    "process.exit(2);",
   ].join("\n"));
   await chmod(fakeClaude, 0o755);
+}
+
+async function writeClaudeCredentials(credentialsPath) {
+  await writeFile(credentialsPath, JSON.stringify({
+    claudeAiOauth: {
+      accessToken: "test-access-token",
+      refreshToken: "test-refresh-token",
+      expiresAt: Date.now() + 3_600_000,
+      scopes: ["user:inference"],
+    },
+  }), "utf8");
+}
+
+async function createBlockingMessagesServer() {
+  let resolveRequested;
+  let resolveClosed;
+  const requested = new Promise((resolve) => {
+    resolveRequested = resolve;
+  });
+  const requestClosed = new Promise((resolve) => {
+    resolveClosed = resolve;
+  });
+  const server = createServer((req, res) => {
+    if (req.method !== "POST") {
+      res.writeHead(404).end();
+      return;
+    }
+    req.resume();
+    resolveRequested();
+    req.on("close", () => {
+      resolveClosed();
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  return {
+    requested,
+    requestClosed,
+    url: `http://127.0.0.1:${address.port}/v1/messages`,
+    close: () => new Promise((resolve) => server.close(resolve)),
+  };
 }
 
 function waitForStdout(child, expected) {
   return new Promise((resolve, reject) => {
     let stdout = "";
-    const timer = setTimeout(() => reject(new Error(`Timed out waiting for ${expected}. stdout=${stdout}`)), 15_000);
+    let stderr = "";
+    const timer = setTimeout(() => reject(new Error(`Timed out waiting for ${expected}. stdout=${stdout} stderr=${stderr}`)), 15_000);
     child.stdout.on("data", (chunk) => {
       stdout += String(chunk);
       if (stdout.includes(expected)) {
@@ -211,7 +177,9 @@ function waitForStdout(child, expected) {
         resolve();
       }
     });
-    child.stderr.on("data", () => {});
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
     child.once("error", (error) => {
       clearTimeout(timer);
       reject(error);
@@ -219,22 +187,24 @@ function waitForStdout(child, expected) {
     child.once("close", (code, signal) => {
       if (!stdout.includes(expected)) {
         clearTimeout(timer);
-        reject(new Error(`Command closed before ${expected}: code=${code} signal=${signal} stdout=${stdout}`));
+        reject(new Error(`Command closed before ${expected}: code=${code} signal=${signal} stdout=${stdout} stderr=${stderr}`));
       }
     });
   });
 }
 
-async function waitForFile(filePath, timeoutMs = 15_000) {
+async function waitForJob(fixture, predicate, timeoutMs = 15_000) {
+  const state = createState({ workspaceRoot: fixture.repoRoot, dataRoot: fixture.dataRoot });
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    const text = await readFile(filePath, "utf8").catch(() => "");
-    if (text) {
-      return text;
+    const jobs = await listJobs(state);
+    const job = jobs[0];
+    if (job && predicate(job)) {
+      return job;
     }
     await sleep(20);
   }
-  assert.fail(`Timed out waiting for ${filePath}`);
+  assert.fail("Timed out waiting for job state");
 }
 
 function onceClosed(child, timeoutMs = 5000) {
@@ -245,6 +215,20 @@ function onceClosed(child, timeoutMs = 5000) {
       resolve({ code, signal });
     });
   });
+}
+
+async function cleanupCli(cli) {
+  if (cli?.pid) {
+    signalProcessTree(cli.pid, "SIGKILL");
+  }
+  await sleep(200);
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), timeoutMs)),
+  ]);
 }
 
 function sleep(ms) {

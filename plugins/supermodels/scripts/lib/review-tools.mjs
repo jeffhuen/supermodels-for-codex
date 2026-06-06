@@ -1,0 +1,274 @@
+import { lstat, readFile, realpath } from "node:fs/promises";
+import path from "node:path";
+
+import { collectGitContext } from "./git.mjs";
+import { runCommand } from "./process.mjs";
+
+const DEFAULT_MAX_FILE_BYTES = 80_000;
+const DEFAULT_MAX_TOOL_BYTES = 120_000;
+
+export function createReviewTools(options = {}) {
+  const workspaceRoot = path.resolve(options.workspaceRoot ?? process.cwd());
+  const maxFileBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
+  const maxToolBytes = options.maxToolBytes ?? DEFAULT_MAX_TOOL_BYTES;
+  const controller = options.controller ?? null;
+
+  return {
+    schemas: reviewToolSchemas(),
+    async execute(name, input = {}, executionOptions = {}) {
+      const activeController = executionOptions.controller ?? controller;
+      throwIfCancelled(activeController);
+      if (name === "get_diff") {
+        const context = await collectGitContext({
+          workspaceRoot,
+          scope: options.scope ?? "working-tree",
+          baseRef: options.baseRef ?? "",
+        });
+        throwIfCancelled(activeController);
+        return truncateObject({
+          ok: true,
+          workspaceRoot,
+          diffSummary: context.diffSummary,
+          diff: context.diff,
+        }, maxToolBytes);
+      }
+      if (name === "list_changed_files") {
+        return await listChangedFiles(workspaceRoot, maxToolBytes, activeController);
+      }
+      if (name === "list_files") {
+        return await listFiles(workspaceRoot, input, maxToolBytes, activeController);
+      }
+      if (name === "search") {
+        return await search(workspaceRoot, input, maxToolBytes, activeController);
+      }
+      if (name === "read_file") {
+        return await readWorkspaceFile(workspaceRoot, input, maxFileBytes, activeController);
+      }
+      throw new Error(`Unknown review tool: ${name}`);
+    },
+  };
+}
+
+function reviewToolSchemas() {
+  return [
+    {
+      name: "get_diff",
+      description: "Return the current git diff and diff summary for the workspace.",
+      input_schema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "list_changed_files",
+      description: "List files changed in the working tree, including untracked files.",
+      input_schema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "list_files",
+      description: "List repository files. Use this to discover nearby tests or related modules.",
+      input_schema: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Optional substring that file paths must contain." },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "search",
+      description: "Search the workspace with ripgrep and return bounded line matches.",
+      input_schema: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Literal or regex search query." },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "read_file",
+      description: "Read a bounded line range from a workspace file.",
+      input_schema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Workspace-relative file path." },
+          start_line: { type: "integer", minimum: 1 },
+          end_line: { type: "integer", minimum: 1 },
+        },
+        required: ["path"],
+        additionalProperties: false,
+      },
+    },
+  ];
+}
+
+async function readWorkspaceFile(workspaceRoot, input, maxBytes, controller) {
+  throwIfCancelled(controller);
+  const safe = await safeWorkspacePath(workspaceRoot, input.path);
+  if (!safe.ok) {
+    return safe;
+  }
+  const info = await lstat(safe.absolute).catch(() => null);
+  if (!info || !info.isFile()) {
+    return { ok: false, error: "Path is not a regular file.", path: safe.relative };
+  }
+  const raw = await readFile(safe.absolute);
+  throwIfCancelled(controller);
+  const truncated = raw.byteLength > maxBytes;
+  const text = raw.subarray(0, maxBytes).toString("utf8");
+  const lines = text.split(/\r?\n/);
+  const start = normalizeLine(input.start_line, 1);
+  const end = Math.min(
+    normalizeLine(input.end_line, Math.min(lines.length, start + 199)),
+    lines.length,
+    start + 199,
+  );
+  const selected = lines
+    .slice(start - 1, end)
+    .map((line, index) => `${start + index}: ${line}`)
+    .join("\n");
+  return {
+    ok: true,
+    path: safe.relative,
+    start_line: start,
+    end_line: end,
+    truncated,
+    content: selected,
+  };
+}
+
+async function search(workspaceRoot, input, maxBytes, controller) {
+  const query = String(input.query ?? "").trim();
+  if (!query) {
+    return { ok: false, error: "search query is required." };
+  }
+  throwIfCancelled(controller);
+  const result = await runCommand({
+    bin: "rg",
+    args: ["--line-number", "--hidden", "--glob", "!.git", "--", query, "."],
+  }, {
+    cwd: workspaceRoot,
+    timeoutMs: 10_000,
+    controller,
+  });
+  throwIfCancelled(controller);
+  if (result.exitCode > 1) {
+    return { ok: false, error: result.stderr || `rg exited ${result.exitCode}` };
+  }
+  return {
+    ok: true,
+    query,
+    output: truncateText(result.stdout || "(no matches)", maxBytes),
+    truncated: Buffer.byteLength(result.stdout ?? "", "utf8") > maxBytes,
+  };
+}
+
+async function listFiles(workspaceRoot, input, maxBytes, controller) {
+  throwIfCancelled(controller);
+  const result = await runCommand({
+    bin: "rg",
+    args: ["--files", "--hidden", "--glob", "!.git"],
+  }, {
+    cwd: workspaceRoot,
+    timeoutMs: 10_000,
+    controller,
+  });
+  throwIfCancelled(controller);
+  if (result.exitCode !== 0) {
+    return { ok: false, error: result.stderr || `rg exited ${result.exitCode}` };
+  }
+  const query = String(input.query ?? "").trim();
+  const files = result.stdout
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .filter((file) => !query || file.includes(query));
+  return {
+    ok: true,
+    files: truncateText(files.join("\n"), maxBytes).split(/\r?\n/).filter(Boolean),
+    truncated: Buffer.byteLength(files.join("\n"), "utf8") > maxBytes,
+  };
+}
+
+async function listChangedFiles(workspaceRoot, maxBytes, controller) {
+  throwIfCancelled(controller);
+  const status = await runCommand({
+    bin: "git",
+    args: ["status", "--short"],
+  }, {
+    cwd: workspaceRoot,
+    timeoutMs: 10_000,
+    controller,
+  });
+  throwIfCancelled(controller);
+  if (status.exitCode !== 0) {
+    return { ok: false, error: status.stderr || "git status failed" };
+  }
+  return {
+    ok: true,
+    output: truncateText(status.stdout || "(no changed files)", maxBytes),
+    truncated: Buffer.byteLength(status.stdout ?? "", "utf8") > maxBytes,
+  };
+}
+
+async function safeWorkspacePath(workspaceRoot, requestedPath) {
+  const root = await realpath(workspaceRoot);
+  const relative = String(requestedPath ?? "").trim();
+  if (!relative || path.isAbsolute(relative)) {
+    return { ok: false, error: "Path must be workspace-relative." };
+  }
+  const absolute = path.resolve(root, relative);
+  if (!isInside(root, absolute)) {
+    return { ok: false, error: "Path resolves outside workspace.", path: relative };
+  }
+  const resolved = await realpath(absolute).catch(() => "");
+  if (!resolved || !isInside(root, resolved)) {
+    return { ok: false, error: "Path resolves outside workspace.", path: relative };
+  }
+  return { ok: true, absolute, relative: path.relative(root, absolute) };
+}
+
+function isInside(root, candidate) {
+  return candidate === root || candidate.startsWith(root + path.sep);
+}
+
+function normalizeLine(value, fallback) {
+  const line = Number(value);
+  return Number.isInteger(line) && line > 0 ? line : fallback;
+}
+
+function truncateObject(value, maxBytes) {
+  const text = JSON.stringify(value);
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) {
+    return value;
+  }
+  return {
+    ...value,
+    diff: truncateText(value.diff ?? "", maxBytes),
+    truncated: true,
+  };
+}
+
+function truncateText(value, maxBytes) {
+  const text = String(value ?? "");
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) {
+    return text;
+  }
+  let end = text.length;
+  while (end > 0 && Buffer.byteLength(text.slice(0, end), "utf8") > maxBytes) {
+    end = Math.floor(end * 0.9);
+  }
+  return `${text.slice(0, end)}\n... truncated ...`;
+}
+
+function throwIfCancelled(controller) {
+  if (controller?.cancelled) {
+    throw new Error(`Review tool execution cancelled by ${controller.signal ?? "signal"}.`);
+  }
+}

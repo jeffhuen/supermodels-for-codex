@@ -4,10 +4,10 @@ Supermodels is a Codex plugin that lets Codex call external coding agents for in
 
 Version 1 supports:
 
-- Claude Code through the installed `claude` CLI.
-- Google Antigravity through the installed `agy` CLI.
+- Claude Code reviews through Claude Code OAuth-backed Messages transport; task delegation through the installed `claude` CLI.
+- Google Antigravity reviews through AGY/Code Assist OAuth-backed function calling; task delegation through the installed `agy` CLI.
 
-The plugin acts as a broker. Codex remains the primary agent in the user conversation, while provider CLIs run locally, preserve their own auth/session behavior, and return attributed results for Codex to validate and synthesize.
+The plugin acts as a broker. Codex remains the primary agent in the user conversation, while Supermodels owns the review tool loop and provider auth is reused from local Claude Code and AGY installations.
 
 ## Why
 
@@ -18,7 +18,7 @@ Supermodels is designed for that workflow:
 - Run provider reviews from inside Codex.
 - Keep provider feedback attributed to Claude Code or Antigravity.
 - Preserve raw provider artifacts for inspection.
-- Use native local CLIs instead of embedding provider API keys.
+- Reuse local provider auth instead of embedding provider API keys.
 - Support long-running reviews with job state, live progress, status, result, and cancel commands.
 
 ## Installation
@@ -101,11 +101,11 @@ node scripts/supermodels.mjs status
 
 ### Claude Code
 
-Claude Code runs through the installed `claude` CLI. Review and read-only task paths use constrained permissions. Write tasks are only allowed when explicitly requested with `--write`, and v1 refuses multi-provider write tasks.
+Claude Code reviews use Claude Code OAuth credentials with Anthropic's Messages transport and Supermodels-owned read-only repository tools. Task paths use the installed `claude` CLI with constrained permissions. Write tasks are only allowed when explicitly requested with `--write`, and v1 refuses multi-provider write tasks.
 
 ### Antigravity
 
-Antigravity runs through the installed `agy` CLI. Review mode defaults to Gemini 3.5 Flash High through Antigravity's model naming. Read-only paths use sandboxed execution where supported by the CLI.
+Antigravity reviews use the AGY/Code Assist OAuth credential store and Gemini-style function calling with the same Supermodels-owned read-only repository tools. Supermodels preloads the diff and changed-file list before the first Code Assist call so AGY always reviews real repository evidence, then AGY may request additional read-only tools. Direct review mode defaults to `gemini-2.5-pro`; native `agy` model aliases are still used for task delegation. Code Assist calls are paced conservatively by default; advanced users can tune `SUPERMODELS_ANTIGRAVITY_RPM` and `SUPERMODELS_ANTIGRAVITY_BURST`.
 
 Antigravity write tasks use the installed `agy` CLI's native default write behavior. The current `agy` CLI exposes a read-only `--sandbox` mode and a broad `--dangerously-skip-permissions` mode, but not a Claude-style edit allow-list. Use `--write --provider antigravity` only when that native CLI permission model is acceptable.
 
@@ -120,18 +120,18 @@ Supermodels stores job state outside the repository under the Codex plugin data 
 Each run stores:
 
 - Job metadata and provider progress.
-- Prompt artifacts.
+- Prompt/context artifacts when generated.
 - Raw provider output.
 - Normalized provider results.
 - Provider stderr logs.
 
 These artifacts are useful for debugging provider behavior and validating final review summaries.
 
-All review and task execution modes run through a dedicated Supermodels worker process. Foreground and live commands wait on that worker, while background commands return the job id immediately. Cancellation is worker-scoped in v1: Supermodels owns the worker process and the direct provider child process it starts for the duration of a job. It records provider session IDs and artifacts when the CLIs expose them, but it does not claim provider-native interrupt or durable provider session ownership.
+All review and task execution modes run through a dedicated Supermodels worker process. Foreground and live commands wait on that worker, while background commands return the job id immediately. Review cancellation aborts in-process provider HTTP requests through the shared run controller. Task cancellation is worker-scoped and forwards termination to the provider CLI child process when one is running.
 
 ## Data and Privacy
 
-Supermodels shells out to local provider CLIs. It does not embed provider API keys, OAuth client secrets, or provider account credentials.
+Supermodels does not embed provider API keys, provider account credentials, or AGY OAuth client metadata. Reviews reuse local Claude Code and AGY OAuth credentials. Claude tokens refresh through Claude Code's OAuth store; AGY token refresh is delegated to the native `agy` CLI and then reread from the native token store.
 
 Provider CLIs may use their own local auth files, sessions, telemetry, and data storage. Review Claude Code and Antigravity settings for provider-specific behavior.
 
@@ -144,7 +144,7 @@ Version 1 intentionally supports only:
 
 The runtime caps provider orchestration at two providers. Support for additional agents can be added later, but the current implementation prioritizes a maintainable two-provider review workflow.
 
-Supermodels deliberately stays a broker rather than a durable process manager for provider runtimes. Claude Code and Antigravity own their own auth, session storage, model behavior, and deeper interruption semantics.
+Supermodels deliberately stays a broker rather than a durable process manager for provider runtimes. Claude Code and Antigravity own their own auth, session storage, and model behavior.
 
 ## Development
 

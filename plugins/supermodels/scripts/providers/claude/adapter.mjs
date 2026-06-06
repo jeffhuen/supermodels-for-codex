@@ -4,10 +4,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { commandLine, findExecutable, runCommand } from "../../lib/process.mjs";
+import { runReviewAgent } from "../../lib/review-agent.mjs";
+import { createReviewTools } from "../../lib/review-tools.mjs";
 import {
   REVIEW_RESULT_SCHEMA,
   parseStructuredReviewText,
 } from "../../lib/review-schema.mjs";
+import { ClaudeCodeCredentials } from "./oauth.mjs";
+import { ClaudeOAuthMessagesTransport } from "./messages-transport.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULTS = JSON.parse(readFileSync(path.join(__dirname, "defaults.json"), "utf8"));
@@ -16,7 +20,7 @@ const DEFAULT_EFFORT = process.env.SUPERMODELS_CLAUDE_EFFORT || DEFAULTS.default
 const READ_ONLY_TOOLS = "Read,Grep,Glob,LS";
 const WRITE_TASK_TOOLS = "Read,Grep,Glob,LS,Edit,MultiEdit,Write";
 
-export function createClaudeAdapter() {
+export function createClaudeAdapter(factoryOptions = {}) {
   return {
     id: "claude",
     label: "Claude Code",
@@ -30,7 +34,7 @@ export function createClaudeAdapter() {
       background: "worker",
     }),
     check,
-    review: runClaudePrompt,
+    review: (input, options) => runClaudeReview(input, options, factoryOptions),
     task: runClaudePrompt,
   };
 }
@@ -226,6 +230,51 @@ async function runClaudePrompt(input, options = {}) {
     structured: parsed.structured,
     usage: parsed.usage,
     events: parsed.events,
+    startedAt,
+    completedAt: new Date().toISOString(),
+  };
+}
+
+async function runClaudeReview(input, options = {}, factoryOptions = {}) {
+  const startedAt = new Date().toISOString();
+  const model = resolveClaudeModelAlias(options.model ?? DEFAULT_MODEL);
+  const transport = factoryOptions.reviewTransport
+    ?? new ClaudeOAuthMessagesTransport({
+      credentials: factoryOptions.credentials ?? new ClaudeCodeCredentials(factoryOptions.credentialsOptions ?? {}),
+      fetchImpl: factoryOptions.fetchImpl,
+    });
+  const tools = factoryOptions.reviewTools
+    ?? createReviewTools({
+      workspaceRoot: options.cwd,
+      scope: input.context?.scope,
+      baseRef: input.context?.baseRef,
+      controller: options.controller,
+    });
+  const structured = await runReviewAgent({
+    provider: "claude",
+    transport,
+    tools,
+    brief: input.prompt,
+    focus: input.focus,
+    mode: input.mode,
+    model,
+    timeoutMs: options.timeoutMs ?? 20 * 60 * 1000,
+    controller: options.controller,
+    onEvent: options.onEvent,
+  });
+  return {
+    provider: "claude",
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    rawText: JSON.stringify(structured, null, 2),
+    stderr: "",
+    sessionId: "",
+    pid: null,
+    commandLine: "claude oauth messages",
+    structured,
+    usage: structured.usage ?? null,
+    events: [],
     startedAt,
     completedAt: new Date().toISOString(),
   };

@@ -1,10 +1,17 @@
 import { readFileSync } from "node:fs";
-import { chmod, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { commandLine, findExecutable, runCommand } from "../../lib/process.mjs";
+import { runReviewAgent } from "../../lib/review-agent.mjs";
+import { createReviewTools } from "../../lib/review-tools.mjs";
+import { AntigravityCodeAssistTransport } from "./code-assist-transport.mjs";
+import {
+  AntigravityCredentials,
+  defaultAntigravityCredentialsPath,
+} from "./oauth.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MODEL_CONFIG = JSON.parse(readFileSync(path.join(__dirname, "model-aliases.json"), "utf8"));
@@ -12,10 +19,12 @@ const MODEL_ALIASES = Object.freeze(MODEL_CONFIG.aliases);
 const DEFAULT_REVIEW_MODEL = process.env.SUPERMODELS_ANTIGRAVITY_REVIEW_MODEL
   || MODEL_CONFIG.defaultReviewModel
   || "";
+const DEFAULT_CODE_ASSIST_REVIEW_MODEL = process.env.SUPERMODELS_ANTIGRAVITY_CODE_ASSIST_MODEL
+  || "gemini-2.5-pro";
 
 const CANONICAL_MODELS = new Set(Object.values(MODEL_ALIASES));
 
-export function createAntigravityAdapter() {
+export function createAntigravityAdapter(factoryOptions = {}) {
   return {
     id: "antigravity",
     label: "Google Antigravity",
@@ -30,7 +39,7 @@ export function createAntigravityAdapter() {
     }),
     check,
     setup,
-    review: runAntigravityPrompt,
+    review: (input, options) => runAntigravityReview(input, options, factoryOptions),
     task: runAntigravityPrompt,
   };
 }
@@ -179,6 +188,77 @@ async function runAntigravityPrompt(input, options = {}) {
   };
 }
 
+async function runAntigravityReview(input, options = {}, factoryOptions = {}) {
+  const startedAt = new Date().toISOString();
+  const model = resolveAntigravityCodeAssistModel(options.model);
+  const transport = factoryOptions.reviewTransport
+    ?? new AntigravityCodeAssistTransport({
+      credentials: factoryOptions.credentials ?? new AntigravityCredentials(factoryOptions.credentialsOptions ?? {}),
+      fetchImpl: factoryOptions.fetchImpl,
+      projectId: factoryOptions.projectId,
+      baseUrl: factoryOptions.baseUrl,
+    });
+  const tools = factoryOptions.reviewTools
+    ?? createReviewTools({
+      workspaceRoot: options.cwd,
+      scope: input.context?.scope,
+      baseRef: input.context?.baseRef,
+      controller: options.controller,
+    });
+  const structured = await runReviewAgent({
+    provider: "antigravity",
+    transport,
+    tools,
+    brief: input.prompt,
+    focus: input.focus,
+    mode: input.mode,
+    model,
+    maxRounds: factoryOptions.maxRounds ?? 4,
+    forceAfterRounds: factoryOptions.forceAfterRounds ?? 2,
+    forceInspectionTools: factoryOptions.forceInspectionTools ?? false,
+    preloadTools: factoryOptions.preloadTools ?? ["get_diff", "list_changed_files"],
+    timeoutMs: options.timeoutMs ?? 20 * 60 * 1000,
+    controller: options.controller,
+    onEvent: options.onEvent,
+  });
+  return {
+    provider: "antigravity",
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    rawText: JSON.stringify(structured, null, 2),
+    stderr: "",
+    sessionId: "",
+    pid: null,
+    commandLine: "agy code-assist messages",
+    structured,
+    usage: structured.usage ?? null,
+    events: [],
+    startedAt,
+    completedAt: new Date().toISOString(),
+  };
+}
+
+function resolveAntigravityCodeAssistModel(model) {
+  if (!model || model === "cli-default") {
+    return DEFAULT_CODE_ASSIST_REVIEW_MODEL;
+  }
+  const lower = String(model).toLowerCase();
+  const directAliases = {
+    pro: "gemini-2.5-pro",
+    "pro-high": "gemini-2.5-pro",
+    flash: "gemini-3-flash-preview",
+    "flash-high": "gemini-3-flash-preview",
+  };
+  if (directAliases[lower]) {
+    return directAliases[lower];
+  }
+  if (/^gemini-[\w.-]+$/i.test(model)) {
+    return model;
+  }
+  return resolveAntigravityModelAlias(model);
+}
+
 async function antigravityLogFile(options = {}) {
   const promptDir = options.promptDir
     ? path.resolve(options.promptDir)
@@ -201,44 +281,31 @@ async function writePromptFile(prompt, options = {}) {
 
 async function antigravityAuthStatus(options = {}) {
   const env = options.env ?? process.env;
-  if (env.ANTIGRAVITY_API_KEY) {
-    return "api-key";
+  if (await hasAntigravityOauthToken(env)) {
+    return "local-oauth";
   }
-  const home = env.HOME || os.homedir();
-
-  const candidates = [
-    path.join(home, ".config", "antigravity"),
-    path.join(home, ".gemini", "antigravity-cli"),
-  ];
-  for (const candidate of candidates) {
-    if (await hasAntigravityConfigMarker(candidate)) {
-      return "local-config";
-    }
-  }
-
   return "missing";
 }
 
-async function hasAntigravityConfigMarker(configRoot) {
-  const info = await stat(configRoot).catch(() => null);
-  if (!info?.isDirectory()) {
+async function hasAntigravityOauthToken(env) {
+  const candidate = defaultAntigravityCredentialsPath(env);
+  const info = await stat(candidate).catch(() => null);
+  if (info?.isFile()) {
+    return await canLoadAntigravityCredentials(env);
+  }
+  if (process.platform === "darwin" && (!env.HOME || env.HOME === process.env.HOME)) {
+    return await canLoadAntigravityCredentials(env);
+  }
+  return false;
+}
+
+async function canLoadAntigravityCredentials(env) {
+  try {
+    await new AntigravityCredentials({ env }).accessToken();
+    return true;
+  } catch {
     return false;
   }
-  const markers = [
-    "antigravity-oauth-token",
-    "settings.json",
-    path.join("cache", "onboarding.json"),
-    path.join("cache", "projects.json"),
-  ];
-  for (const marker of markers) {
-    const markerInfo = await stat(path.join(configRoot, marker)).catch(() => null);
-    if (markerInfo?.isFile()) {
-      return true;
-    }
-  }
-
-  const conversations = await readdir(path.join(configRoot, "conversations")).catch(() => []);
-  return conversations.some((entry) => /\.(db|pb)$/i.test(entry));
 }
 
 function defaultModelForMode(mode) {

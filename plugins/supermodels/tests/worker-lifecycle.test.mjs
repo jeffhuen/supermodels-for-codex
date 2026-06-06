@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,41 +10,18 @@ import { signalProcessTree } from "../scripts/lib/process.mjs";
 import { createState, listJobs } from "../scripts/lib/state.mjs";
 
 test("foreground review runs in a dedicated worker process", { skip: process.platform === "win32" }, async () => {
-  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-worker-foreground-"));
-  const binDir = path.join(tempDir, "bin");
-  const dataRoot = path.join(tempDir, "data");
-  const providerPidPath = path.join(tempDir, "provider.pid");
-  const repoRoot = path.resolve(import.meta.dirname, "../../..");
+  const fixture = await createFixture("supermodels-worker-foreground-");
   let workerPid = null;
   let cli;
   try {
-    await mkdir(binDir, { recursive: true });
-    await writeFakeClaude(binDir, { providerPidPath });
+    cli = spawnReview(fixture);
 
-    const scriptPath = path.resolve(import.meta.dirname, "../scripts/supermodels.mjs");
-    cli = spawn(process.execPath, [
-      scriptPath,
-      "review",
-      "--provider",
-      "claude",
-      "--data-root",
-      dataRoot,
-    ], {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const job = await waitForJob(fixture, (candidate) => candidate.providerRuns.claude?.status === "running");
+    await fixture.server.requested;
 
-    await waitForFile(providerPidPath);
-    const jobs = await listJobs(createState({ workspaceRoot: repoRoot, dataRoot }));
-
-    assert.equal(jobs.length, 1);
-    assert.equal(jobs[0].status, "running");
-    workerPid = jobs[0].pid;
-    assert.notEqual(jobs[0].pid, cli.pid);
+    assert.equal(job.status, "running");
+    workerPid = job.pid;
+    assert.notEqual(job.pid, cli.pid);
   } finally {
     if (cli?.pid) {
       signalProcessTree(cli.pid, "SIGKILL");
@@ -51,40 +29,118 @@ test("foreground review runs in a dedicated worker process", { skip: process.pla
     if (workerPid) {
       signalProcessTree(workerPid, "SIGKILL");
     }
-    const providerPid = await readFile(providerPidPath, "utf8").catch(() => "");
-    if (providerPid) {
-      signalProcessTree(Number(providerPid), "SIGKILL");
-    }
     await new Promise((resolve) => setTimeout(resolve, 200));
-    await rm(tempDir, { recursive: true, force: true });
+    await fixture.cleanup();
   }
 });
 
-async function writeFakeClaude(binDir, { providerPidPath }) {
+async function createFixture(prefix) {
+  const tempDir = await mkdtemp(path.join(tmpdir(), prefix));
+  const binDir = path.join(tempDir, "bin");
+  const dataRoot = path.join(tempDir, "data");
+  const credentialsPath = path.join(tempDir, "claude-credentials.json");
+  const repoRoot = path.resolve(import.meta.dirname, "../../..");
+  const server = await createBlockingMessagesServer();
+  await mkdir(binDir, { recursive: true });
+  await writeFakeClaudeStatus(binDir);
+  await writeClaudeCredentials(credentialsPath);
+  return {
+    tempDir,
+    binDir,
+    dataRoot,
+    credentialsPath,
+    repoRoot,
+    server,
+    async cleanup() {
+      await server.close();
+      await rm(tempDir, { recursive: true, force: true });
+    },
+  };
+}
+
+function spawnReview(fixture) {
+  const scriptPath = path.resolve(import.meta.dirname, "../scripts/supermodels.mjs");
+  return spawn(process.execPath, [
+    scriptPath,
+    "review",
+    "--provider",
+    "claude",
+    "--data-root",
+    fixture.dataRoot,
+  ], {
+    cwd: fixture.repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${fixture.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CLAUDE_CODE_AUTH_PATH: fixture.credentialsPath,
+      SUPERMODELS_CLAUDE_MESSAGES_URL: fixture.server.url,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+async function writeFakeClaudeStatus(binDir) {
   const fakeClaude = path.join(binDir, "claude");
   await writeFile(fakeClaude, [
     "#!/usr/bin/env node",
-    "const { writeFileSync } = require('node:fs');",
     "const args = process.argv.slice(2);",
     "if (args.includes('--version')) { console.log('2.1.162 (Claude Code)'); process.exit(0); }",
     "if (args[0] === 'auth' && args[1] === 'status') {",
     "  console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', subscriptionType: 'max' }));",
     "  process.exit(0);",
     "}",
-    `writeFileSync(${JSON.stringify(providerPidPath)}, String(process.pid));`,
-    "setInterval(() => {}, 1000);",
+    "console.error('unexpected fake claude invocation: ' + args.join(' '));",
+    "process.exit(2);",
   ].join("\n"));
   await chmod(fakeClaude, 0o755);
 }
 
-async function waitForFile(filePath, timeoutMs = 15_000) {
+async function writeClaudeCredentials(credentialsPath) {
+  await writeFile(credentialsPath, JSON.stringify({
+    claudeAiOauth: {
+      accessToken: "test-access-token",
+      refreshToken: "test-refresh-token",
+      expiresAt: Date.now() + 3_600_000,
+      scopes: ["user:inference"],
+    },
+  }), "utf8");
+}
+
+async function createBlockingMessagesServer() {
+  let resolveRequested;
+  const requested = new Promise((resolve) => {
+    resolveRequested = resolve;
+  });
+  const server = createServer((req, res) => {
+    if (req.method !== "POST") {
+      res.writeHead(404).end();
+      return;
+    }
+    req.resume();
+    resolveRequested();
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  return {
+    requested,
+    url: `http://127.0.0.1:${address.port}/v1/messages`,
+    close: () => new Promise((resolve) => server.close(resolve)),
+  };
+}
+
+async function waitForJob(fixture, predicate, timeoutMs = 15_000) {
+  const state = createState({ workspaceRoot: fixture.repoRoot, dataRoot: fixture.dataRoot });
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    const text = await readFile(filePath, "utf8").catch(() => "");
-    if (text) {
-      return text;
+    const jobs = await listJobs(state);
+    const job = jobs[0];
+    if (job && predicate(job)) {
+      return job;
     }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  assert.fail(`Timed out waiting for ${filePath}`);
+  assert.fail("Timed out waiting for job state");
 }
