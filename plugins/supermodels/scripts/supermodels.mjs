@@ -4,12 +4,11 @@ import { fileURLToPath } from "node:url";
 
 import { parseRuntimeArgs, resolveProviderIds } from "./lib/args.mjs";
 import { buildBackgroundChildArgs, markBackgroundJobRunning } from "./lib/background.mjs";
+import { abortLiveJob, cancelJob } from "./lib/cancellation.mjs";
 import { findExecutable, signalProcessTree } from "./lib/process.mjs";
-import { signalJobProcesses } from "./lib/provider-pids.mjs";
 import {
   checkProviders,
   getStatus,
-  markCancelled,
   renderHumanResult,
   runReview,
   runTask,
@@ -346,29 +345,15 @@ async function handleCancel(parsed) {
     workspaceRoot: process.cwd(),
     dataRoot: parsed.options["data-root"],
   });
-  const output = await markCancelled({
+  const result = await cancelJob({
+    state,
     workspaceRoot: process.cwd(),
     dataRoot: parsed.options["data-root"],
     jobId,
+    signaler: signalProcessTree,
+    sleep,
   });
-  if (output.status !== "cancelled") {
-    writeOutput(parsed, addCancellationSignals(output, []), `Supermodels job ${jobId} is ${output.status}; no processes signaled.`);
-    return;
-  }
-
-  const job = await readJob(state, jobId).catch(() => output);
-  const graceful = signalJobProcesses(job, { signal: "SIGTERM", signaler: signalProcessTree, verifyIdentity: true });
-  await sleep(1500);
-  const latestJob = await readJob(state, jobId).catch(() => job);
-  const lateGraceful = signalJobProcesses(latestJob, { signal: "SIGTERM", signaler: signalProcessTree, verifyIdentity: true });
-  await sleep(250);
-  const forced = signalJobProcesses(latestJob, { signal: "SIGKILL", signaler: signalProcessTree, verifyIdentity: true });
-  const signals = [
-    ...graceful.map((pid) => ({ signal: "SIGTERM", pid, phase: "initial" })),
-    ...lateGraceful.map((pid) => ({ signal: "SIGTERM", pid, phase: "late" })),
-    ...forced.map((pid) => ({ signal: "SIGKILL", pid, phase: "force" })),
-  ];
-  writeOutput(parsed, addCancellationSignals(output, signals), renderCancelResult(output, signals));
+  writeOutput(parsed, result.job, result.text);
 }
 
 async function startBackgroundJob(input) {
@@ -432,46 +417,14 @@ function installLiveAbortHandlers({ state, jobId }) {
 }
 
 async function handleLiveAbort({ state, jobId, signal }) {
-  const job = await readJob(state, jobId).catch(() => null);
-  if (job) {
-    signalJobProcesses(job, { signal: "SIGTERM", signaler: signalProcessTree, excludePids: [process.pid], verifyIdentity: true });
-  }
-  await updateJob(state, jobId, (current) => ({
-    ...current,
-    status: "cancelled",
-    completedAt: new Date().toISOString(),
-    cancellation: {
-      signal,
-      at: new Date().toISOString(),
-    },
-  })).catch(() => null);
-  if (job) {
-    await sleep(1500);
-    const latestJob = await readJob(state, jobId).catch(() => job);
-    signalJobProcesses(latestJob, {
-      signal: "SIGKILL",
-      signaler: signalProcessTree,
-      excludePids: [process.pid],
-      verifyIdentity: true,
-    });
-  }
-}
-
-function addCancellationSignals(job, signals) {
-  return {
-    ...job,
-    cancellationSignals: signals,
-  };
-}
-
-function renderCancelResult(job, signals) {
-  const signalled = signals.length
-    ? signals.map((entry) => `${entry.signal} ${entry.pid}`).join(", ")
-    : "none";
-  return [
-    `Cancelled Supermodels job ${job.id}`,
-    `Processes signaled: ${signalled}`,
-  ].join("\n");
+  await abortLiveJob({
+    state,
+    jobId,
+    signal,
+    currentPid: process.pid,
+    signaler: signalProcessTree,
+    sleep,
+  });
 }
 
 function renderSetup(output) {

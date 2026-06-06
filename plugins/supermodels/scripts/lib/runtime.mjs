@@ -27,6 +27,8 @@ const SUMMARY_LIMIT = 4000;
 const NO_PID_STALE_MS = 5 * 60 * 1000;
 const execFileAsync = promisify(execFile);
 
+export { markCancelled } from "./cancellation.mjs";
+
 export function selectProviders(input) {
   const requested = input.requested ?? [];
   const checks = input.checks ?? {};
@@ -467,20 +469,6 @@ export async function getStatus({ workspaceRoot, dataRoot, jobId }) {
   }
   const jobs = await listJobs(state);
   return await Promise.all(jobs.map((job) => reconcileJobStatus(state, job)));
-}
-
-export async function markCancelled({ workspaceRoot, dataRoot, jobId }) {
-  const state = createState({ workspaceRoot, dataRoot });
-  return await updateJob(state, jobId, (job) => {
-    if (!["queued", "running"].includes(job.status)) {
-      return job;
-    }
-    return {
-      ...job,
-      status: "cancelled",
-      completedAt: new Date().toISOString(),
-    };
-  });
 }
 
 export function renderHumanResult(output) {
