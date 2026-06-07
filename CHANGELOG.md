@@ -32,7 +32,9 @@ Initial public release.
 - Claude Code direct reviews prepend the official Claude Code system identity block before Supermodels review instructions.
 - Claude Code direct reviews emit Anthropic-compatible `tool_result` blocks without provider-internal helper fields.
 - Claude Code credential loading accepts the hex-encoded macOS Keychain payload used by current Claude Code secure storage.
+- Claude Code token refresh writes macOS Keychain payloads back in the same hex-encoded form.
 - Antigravity project discovery matches the reference Code Assist behavior: non-auth discovery failures are non-fatal and onboarding polls use the reference bounds.
+- Antigravity project discovery only caches non-empty project ids, so a transient project-discovery failure can be retried by later requests.
 - Preloaded review context now fails explicitly when changed-file discovery fails, and unreadable snippets no longer satisfy the review inspection gate.
 - macOS Antigravity keychain read failures no longer silently fall back to local token files unless a file path is explicitly configured.
 

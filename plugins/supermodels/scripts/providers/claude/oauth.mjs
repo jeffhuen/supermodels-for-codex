@@ -27,6 +27,7 @@ export class ClaudeCodeCredentials {
     this.platform = options.platform ?? process.platform;
     this.user = options.user ?? process.env.USER ?? os.userInfo().username;
     this.keychainReader = options.keychainReader;
+    this.keychainWriter = options.keychainWriter;
     this.cache = null;
   }
 
@@ -131,16 +132,7 @@ export class ClaudeCodeCredentials {
   async writeEnvelope(envelope) {
     const payload = `${JSON.stringify(envelope, null, 2)}\n`;
     if (this.useKeychain()) {
-      await execFileAsync("security", [
-        "add-generic-password",
-        "-U",
-        "-s",
-        KEYCHAIN_SERVICE,
-        "-a",
-        this.user,
-        "-w",
-        payload,
-      ], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+      await this.writeKeychain(payload);
       return;
     }
     await mkdir(path.dirname(this.credentialsPath), { recursive: true });
@@ -160,6 +152,24 @@ export class ClaudeCodeCredentials {
       "-w",
     ], { timeout: 10_000, maxBuffer: 1024 * 1024 });
     return stdout.trim();
+  }
+
+  async writeKeychain(payload) {
+    const hexPayload = Buffer.from(payload, "utf8").toString("hex");
+    if (this.keychainWriter) {
+      await this.keychainWriter(hexPayload);
+      return;
+    }
+    await execFileAsync("security", [
+      "add-generic-password",
+      "-U",
+      "-s",
+      KEYCHAIN_SERVICE,
+      "-a",
+      this.user,
+      "-X",
+      hexPayload,
+    ], { timeout: 10_000, maxBuffer: 1024 * 1024 });
   }
 
   useKeychain() {

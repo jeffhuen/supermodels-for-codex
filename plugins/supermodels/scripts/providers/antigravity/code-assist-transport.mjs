@@ -105,8 +105,13 @@ export class AntigravityCodeAssistTransport {
       this.projectDiscovery = null;
       throw error;
     });
-    this.projectIdValue = await this.projectDiscovery;
-    return this.projectIdValue;
+    const discovered = await this.projectDiscovery;
+    if (discovered) {
+      this.projectIdValue = discovered;
+    } else {
+      this.projectDiscovery = null;
+    }
+    return discovered;
   }
 
   async discoverProject(options = {}) {

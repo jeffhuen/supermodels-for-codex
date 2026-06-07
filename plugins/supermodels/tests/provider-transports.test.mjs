@@ -79,6 +79,36 @@ test("ClaudeCodeCredentials decodes hex-encoded macOS Keychain JSON", async () =
   assert.equal(await credentials.accessToken(), "access-token");
 });
 
+test("ClaudeCodeCredentials writes refreshed macOS Keychain JSON as hex", async () => {
+  const envelope = {
+    claudeAiOauth: {
+      accessToken: "old-access",
+      refreshToken: "old-refresh",
+      expiresAt: 1,
+      scopes: ["user:profile", "user:inference"],
+    },
+  };
+  let writtenHex = "";
+  const credentials = new ClaudeCodeCredentials({
+    platform: "darwin",
+    keychainReader: async () => Buffer.from(JSON.stringify(envelope), "utf8").toString("hex"),
+    keychainWriter: async (payload) => {
+      writtenHex = payload;
+    },
+    fetchImpl: async () => new Response(JSON.stringify({
+      access_token: "new-access",
+      refresh_token: "new-refresh",
+      expires_in: 3600,
+    }), { status: 200, headers: { "content-type": "application/json" } }),
+    now: () => 1_000_000,
+  });
+
+  assert.equal(await credentials.accessToken(), "new-access");
+  assert.match(writtenHex, /^[0-9a-f]+$/);
+  const persisted = JSON.parse(Buffer.from(writtenHex, "hex").toString("utf8"));
+  assert.equal(persisted.claudeAiOauth.accessToken, "new-access");
+});
+
 test("collectClaudeMessageEvents preserves streamed tool calls and text", () => {
   const result = collectClaudeMessageEvents([
     {
@@ -573,6 +603,55 @@ test("AntigravityCodeAssistTransport continues generateContent when project disc
   assert.equal(Object.hasOwn(requests[1].body, "project"), false);
 });
 
+test("AntigravityCodeAssistTransport retries project discovery after unavailable discovery", async () => {
+  const requests = [];
+  let discoveryCalls = 0;
+  const transport = new AntigravityCodeAssistTransport({
+    credentials: { accessToken: async () => "access-token", forceReload: () => {} },
+    rateLimiter: noRateLimit,
+    maxRetries: 0,
+    fetchImpl: async (url, init) => {
+      requests.push({ url, body: JSON.parse(init.body) });
+      if (String(url).endsWith("v1internal:loadCodeAssist")) {
+        discoveryCalls += 1;
+        if (discoveryCalls === 1) {
+          return new Response(JSON.stringify({ error: { code: 500, message: "discovery down" } }), {
+            status: 500,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({
+          cloudaicompanionProject: "project-after-retry",
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({
+        response: {
+          candidates: [{ content: { parts: [{ text: "ok" }] } }],
+          usageMetadata: {},
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+
+  await transport.messages({
+    model: "gemini-2.5-pro",
+    messages: [{ role: "user", content: [{ type: "text", text: "review" }] }],
+    tools: [],
+  });
+  await transport.messages({
+    model: "gemini-2.5-pro",
+    messages: [{ role: "user", content: [{ type: "text", text: "review again" }] }],
+    tools: [],
+  });
+
+  assert.equal(discoveryCalls, 2);
+  const generateBodies = requests
+    .filter((request) => String(request.url).endsWith("v1internal:generateContent"))
+    .map((request) => request.body);
+  assert.equal(Object.hasOwn(generateBodies[0], "project"), false);
+  assert.equal(generateBodies[1].project, "project-after-retry");
+});
+
 test("AntigravityCodeAssistTransport uses reference onboarding poll bounds with test overrides", async () => {
   const defaults = new AntigravityCodeAssistTransport({
     credentials: { accessToken: async () => "access-token" },
@@ -587,6 +666,46 @@ test("AntigravityCodeAssistTransport uses reference onboarding poll bounds with 
   });
   assert.equal(overridden.onboardPollAttempts, 2);
   assert.equal(overridden.onboardPollIntervalMs, 0);
+});
+
+test("AntigravityCodeAssistTransport returns project-less after bounded onboarding exhaustion", async () => {
+  let loadCalls = 0;
+  let onboardCalls = 0;
+  const transport = new AntigravityCodeAssistTransport({
+    credentials: { accessToken: async () => "access-token", forceReload: () => {} },
+    rateLimiter: noRateLimit,
+    onboardPollAttempts: 2,
+    onboardPollIntervalMs: 0,
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("v1internal:loadCodeAssist")) {
+        loadCalls += 1;
+        return new Response(JSON.stringify({ status: "USER_NOT_ONBOARDED" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (String(url).endsWith("v1internal:onboardUser")) {
+        onboardCalls += 1;
+        return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({
+        response: {
+          candidates: [{ content: { parts: [{ text: "ok" }] } }],
+          usageMetadata: {},
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+
+  const response = await transport.messages({
+    model: "gemini-2.5-pro",
+    messages: [{ role: "user", content: [{ type: "text", text: "review" }] }],
+    tools: [],
+  });
+
+  assert.equal(response.text, "ok");
+  assert.equal(onboardCalls, 1);
+  assert.equal(loadCalls, 3);
 });
 
 test("AntigravityCodeAssistTransport forces native refresh before retrying project discovery 401", async () => {
