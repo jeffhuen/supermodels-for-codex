@@ -158,6 +158,14 @@ export async function runReviewAgent(options = {}) {
         timeoutMs: remainingReviewTimeoutMs(timeoutMs, reviewStartedAt, provider),
       });
       cumulativeUsage = mergeUsage(cumulativeUsage, response.usage);
+      if (response.usage) {
+        onEvent?.({
+          type: "usage",
+          message: `${provider} review usage ${formatUsageSummary(cumulativeUsage)}`,
+          usage: cumulativeUsage,
+          at: new Date().toISOString(),
+        });
+      }
       throwIfCancelled(controller);
 
       if (Array.isArray(response.content) && response.content.length) {
@@ -368,6 +376,21 @@ function mergeUsage(total, next) {
     }
   }
   return merged;
+}
+
+function formatUsageSummary(usage) {
+  if (!usage || typeof usage !== "object") {
+    return "updated";
+  }
+  const entries = [
+    ["input", usage.input_tokens],
+    ["output", usage.output_tokens],
+    ["total", usage.total_tokens],
+    ["thinking", usage.output_tokens_details?.thinking_tokens],
+  ].filter(([, value]) => typeof value === "number" && Number.isFinite(value));
+  return entries.length
+    ? entries.map(([label, value]) => `${label}=${value}`).join(" ")
+    : "updated";
 }
 
 function handleSubmittedReview(call, inspection, minInspection) {

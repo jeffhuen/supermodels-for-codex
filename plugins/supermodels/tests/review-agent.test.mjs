@@ -355,6 +355,7 @@ test("runReviewAgent keeps adversarial Antigravity reviews model-led by default"
 });
 
 test("runReviewAgent aggregates usage across every model turn", async () => {
+  const events = [];
   const fakeTransport = {
     calls: 0,
     async messages() {
@@ -384,6 +385,7 @@ test("runReviewAgent aggregates usage across every model turn", async () => {
     tools: reviewToolsForDiffAndFiles(),
     minInspection: { diff: false, fileOrSearch: true, explicitFileOrSearchToolCalls: 2 },
     maxRounds: 3,
+    onEvent: (event) => events.push(event),
   });
 
   assert.deepEqual(result.usage, {
@@ -391,6 +393,25 @@ test("runReviewAgent aggregates usage across every model turn", async () => {
     output_tokens: 9,
     total_tokens: 69,
   });
+  assert.deepEqual(
+    events
+      .filter((event) => event.type === "usage")
+      .map((event) => ({ message: event.message, usage: event.usage })),
+    [
+      {
+        message: "antigravity review usage input=10 output=2 total=12",
+        usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+      },
+      {
+        message: "antigravity review usage input=30 output=5 total=35",
+        usage: { input_tokens: 30, output_tokens: 5, total_tokens: 35 },
+      },
+      {
+        message: "antigravity review usage input=60 output=9 total=69",
+        usage: { input_tokens: 60, output_tokens: 9, total_tokens: 69 },
+      },
+    ],
+  );
 });
 
 test("runReviewAgent uses timeout as an aggregate review budget", async () => {
