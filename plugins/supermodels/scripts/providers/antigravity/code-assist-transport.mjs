@@ -488,7 +488,6 @@ function mapAntigravityModel(model) {
     "Gemini 3.5 Flash (Low)": "gemini-3-flash-preview",
     "Gemini 3.5 Flash (Medium)": "gemini-3-flash-preview",
     "Gemini 3.5 Flash (High)": "gemini-3-flash-preview",
-    "Gemini 3.5 Pro": "gemini-3.1-pro-preview",
   }[model] ?? model ?? "gemini-3-flash-preview";
 }
 

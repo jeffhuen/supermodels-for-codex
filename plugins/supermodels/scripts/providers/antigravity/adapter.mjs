@@ -246,15 +246,11 @@ function resolveAntigravityCodeAssistModel(model) {
     : model;
   const lower = String(candidate).toLowerCase();
   const directAliases = {
-    "pro-low": "gemini-3-flash-preview",
-    pro: "gemini-3-flash-preview",
-    "pro-high": "gemini-3-flash-preview",
     flash: "gemini-3-flash-preview",
     "flash-high": "gemini-3-flash-preview",
     "gemini 3.5 flash (low)": "gemini-3-flash-preview",
     "gemini 3.5 flash (medium)": "gemini-3-flash-preview",
     "gemini 3.5 flash (high)": "gemini-3-flash-preview",
-    "gemini 3.5 pro": "gemini-3.1-pro-preview",
   };
   if (directAliases[lower]) {
     return directAliases[lower];

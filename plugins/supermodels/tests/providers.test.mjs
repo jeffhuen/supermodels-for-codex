@@ -324,12 +324,13 @@ test("Claude check fails when direct OAuth refresh fails", async () => {
   }
 });
 
-test("Antigravity model aliases keep review defaults on Flash High and typo-like aliases fail", () => {
-  assert.equal(resolveAntigravityModelAlias("pro"), "Gemini 3.5 Flash (High)");
+test("Antigravity model aliases keep review default on Flash High and reject unsupported pro", () => {
+  assert.equal(resolveAntigravityModelAlias("flash"), "Gemini 3.5 Flash (High)");
   assert.equal(
     resolveAntigravityModelAlias("Gemini 3.5 Flash (High)"),
     "Gemini 3.5 Flash (High)",
   );
+  assert.throws(() => resolveAntigravityModelAlias("pro"), /unknown antigravity model/i);
   assert.throws(() => resolveAntigravityModelAlias("proo"), /unknown antigravity model/i);
 });
 
@@ -354,7 +355,7 @@ test("parseAntigravitySessionMetadata ignores model-generated session-looking te
 });
 
 test("buildAntigravityCommand builds native CLI command", () => {
-  const command = buildAntigravityCommand({ model: "pro", promptPath: "/tmp/supermodels-prompt.md" });
+  const command = buildAntigravityCommand({ model: "flash", promptPath: "/tmp/supermodels-prompt.md" });
   assert.equal(command.bin, "agy");
   assert.deepEqual(command.args, [
     "-p",
@@ -684,14 +685,12 @@ test("Antigravity direct reviews default to Flash High Code Assist model", async
   assert.equal(seenModel, "gemini-3-flash-preview");
 });
 
-test("Antigravity direct review aliases keep pro on Flash High by default", async () => {
-  let seenModel = "";
+test("Antigravity direct reviews reject unsupported pro aliases", async () => {
   const adapter = createAntigravityAdapter({
     ...fakeDirectReviewFactory("antigravity"),
     reviewTransport: {
       calls: 0,
       async messages(body) {
-        seenModel ||= body.model;
         this.calls += 1;
         if (this.calls === 1) {
           return directToolResponse("diff_1", "get_diff", {});
@@ -713,18 +712,19 @@ test("Antigravity direct review aliases keep pro on Flash High by default", asyn
     },
   });
 
-  await adapter.review({
-    mode: "review",
-    focus: "inspect aliases",
-    context: {},
-    prompt: "brief",
-  }, {
-    cwd: process.cwd(),
-    timeoutMs: 5000,
-    model: "pro",
-  });
-
-  assert.equal(seenModel, "gemini-3-flash-preview");
+  await assert.rejects(
+    () => adapter.review({
+      mode: "review",
+      focus: "inspect aliases",
+      context: {},
+      prompt: "brief",
+    }, {
+      cwd: process.cwd(),
+      timeoutMs: 5000,
+      model: "pro",
+    }),
+    /unknown antigravity model/i,
+  );
 });
 
 test("runAntigravityPrompt keeps task delegation on native CLI and writes prompt file", async () => {
