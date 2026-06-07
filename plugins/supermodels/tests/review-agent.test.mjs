@@ -297,7 +297,7 @@ test("runReviewAgent forces Antigravity synthesis after evidence is satisfied", 
       if (this.calls === 3) {
         return responseWithTool("search_1", "search", { query: "runReviewAgent" });
       }
-      if (this.calls < 12) {
+      if (this.calls < 7) {
         return responseWithTool(`read_${this.calls}`, "read_file", { path: `extra-${this.calls}.mjs` });
       }
       assert.deepEqual(body.tool_choice, { type: "tool", name: "submit_review" });
@@ -309,6 +309,45 @@ test("runReviewAgent forces Antigravity synthesis after evidence is satisfied", 
     provider: "antigravity",
     transport: fakeTransport,
     tools: reviewToolsForDiffAndFiles(),
+    forceAfterRounds: Number.POSITIVE_INFINITY,
+    maxRounds: 7,
+  });
+
+  assert.equal(result.verdict, "inconclusive");
+  assert.equal(result.rounds, 7);
+  assert.deepEqual(seenToolChoices.slice(0, 6), Array.from({ length: 6 }, () => null));
+  assert.deepEqual(seenToolChoices[6], { type: "tool", name: "submit_review" });
+});
+
+test("runReviewAgent keeps longer Antigravity synthesis budget for adversarial review", async () => {
+  const seenToolChoices = [];
+  const fakeTransport = {
+    calls: 0,
+    async messages(body) {
+      this.calls += 1;
+      seenToolChoices.push(body.tool_choice ?? null);
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", { path: "a.mjs" });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", { query: "runReviewAgent" });
+      }
+      if (this.calls < 12) {
+        return responseWithTool(`read_${this.calls}`, "read_file", { path: `extra-${this.calls}.mjs` });
+      }
+      assert.deepEqual(body.tool_choice, { type: "tool", name: "submit_review" });
+      return responseWithTool("submit_1", "submit_review", inconclusiveReview("adversarial forced synthesis"));
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "antigravity",
+    transport: fakeTransport,
+    tools: reviewToolsForDiffAndFiles(),
+    mode: "adversarial-review",
     forceAfterRounds: Number.POSITIVE_INFINITY,
     maxRounds: 12,
   });
@@ -786,7 +825,32 @@ test("runReviewAgent sends the Claude Code identity as the first Claude system b
   assert.match(firstBody.system[1].text, /reviewing for Codex/i);
 });
 
-test("runReviewAgent requests adaptive Claude thinking without xhigh effort by default", async () => {
+test("runReviewAgent does not duplicate focus when rendered brief already contains it", async () => {
+  let firstBody;
+  const fakeTransport = {
+    async messages(body) {
+      firstBody = body;
+      return responseWithTool("submit_1", "submit_review", inconclusiveReview("focus checked"));
+    },
+  };
+  const focus = "review this exact context";
+
+  await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: { schemas: [], async execute() {} },
+    brief: `# User Focus\n${focus}\n\n# Diff\n(no diff)`,
+    focus,
+    minInspection: { diff: false, fileOrSearch: false, explicitFileOrSearchToolCalls: 0, cleanExplicitFileOrSearchToolCalls: 0 },
+    forceAfterRounds: 1,
+    maxRounds: 1,
+  });
+
+  const text = firstBody.messages[0].content[0].text;
+  assert.equal(text.match(new RegExp(focus, "g"))?.length, 1);
+});
+
+test("runReviewAgent requests adaptive Claude thinking without provider-level effort by default", async () => {
   let firstBody;
   const fakeTransport = {
     async messages(body) {

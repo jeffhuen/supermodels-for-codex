@@ -1082,7 +1082,7 @@ test("runReview persists provider review configuration metadata", async () => {
           usage: { input_tokens: 10, output_tokens: 5, output_tokens_details: { thinking_tokens: 2 } },
           reviewConfig: {
             model: "claude-opus-4-8",
-            effort: "high",
+            effort: "xhigh",
             maxTokens: 128_000,
             thinking: { type: "adaptive", display: "summarized" },
             rounds: 4,
@@ -1110,7 +1110,7 @@ test("runReview persists provider review configuration metadata", async () => {
 
     const run = output.job.providerRuns.claude;
     assert.equal(run.reviewConfig.model, "claude-opus-4-8");
-    assert.equal(run.reviewConfig.effort, "high");
+    assert.equal(run.reviewConfig.effort, "xhigh");
     assert.equal(run.reviewConfig.rounds, 4);
     assert.deepEqual(run.reviewConfig.toolUsage, { get_review_context: 1, read_file: 2, search: 1 });
   } finally {

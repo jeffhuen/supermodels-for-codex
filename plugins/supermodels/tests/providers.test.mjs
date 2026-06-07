@@ -133,9 +133,9 @@ test("buildClaudeCommand supports opus alias and explicit max effort", () => {
   assert.deepEqual(command.args.slice(-4), ["--model", "claude-opus-4-8", "--effort", "max"]);
 });
 
-test("buildClaudeCommand defaults review effort to high", () => {
+test("buildClaudeCommand defaults review effort to xhigh", () => {
   const command = buildClaudeCommand({ model: "opus" });
-  assert.deepEqual(command.args.slice(-4), ["--model", "claude-opus-4-8", "--effort", "high"]);
+  assert.deepEqual(command.args.slice(-4), ["--model", "claude-opus-4-8", "--effort", "xhigh"]);
 });
 
 test("Claude adapter runs reviews through the direct tool-loop transport", async () => {
@@ -290,7 +290,7 @@ test("Claude direct reviews pass explicit effort overrides to the Messages reque
   assert.deepEqual(firstRequest.output_config, { effort: "max" });
 });
 
-test("Claude direct reviews default to configured Opus high-effort review settings and expose audit metadata", async () => {
+test("Claude direct reviews default to configured Opus xhigh-effort review settings and expose audit metadata", async () => {
   let firstRequest;
   const adapter = createClaudeAdapter({
     reviewTransport: {
@@ -347,11 +347,11 @@ test("Claude direct reviews default to configured Opus high-effort review settin
   });
 
   assert.equal(firstRequest.model, "claude-opus-4-8");
-  assert.deepEqual(firstRequest.output_config, { effort: "high" });
+  assert.deepEqual(firstRequest.output_config, { effort: "xhigh" });
   assert.deepEqual(firstRequest.thinking, { type: "adaptive", display: "summarized" });
   assert.equal(firstRequest.max_tokens, 128_000);
   assert.equal(result.reviewConfig.model, "claude-opus-4-8");
-  assert.equal(result.reviewConfig.effort, "high");
+  assert.equal(result.reviewConfig.effort, "xhigh");
   assert.equal(result.reviewConfig.maxTokens, 128_000);
   assert.deepEqual(result.reviewConfig.thinking, { type: "adaptive", display: "summarized" });
   assert.equal(result.reviewConfig.rounds, 3);

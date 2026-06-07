@@ -3,7 +3,8 @@ import { REVIEW_RESULT_SCHEMA, normalizeStructuredReview } from "./review-schema
 const DEFAULT_REVIEW_POLICY = Object.freeze({
   maxRounds: Number.POSITIVE_INFINITY,
   forceAfterRounds: Number.POSITIVE_INFINITY,
-  antigravityForceAfterSatisfiedRounds: 8,
+  antigravityReviewForceAfterSatisfiedRounds: 3,
+  antigravityAdversarialForceAfterSatisfiedRounds: 8,
   claudeMaxTokens: 128_000,
   antigravityMaxTokens: 64_000,
   claudeThinking: Object.freeze({ type: "adaptive", display: "summarized" }),
@@ -39,7 +40,7 @@ export async function runReviewAgent(options = {}) {
       ? DEFAULT_REVIEW_POLICY.forceAfterRounds
       : Math.max(1, maxRounds - 1));
   const forceAfterSatisfiedRounds = options.forceAfterSatisfiedRounds
-    ?? providerForceAfterSatisfiedRounds(provider);
+    ?? providerForceAfterSatisfiedRounds(provider, mode);
   const minInspection = {
     ...DEFAULT_REVIEW_POLICY.minInspection,
     ...(options.minInspection ?? {}),
@@ -338,9 +339,11 @@ function providerMaxTokens(provider) {
   return DEFAULT_REVIEW_POLICY.antigravityMaxTokens;
 }
 
-function providerForceAfterSatisfiedRounds(provider) {
+function providerForceAfterSatisfiedRounds(provider, mode) {
   if (provider === "antigravity") {
-    return DEFAULT_REVIEW_POLICY.antigravityForceAfterSatisfiedRounds;
+    return mode === "adversarial-review"
+      ? DEFAULT_REVIEW_POLICY.antigravityAdversarialForceAfterSatisfiedRounds
+      : DEFAULT_REVIEW_POLICY.antigravityReviewForceAfterSatisfiedRounds;
   }
   return Number.POSITIVE_INFINITY;
 }
@@ -515,6 +518,8 @@ function submitReviewToolSchema() {
 
 function initialPrompt({ provider, brief, focus, mode }) {
   const modeLabel = mode === "adversarial-review" ? "adversarial production review" : "production code review";
+  const briefText = brief?.trim() || "";
+  const focusText = focus?.trim() || "";
   const lines = [
     `Perform a serious ${modeLabel} of the current workspace as ${provider}.`,
     "",
@@ -533,16 +538,20 @@ function initialPrompt({ provider, brief, focus, mode }) {
     "2. Search/read the most relevant files and tests if the preloaded snippets are insufficient.",
     "3. Cross-check findings against tests or adjacent code.",
     "4. Call submit_review with the final structured review.",
-    "",
-    "User focus:",
-    focus?.trim() || "No extra focus provided.",
   ];
-  if (brief?.trim()) {
+  if (!briefText || (focusText && !briefText.includes(focusText))) {
+    lines.push(
+      "",
+      "User focus:",
+      focusText || "No extra focus provided.",
+    );
+  }
+  if (briefText) {
     lines.push(
       "",
       "# Supermodels Review Brief",
       "Treat this brief as steering context, not as a substitute for tool inspection.",
-      brief.trim(),
+      briefText,
     );
   }
   return lines.join("\n");
