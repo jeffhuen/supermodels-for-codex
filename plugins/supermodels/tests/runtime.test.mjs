@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -1558,6 +1558,62 @@ test("getStatus marks stale running jobs failed when no process pid was recorded
     assert.equal(status.status, "failed");
     assert.equal(status.stage, "failed");
     assert.match(status.error, /no recorded worker process/i);
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("runTask persists and supplies a context packet to providers", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-task-packet-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-task-packet-workspace-"));
+  try {
+    let receivedInput;
+    const adapters = {
+      claude: {
+        capabilities: () => ({ writeTask: true }),
+        check: async () => ({
+          provider: "claude",
+          ready: true,
+          installed: true,
+          auth: "ok",
+          path: "fake-claude",
+        }),
+        task: async (input) => {
+          receivedInput = input;
+          return {
+            exitCode: 0,
+            rawText: "done",
+            stderr: "",
+            sessionId: "claude-session",
+            commandLine: "fake-claude",
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+          };
+        },
+      },
+    };
+
+    const output = await runTask({
+      adapters,
+      providerSelection: {
+        requested: ["claude"],
+        explicit: true,
+      },
+      options: {
+        "data-root": dataRoot,
+        write: true,
+      },
+      task: "summarize lifecycle risks",
+      contextBrief: "Codex learned the user wants a maintainable context handoff.",
+      workspaceRoot,
+    });
+
+    assert.equal(output.job.contextPacket?.summary, "Complete the delegated task using the supplied context, repository evidence, and stated constraints.");
+    assert.match(await readFile(output.job.contextPacket.markdownPath, "utf8"), /maintainable context handoff/);
+    assert.match(receivedInput.prompt, /# Supermodels Context Packet/);
+    assert.match(receivedInput.prompt, /summarize lifecycle risks/);
+    assert.match(receivedInput.prompt, /maintainable context handoff/);
   } finally {
     await rm(dataRoot, { recursive: true, force: true });
     await rm(workspaceRoot, { recursive: true, force: true });

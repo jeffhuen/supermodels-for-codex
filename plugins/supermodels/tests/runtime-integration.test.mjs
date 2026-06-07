@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -86,6 +86,43 @@ test("runReview adversarial mode cross-challenges usable first-pass provider out
     assert.match(output.synthesis, /Antigravity challenging Claude Code/);
     assert(calls.every((call) => /session context: challenge workflow was just committed/.test(call.prompt)));
     assert(calls.some((call) => /Peer Reviews To Challenge/.test(call.prompt)));
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("runReview persists and supplies a context packet to providers", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-review-packet-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-workspace-"));
+  try {
+    const calls = [];
+    const adapters = {
+      claude: fakeAdapter("claude", "High: claude finding", "review the packet compiler", calls),
+    };
+
+    const output = await runReview({
+      adapters,
+      providerSelection: {
+        explicit: true,
+        requested: ["claude"],
+      },
+      mode: "review",
+      options: {
+        "data-root": dataRoot,
+      },
+      focus: "review the packet compiler",
+      contextBrief: "Codex changed the workflow after a discussion about manual Claude handoffs.",
+      workspaceRoot,
+    });
+
+    assert.equal(output.job.contextPacket?.summary, "Review the supplied implementation/context for production-relevant bugs, gaps, and verification risks.");
+    assert.match(output.job.contextPacket.jsonPath, /context-packet\.json$/);
+    assert.match(output.job.contextPacket.markdownPath, /context-packet\.md$/);
+    assert.match(await readFile(output.job.contextPacket.markdownPath, "utf8"), /manual Claude handoffs/);
+    assert.match(calls[0].prompt, /# Supermodels Context Packet/);
+    assert.match(calls[0].prompt, /manual Claude handoffs/);
+    assert.match(calls[0].prompt, /Reviewer Task/);
   } finally {
     await rm(dataRoot, { recursive: true, force: true });
     await rm(workspaceRoot, { recursive: true, force: true });

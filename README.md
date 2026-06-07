@@ -99,7 +99,7 @@ node scripts/supermodels.mjs status
 
 `review` and `adversarial-review` intentionally have different depth. Normal review keeps provider feedback independent: Claude Code and Antigravity do not see each other's output. Adversarial review is heavier: after the blind first pass, each usable provider receives its own review plus the peer review and must attack unsupported claims, missed bugs, weak evidence, severity mistakes, and overcomplicated recommendations. If fewer than two providers return usable structured output, Supermodels skips the cross-challenge phase and records that limitation in synthesis.
 
-Review and task scope are not limited to the current uncommitted diff. Use `--base <ref>` to review committed changes against a base ref, and use `--context-file <path>` or `--context <text>` to provide explicit non-git context such as a recent planning discussion, implementation summary, release decision, or session transcript. The context brief is treated as untrusted background; providers must still ground code findings in repository evidence.
+Review and task scope are not limited to the current uncommitted diff. Use `--base <ref>` to review committed changes against a base ref, and use `--context-file <path>` or `--context <text>` to provide explicit non-git context such as a recent planning discussion, implementation summary, release decision, or session transcript. Supermodels compiles that input into a shared context packet with intent, provider selection, and repository evidence, then supplies the same packet to Claude Code and Antigravity. The packet is treated as untrusted background; providers must still ground code findings in repository evidence.
 
 ## Provider Behavior
 
@@ -124,6 +124,7 @@ Supermodels stores job state outside the repository under the Codex plugin data 
 Each run stores:
 
 - Job metadata and provider progress.
+- A shared context packet showing the intent, explicit context, and repository evidence supplied to providers.
 - Prompt/context artifacts when generated.
 - Raw provider output.
 - Normalized provider results.

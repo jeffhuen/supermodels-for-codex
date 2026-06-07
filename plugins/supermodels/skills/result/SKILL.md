@@ -11,4 +11,4 @@ Resolve the plugin root as the directory two levels above this `SKILL.md`. Keep 
 node "$PLUGIN_ROOT/scripts/supermodels.mjs" result "$@"
 ```
 
-Requires a job ID. Include raw and normalized artifact paths when reporting results.
+Requires a job ID. Include context packet, raw, normalized, and stderr artifact paths when reporting results.

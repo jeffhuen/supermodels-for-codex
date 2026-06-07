@@ -34,7 +34,9 @@ Normal review is a blind independent first-pass workflow. Claude Code and Antigr
 
 If the user invokes bare `$supermodels:review` with no arguments, run exactly the live review command with no trailing focus text. Do not synthesize focus from prior conversation, previous review findings, build notes, validation history, or your own assumptions. Only pass focus text that the user explicitly supplied after the skill invocation. Do not announce that the invocation is bare or that no focus text was added.
 
-If the user explicitly asks to review current-session context, a recent plan, a just-completed implementation that may already be committed, or other non-git background, create a concise private review brief file containing only the relevant factual context from the current request/session and pass it with `--context-file <path>`. Keep the positional focus short. Do not use this for bare invocations.
+If the user explicitly asks to review current-session context, a recent plan, a just-completed implementation that may already be committed, or other non-git background, create a concise private review brief file containing only the relevant factual context from the current request/session and pass it with `--context-file <path>`. Include useful facts Codex already learned from local inspection or tools when they are relevant, but do not require providers to have those tools. Keep the positional focus short. Do not use this for bare invocations.
+
+The runtime compiles the focus, context brief, provider plan, and repository evidence into a persisted context packet and gives that same packet to each selected provider.
 
 Do not answer from prior context or summarize the plugin build. Run the runtime and then synthesize findings for the user. Lead with concrete bugs and risks; do not treat provider praise as evidence.
 

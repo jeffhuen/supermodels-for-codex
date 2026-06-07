@@ -229,6 +229,64 @@ test("cancel skips workers whose recorded start identity does not match", { skip
   }
 });
 
+test("status and result expose context packet summary and artifacts", async () => {
+  const fixture = await createFixture("supermodels-context-packet-cli-");
+  try {
+    const { state, dataRoot, workspaceRoot } = fixture;
+    const job = await createJob(state, {
+      command: "review",
+      mode: "review",
+      requestedProviders: ["claude"],
+      background: false,
+    });
+    const markdownPath = path.join(job.dir, "context-packet.md");
+    const jsonPath = path.join(job.dir, "context-packet.json");
+    await updateJob(state, job.id, (current) => ({
+      ...current,
+      status: "completed",
+      stage: "synthesis-ready",
+      completedAt: new Date().toISOString(),
+      contextPacket: {
+        summary: "Review the supplied implementation/context for production-relevant bugs, gaps, and verification risks.",
+        markdownPath,
+        jsonPath,
+        createdAt: new Date().toISOString(),
+      },
+    }));
+
+    const scriptPath = path.resolve(import.meta.dirname, "../scripts/supermodels.mjs");
+    const status = spawnSync(process.execPath, [
+      scriptPath,
+      "status",
+      job.id,
+      "--data-root",
+      dataRoot,
+    ], {
+      cwd: workspaceRoot,
+      encoding: "utf8",
+    });
+    const result = spawnSync(process.execPath, [
+      scriptPath,
+      "result",
+      job.id,
+      "--data-root",
+      dataRoot,
+    ], {
+      cwd: workspaceRoot,
+      encoding: "utf8",
+    });
+
+    assert.equal(status.status, 0, status.stderr);
+    assert.match(status.stdout, /Context packet: Review the supplied implementation\/context/);
+    assert.doesNotMatch(status.stdout, /context-packet\.json/);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Context packet markdown: .*context-packet\.md/);
+    assert.match(result.stdout, /Context packet JSON: .*context-packet\.json/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 async function createFixture(prefix) {
   const tempRoot = await realpath(tmpdir());
   const dataRoot = await mkdtemp(path.join(tempRoot, `${prefix}data-`));

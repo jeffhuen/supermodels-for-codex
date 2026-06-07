@@ -1,5 +1,10 @@
 import { readFile, writeFile } from "node:fs/promises";
 
+import {
+  buildContextPacket,
+  renderContextPacketMarkdown,
+  writeContextPacketArtifacts,
+} from "./context-packet.mjs";
 import { collectGitContext } from "./git.mjs";
 import { commandLine, isProcessAlive, processStartedAt, processStartedAtLookup } from "./process.mjs";
 import { renderChallengePrompt, renderReviewPrompt, renderTaskPrompt } from "./prompts.mjs";
@@ -226,7 +231,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
     scope: options.scope ?? "working-tree",
     baseRef: options.base ?? "",
   });
-  const job = options["job-id"]
+  let job = options["job-id"]
     ? await readJob(state, options["job-id"])
     : await createJob(state, {
       command: mode,
@@ -238,6 +243,18 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
       focus,
       contextBrief,
     });
+  const contextPacket = await buildContextPacket({
+    command: mode,
+    mode,
+    workspaceRoot,
+    focus,
+    contextBrief,
+    providerSelection,
+    providerPlan,
+    context,
+  });
+  const contextPacketMarkdown = renderContextPacketMarkdown(contextPacket);
+  job = await persistContextPacket(state, job, contextPacket);
   const controller = createRunController();
   const cleanupSignalCancellation = installJobSignalCancellation(state, job.id, controller);
   try {
@@ -262,7 +279,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
         mode,
         providerId: provider,
         focus,
-        contextBrief,
+        contextBrief: contextPacketMarkdown,
         context,
       });
       return await runReviewPhase({
@@ -274,7 +291,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
         context,
         mode,
         focus,
-        contextBrief,
+        contextBrief: contextPacketMarkdown,
         options,
         timeoutMs,
         controller,
@@ -300,7 +317,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
         workspaceRoot,
         context,
         focus,
-        contextBrief,
+        contextBrief: contextPacketMarkdown,
         options,
         timeoutMs,
         controller,
@@ -361,7 +378,12 @@ export async function runTask({ adapters, providerSelection, options, task, cont
       throw new Error(`Provider '${unsupported[0]}' does not support write tasks.`);
     }
   }
-  const job = options["job-id"]
+  const context = await collectGitContext({
+    workspaceRoot,
+    scope: options.scope ?? "working-tree",
+    baseRef: options.base ?? "",
+  });
+  let job = options["job-id"]
     ? await readJob(state, options["job-id"])
     : await createJob(state, {
       command: "task",
@@ -374,6 +396,19 @@ export async function runTask({ adapters, providerSelection, options, task, cont
       contextBrief,
       write: Boolean(options.write),
     });
+  const contextPacket = await buildContextPacket({
+    command: "task",
+    mode: "task",
+    workspaceRoot,
+    task,
+    contextBrief,
+    write: Boolean(options.write),
+    providerSelection,
+    providerPlan,
+    context,
+  });
+  const contextPacketMarkdown = renderContextPacketMarkdown(contextPacket);
+  job = await persistContextPacket(state, job, contextPacket);
   const controller = createRunController();
   const cleanupSignalCancellation = installJobSignalCancellation(state, job.id, controller);
   try {
@@ -399,7 +434,7 @@ export async function runTask({ adapters, providerSelection, options, task, cont
       const prompt = await renderTaskPrompt({
         providerId: provider,
         task,
-        contextBrief,
+        contextBrief: contextPacketMarkdown,
         write: Boolean(options.write),
       });
       await enqueueWrite(() => updateProviderRun(state, job.id, provider, {
@@ -624,6 +659,23 @@ function terminalOutput({ job, checks, selected, skipped }) {
     results,
     synthesis,
   };
+}
+
+async function persistContextPacket(state, job, packet) {
+  const artifacts = await writeContextPacketArtifacts(job.dir, packet);
+  return await updateJob(state, job.id, (current) => {
+    if (TERMINAL_JOB_STATUSES.has(current.status)) {
+      return current;
+    }
+    return {
+      ...current,
+      contextPacket: artifacts,
+      request: {
+        ...(current.request ?? {}),
+        contextPacket: artifacts,
+      },
+    };
+  });
 }
 
 async function runAdversarialChallenges(input) {

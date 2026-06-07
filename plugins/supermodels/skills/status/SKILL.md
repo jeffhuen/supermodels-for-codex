@@ -12,3 +12,5 @@ node "$PLUGIN_ROOT/scripts/supermodels.mjs" status "$@"
 ```
 
 Pass a job ID to inspect one job, or omit it to list recent jobs for the workspace.
+
+When present, status output includes the context packet summary so the user can see what kind of context was handed to providers.

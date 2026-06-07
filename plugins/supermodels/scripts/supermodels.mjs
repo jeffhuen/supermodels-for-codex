@@ -509,7 +509,10 @@ function renderJobList(jobs) {
   if (!jobs.length) {
     return "No Supermodels jobs found for this workspace.";
   }
-  return jobs.map((job) => `${job.id}: ${job.status} ${job.request?.command ?? ""} ${job.createdAt} ${providerProgressSummary(job)}`).join("\n");
+  return jobs.map((job) => {
+    const context = job.contextPacket?.summary ? ` context: ${job.contextPacket.summary}` : "";
+    return `${job.id}: ${job.status} ${job.request?.command ?? ""} ${job.createdAt} ${providerProgressSummary(job)}${context}`;
+  }).join("\n");
 }
 
 function renderJob(job, options = {}) {
@@ -520,6 +523,17 @@ function renderJob(job, options = {}) {
   ];
   if (job.completedAt) {
     lines.push(`Completed: ${job.completedAt}`);
+  }
+  if (job.contextPacket?.summary) {
+    lines.push(`Context packet: ${job.contextPacket.summary}`);
+    if (options.includeArtifacts) {
+      if (job.contextPacket.markdownPath) {
+        lines.push(`Context packet markdown: ${job.contextPacket.markdownPath}`);
+      }
+      if (job.contextPacket.jsonPath) {
+        lines.push(`Context packet JSON: ${job.contextPacket.jsonPath}`);
+      }
+    }
   }
   lines.push(`Progress: ${providerProgressSummary(job)}`);
   if (job.synthesis) {
