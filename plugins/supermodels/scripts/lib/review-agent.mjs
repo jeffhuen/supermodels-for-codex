@@ -3,6 +3,11 @@ import { REVIEW_RESULT_SCHEMA, normalizeStructuredReview } from "./review-schema
 const DEFAULT_REVIEW_POLICY = Object.freeze({
   maxRounds: 8,
   forceAfterRounds: 5,
+  claudeMaxTokens: 128_000,
+  antigravityMaxTokens: 64_000,
+  claudeThinking: Object.freeze({ type: "adaptive", display: "summarized" }),
+  claudeEffort: "xhigh",
+  antigravityThinkingBudget: -1,
   minInspection: Object.freeze({
     diff: true,
     fileOrSearch: true,
@@ -20,12 +25,12 @@ export async function runReviewAgent(options = {}) {
     focus = "",
     mode = "review",
     model,
-    maxTokens = 8192,
     preloadTools = [],
     controller = null,
     timeoutMs,
     onEvent,
   } = options;
+  const maxTokens = options.maxTokens ?? providerMaxTokens(provider);
   const maxRounds = options.maxRounds ?? DEFAULT_REVIEW_POLICY.maxRounds;
   const forceAfterRounds = options.forceAfterRounds
     ?? (options.maxRounds === undefined
@@ -123,6 +128,7 @@ export async function runReviewAgent(options = {}) {
         system: providerSystemInstructions(provider),
         messages: requestMessages,
         tools: schemas,
+        ...providerReasoningOptions(provider, options),
         ...(toolChoice ? { tool_choice: toolChoice } : {}),
       }, {
         signal: abort.signal,
@@ -215,6 +221,33 @@ export async function runReviewAgent(options = {}) {
   }
 
   throw new Error(`Review did not complete after ${maxRounds} rounds.`);
+}
+
+function providerReasoningOptions(provider, options = {}) {
+  if (provider === "claude") {
+    const thinking = options.thinking ?? DEFAULT_REVIEW_POLICY.claudeThinking;
+    const effort = options.effort ?? DEFAULT_REVIEW_POLICY.claudeEffort;
+    return {
+      ...(thinking ? { thinking } : {}),
+      ...(effort ? { output_config: { effort } } : {}),
+    };
+  }
+  if (provider === "antigravity") {
+    const budget = options.thinkingBudget ?? DEFAULT_REVIEW_POLICY.antigravityThinkingBudget;
+    const parsed = Number(budget);
+    return Number.isFinite(parsed) ? { thinkingBudget: parsed } : {};
+  }
+  return {};
+}
+
+function providerMaxTokens(provider) {
+  if (provider === "claude") {
+    return DEFAULT_REVIEW_POLICY.claudeMaxTokens;
+  }
+  if (provider === "antigravity") {
+    return DEFAULT_REVIEW_POLICY.antigravityMaxTokens;
+  }
+  return DEFAULT_REVIEW_POLICY.antigravityMaxTokens;
 }
 
 function handleSubmittedReview(call, inspection, minInspection) {

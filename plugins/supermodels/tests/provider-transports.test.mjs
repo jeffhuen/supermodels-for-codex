@@ -171,6 +171,39 @@ test("collectClaudeMessageEvents preserves streamed tool calls and text", () => 
   assert.deepEqual(result.usage, { input_tokens: 10, output_tokens: 8 });
 });
 
+test("collectClaudeMessageEvents preserves thinking blocks for tool turns", () => {
+  const result = collectClaudeMessageEvents([
+    {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "thinking", thinking: "" },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "thinking_delta", thinking: "I need to inspect the diff before judging." },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "signature_delta", signature: "thinking-signature" },
+    },
+    {
+      type: "content_block_start",
+      index: 1,
+      content_block: { type: "tool_use", id: "toolu_1", name: "get_diff", input: {} },
+    },
+  ]);
+
+  assert.deepEqual(result.content[0], {
+    type: "thinking",
+    thinking: "I need to inspect the diff before judging.",
+    signature: "thinking-signature",
+  });
+  assert.deepEqual(result.tool_calls, [{ id: "toolu_1", name: "get_diff", input: {} }]);
+  assert.equal(result.text, "");
+});
+
 test("collectClaudeMessageEvents prefers streamed tool argument deltas over block-start input", () => {
   const result = collectClaudeMessageEvents([
     {
@@ -495,6 +528,19 @@ test("toCodeAssistRequest converts tool turns into function call and response pa
   });
   assert.deepEqual(request.toolConfig, mapToolChoiceToFunctionConfig({ type: "tool", name: "submit_review" }));
   assert.equal(request.generationConfig.maxOutputTokens, 4096);
+});
+
+test("toCodeAssistRequest maps dynamic thinking budget into generation config", () => {
+  const request = toCodeAssistRequest({
+    messages: [{ role: "user", content: [{ type: "text", text: "review" }] }],
+    max_tokens: 64_000,
+    thinkingBudget: -1,
+  });
+
+  assert.deepEqual(request.generationConfig, {
+    maxOutputTokens: 64_000,
+    thinkingConfig: { thinkingBudget: -1 },
+  });
 });
 
 test("toCodeAssistRequest preserves schema property names that match stripped metadata keys", () => {

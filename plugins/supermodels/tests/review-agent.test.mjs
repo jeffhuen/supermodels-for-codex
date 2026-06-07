@@ -515,6 +515,51 @@ test("runReviewAgent sends the Claude Code identity as the first Claude system b
   assert.match(firstBody.system[1].text, /reviewing for Codex/i);
 });
 
+test("runReviewAgent requests high-effort Claude reasoning by default", async () => {
+  let firstBody;
+  const fakeTransport = {
+    async messages(body) {
+      firstBody = body;
+      return responseWithTool("submit_1", "submit_review", inconclusiveReview("reasoning controls checked"));
+    },
+  };
+
+  await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: { schemas: [], async execute() {} },
+    minInspection: { diff: false, fileOrSearch: false, cleanExplicitFileOrSearchToolCalls: 0 },
+    forceAfterRounds: 1,
+    maxRounds: 1,
+  });
+
+  assert.equal(firstBody.max_tokens, 128_000);
+  assert.deepEqual(firstBody.thinking, { type: "adaptive", display: "summarized" });
+  assert.deepEqual(firstBody.output_config, { effort: "xhigh" });
+});
+
+test("runReviewAgent requests dynamic Antigravity thinking budget by default", async () => {
+  let firstBody;
+  const fakeTransport = {
+    async messages(body) {
+      firstBody = body;
+      return responseWithTool("submit_1", "submit_review", inconclusiveReview("thinking budget checked"));
+    },
+  };
+
+  await runReviewAgent({
+    provider: "antigravity",
+    transport: fakeTransport,
+    tools: { schemas: [], async execute() {} },
+    minInspection: { diff: false, fileOrSearch: false, cleanExplicitFileOrSearchToolCalls: 0 },
+    forceAfterRounds: 1,
+    maxRounds: 1,
+  });
+
+  assert.equal(firstBody.max_tokens, 64_000);
+  assert.equal(firstBody.thinkingBudget, -1);
+});
+
 test("runReviewAgent does not treat changed-file lists as file inspection", async () => {
   const fakeTransport = {
     async messages() {

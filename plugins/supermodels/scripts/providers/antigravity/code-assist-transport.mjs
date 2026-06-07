@@ -206,6 +206,10 @@ export function toCodeAssistRequest(body = {}) {
   const generationConfig = {
     maxOutputTokens: body.max_tokens ?? body.maxOutputTokens ?? 8192,
   };
+  const thinkingBudget = thinkingBudgetFrom(body);
+  if (thinkingBudget !== null) {
+    generationConfig.thinkingConfig = { thinkingBudget };
+  }
   if (body.temperature !== undefined) {
     generationConfig.temperature = body.temperature;
   }
@@ -226,6 +230,19 @@ export function toCodeAssistRequest(body = {}) {
     request.toolConfig = mapToolChoiceToFunctionConfig(body.tool_choice);
   }
   return request;
+}
+
+function thinkingBudgetFrom(body) {
+  const value = body.thinkingBudget
+    ?? body.thinking_budget
+    ?? body.reasoning?.thinkingBudget
+    ?? body.reasoning?.thinking_budget
+    ?? null;
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 export function collectAntigravityResponse(body = {}) {

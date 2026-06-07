@@ -77,6 +77,9 @@ export function collectClaudeMessageEvents(events) {
       slots.set(index, {
         type: "",
         text: "",
+        thinking: "",
+        signature: "",
+        data: "",
         id: "",
         name: "",
         argsJson: "",
@@ -108,6 +111,13 @@ export function collectClaudeMessageEvents(events) {
       if (current.type === "text") {
         current.text += typeof block.text === "string" ? block.text : "";
       }
+      if (current.type === "thinking") {
+        current.thinking += typeof block.thinking === "string" ? block.thinking : "";
+        current.signature = typeof block.signature === "string" ? block.signature : current.signature;
+      }
+      if (current.type === "redacted_thinking") {
+        current.data = typeof block.data === "string" ? block.data : current.data;
+      }
       if (current.type === "tool_use") {
         current.id = typeof block.id === "string" ? block.id : current.id;
         current.name = typeof block.name === "string" ? block.name : current.name;
@@ -127,6 +137,12 @@ export function collectClaudeMessageEvents(events) {
       if (delta.type === "text_delta") {
         current.type ||= "text";
         current.text += typeof delta.text === "string" ? delta.text : "";
+      } else if (delta.type === "thinking_delta") {
+        current.type ||= "thinking";
+        current.thinking += typeof delta.thinking === "string" ? delta.thinking : "";
+      } else if (delta.type === "signature_delta") {
+        current.type ||= "thinking";
+        current.signature = typeof delta.signature === "string" ? delta.signature : current.signature;
       } else if (delta.type === "input_json_delta") {
         current.type ||= "tool_use";
         if (!current.argsFromDelta) {
@@ -156,6 +172,16 @@ export function collectClaudeMessageEvents(events) {
     const current = slots.get(index);
     if (current.type === "text" && current.text) {
       content.push({ type: "text", text: current.text });
+    }
+    if (current.type === "thinking" && (current.thinking || current.signature)) {
+      content.push({
+        type: "thinking",
+        ...(current.thinking ? { thinking: current.thinking } : {}),
+        ...(current.signature ? { signature: current.signature } : {}),
+      });
+    }
+    if (current.type === "redacted_thinking" && current.data) {
+      content.push({ type: "redacted_thinking", data: current.data });
     }
     if (current.type === "tool_use" && current.id && current.name) {
       const input = decodeArgs(current.argsJson);
