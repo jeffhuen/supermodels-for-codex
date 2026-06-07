@@ -26,6 +26,7 @@ export class ClaudeCodeCredentials {
     this.now = options.now ?? (() => Date.now());
     this.platform = options.platform ?? process.platform;
     this.user = options.user ?? process.env.USER ?? os.userInfo().username;
+    this.keychainReader = options.keychainReader;
     this.cache = null;
   }
 
@@ -120,7 +121,7 @@ export class ClaudeCodeCredentials {
     const raw = this.useKeychain()
       ? await this.readKeychain()
       : await readFile(this.credentialsPath, "utf8");
-    const parsed = JSON.parse(raw);
+    const parsed = parseCredentialPayload(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("Claude Code credentials are not a JSON object.");
     }
@@ -147,6 +148,9 @@ export class ClaudeCodeCredentials {
   }
 
   async readKeychain() {
+    if (this.keychainReader) {
+      return await this.keychainReader();
+    }
     const { stdout } = await execFileAsync("security", [
       "find-generic-password",
       "-s",
@@ -172,4 +176,20 @@ export function defaultClaudeCredentialsPath() {
 
 function stringValue(value) {
   return typeof value === "string" && value ? value : "";
+}
+
+function parseCredentialPayload(raw) {
+  const text = String(raw ?? "").trim();
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    if (!isHexPayload(text)) {
+      throw error;
+    }
+    return JSON.parse(Buffer.from(text, "hex").toString("utf8"));
+  }
+}
+
+function isHexPayload(value) {
+  return value.length > 0 && value.length % 2 === 0 && /^[0-9a-f]+$/i.test(value);
 }

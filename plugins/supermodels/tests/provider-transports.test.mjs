@@ -61,6 +61,24 @@ test("ClaudeCodeCredentials refreshes expired tokens without a client secret", a
   }
 });
 
+test("ClaudeCodeCredentials decodes hex-encoded macOS Keychain JSON", async () => {
+  const envelope = {
+    claudeAiOauth: {
+      accessToken: "access-token",
+      refreshToken: "refresh-token",
+      expiresAt: 9_999_999_999_999,
+      scopes: ["user:profile", "user:inference"],
+    },
+  };
+  const credentials = new ClaudeCodeCredentials({
+    platform: "darwin",
+    keychainReader: async () => Buffer.from(JSON.stringify(envelope), "utf8").toString("hex"),
+    now: () => 1_000_000,
+  });
+
+  assert.equal(await credentials.accessToken(), "access-token");
+});
+
 test("collectClaudeMessageEvents preserves streamed tool calls and text", () => {
   const result = collectClaudeMessageEvents([
     {

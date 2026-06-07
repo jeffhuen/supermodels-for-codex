@@ -31,6 +31,7 @@ Initial public release.
 - Antigravity rejected-token `401` responses force native AGY refresh before retrying the request.
 - Claude Code direct reviews prepend the official Claude Code system identity block before Supermodels review instructions.
 - Claude Code direct reviews emit Anthropic-compatible `tool_result` blocks without provider-internal helper fields.
+- Claude Code credential loading accepts the hex-encoded macOS Keychain payload used by current Claude Code secure storage.
 - Antigravity project discovery matches the reference Code Assist behavior: non-auth discovery failures are non-fatal and onboarding polls use the reference bounds.
 - Preloaded review context now fails explicitly when changed-file discovery fails, and unreadable snippets no longer satisfy the review inspection gate.
 - macOS Antigravity keychain read failures no longer silently fall back to local token files unless a file path is explicitly configured.
