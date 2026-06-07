@@ -109,7 +109,7 @@ test("runReviewAgent sends Anthropic-compatible tool_result blocks without names
       if (calls.length === 1) {
         return responseWithTool("read_1", "read_file", { path: "runtime.mjs" });
       }
-      return responseWithTool("submit_1", "submit_review", cleanReview("tool result shape checked"));
+      return responseWithTool("submit_1", "submit_review", inconclusiveReview("tool result shape checked"));
     },
   };
   const fakeTools = {
@@ -152,7 +152,7 @@ test("runReviewAgent forces submit_review only after required inspection is sati
         return responseWithTool("search_1", "search", { query: "cancelJob" });
       }
       assert.deepEqual(body.tool_choice, { type: "tool", name: "submit_review" });
-      return responseWithTool("submit_forced", "submit_review", cleanReview("Forced final review."));
+      return responseWithTool("submit_forced", "submit_review", inconclusiveReview("Forced final review."));
     },
   };
   const fakeTools = {
@@ -176,10 +176,178 @@ test("runReviewAgent forces submit_review only after required inspection is sati
     maxRounds: 3,
   });
 
-  assert.equal(result.verdict, "clean");
+  assert.equal(result.verdict, "inconclusive");
   assert.equal(seenToolChoices[0], null);
   assert.equal(seenToolChoices[1], null);
   assert.deepEqual(seenToolChoices[2], { type: "tool", name: "submit_review" });
+});
+
+test("runReviewAgent leaves a retry round after malformed forced submit_review", async () => {
+  const seenToolChoices = [];
+  const fakeTransport = {
+    calls: 0,
+    async messages(body) {
+      this.calls += 1;
+      seenToolChoices.push(body.tool_choice ?? null);
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", { path: "runtime.mjs" });
+      }
+      if (this.calls === 3) {
+        assert.deepEqual(body.tool_choice, { type: "tool", name: "submit_review" });
+        return responseWithTool("bad_submit", "submit_review", { verdict: "clean" });
+      }
+      assert.deepEqual(body.tool_choice, { type: "tool", name: "submit_review" });
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "needs-attention",
+        summary: "Recovered after malformed submit.",
+        findings: [{
+          severity: "low",
+          title: "Retry worked",
+          evidence: "The review loop gave the provider another submit round.",
+          impact: "Structured review output is not lost after one malformed submit.",
+          recommendation: "Keep a forced-submit retry margin.",
+          file: "plugins/supermodels/scripts/lib/review-agent.mjs",
+          line_start: 1,
+          line_end: 1,
+          confidence: "high",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+  const fakeTools = reviewToolsForDiffAndFiles();
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    maxRounds: 4,
+  });
+
+  assert.equal(result.verdict, "needs-attention");
+  assert.deepEqual(seenToolChoices, [
+    null,
+    null,
+    { type: "tool", name: "submit_review" },
+    { type: "tool", name: "submit_review" },
+  ]);
+});
+
+test("runReviewAgent refuses shallow clean verdicts until multiple files or searches are inspected", async () => {
+  const calls = [];
+  const fakeTransport = {
+    async messages(body) {
+      calls.push(body);
+      if (calls.length === 1) {
+        return responseWithTool("read_1", "read_file", { path: "runtime.mjs" });
+      }
+      return responseWithTool("submit_clean", "submit_review", cleanReview("Only one file was read."));
+    },
+  };
+
+  await assert.rejects(
+    () => runReviewAgent({
+      provider: "antigravity",
+      transport: fakeTransport,
+      tools: reviewToolsForDiffAndFiles(),
+      minInspection: { diff: false, fileOrSearch: true },
+      forceAfterRounds: 2,
+      maxRounds: 3,
+    }),
+    /review did not complete/i,
+  );
+
+  assert.match(JSON.stringify(calls[2].messages), /clean verdict requires/i);
+});
+
+test("runReviewAgent allows clean verdicts after two explicit file or search inspections", async () => {
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("read_1", "read_file", { path: "runtime.mjs" });
+      }
+      if (this.calls === 2) {
+        return responseWithTool("search_1", "search", { query: "runReviewAgent" });
+      }
+      return responseWithTool("submit_clean", "submit_review", cleanReview("Two evidence tools were used."));
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "antigravity",
+    transport: fakeTransport,
+    tools: reviewToolsForDiffAndFiles(),
+    minInspection: { diff: false, fileOrSearch: true },
+    forceAfterRounds: 3,
+    maxRounds: 3,
+  });
+
+  assert.equal(result.verdict, "clean");
+  assert.equal(result.toolUsage.read_file, 1);
+  assert.equal(result.toolUsage.search, 1);
+});
+
+test("runReviewAgent prioritizes failed submit_review over mixed tool calls", async () => {
+  const executed = [];
+  let secondRequest;
+  const fakeTransport = {
+    calls: 0,
+    async messages(body) {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return {
+          content: [
+            { type: "tool_use", id: "submit_bad", name: "submit_review", input: { verdict: "clean" } },
+            { type: "tool_use", id: "read_1", name: "read_file", input: { path: "runtime.mjs" } },
+          ],
+          tool_calls: [
+            { id: "submit_bad", name: "submit_review", input: { verdict: "clean" } },
+            { id: "read_1", name: "read_file", input: { path: "runtime.mjs" } },
+          ],
+          text: "",
+        };
+      }
+      secondRequest = body;
+      return responseWithTool("submit_ok", "submit_review", {
+        verdict: "inconclusive",
+        summary: "Retried after mixed submit.",
+        findings: [],
+        assumptions: [],
+        verification_gaps: ["The previous submit_review was malformed."],
+      });
+    },
+  };
+  const fakeTools = {
+    schemas: [],
+    async execute(name) {
+      executed.push(name);
+      return { ok: true, path: "runtime.mjs", content: "1: export {};" };
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    minInspection: { diff: false, fileOrSearch: false },
+    forceAfterRounds: 2,
+    maxRounds: 2,
+  });
+
+  assert.equal(result.verdict, "inconclusive");
+  assert.deepEqual(executed, []);
+  const toolResults = secondRequest.messages
+    .flatMap((message) => message.content ?? [])
+    .filter((block) => block.type === "tool_result");
+  assert.equal(toolResults.length, 2);
+  assert.match(toolResults[0].content, /did not match the review schema/i);
+  assert.match(toolResults[1].content, /skipped/i);
 });
 
 test("runReviewAgent passes cancellation signals to provider transports and tools", async () => {
@@ -235,7 +403,7 @@ test("runReviewAgent can force required inspection tools before final review", a
         return responseWithTool("search_1", "search", { query: "runtime" });
       }
       assert.deepEqual(body.tool_choice, { type: "tool", name: "submit_review" });
-      return responseWithTool("submit_1", "submit_review", cleanReview("forced"));
+      return responseWithTool("submit_1", "submit_review", inconclusiveReview("forced"));
     },
   };
   const fakeTools = {
@@ -260,7 +428,7 @@ test("runReviewAgent can force required inspection tools before final review", a
     maxRounds: 3,
   });
 
-  assert.equal(result.verdict, "clean");
+  assert.equal(result.verdict, "inconclusive");
   assert.deepEqual(seenChoices, [
     { type: "tool", name: "get_diff" },
     { type: "tool", name: "search" },
@@ -275,7 +443,7 @@ test("runReviewAgent can preload required inspection tools before first provider
     async messages(body) {
       firstBody = body;
       assert.deepEqual(body.tool_choice, { type: "tool", name: "submit_review" });
-      return responseWithTool("submit_1", "submit_review", cleanReview("preloaded"));
+      return responseWithTool("submit_1", "submit_review", inconclusiveReview("preloaded"));
     },
   };
   const fakeTools = {
@@ -304,7 +472,7 @@ test("runReviewAgent can preload required inspection tools before first provider
     maxRounds: 1,
   });
 
-  assert.equal(result.verdict, "clean");
+  assert.equal(result.verdict, "inconclusive");
   assert.deepEqual(executed, ["get_review_context"]);
   assert.equal(result.toolUsage.get_review_context, 1);
   assert.match(JSON.stringify(firstBody.messages), /Codex preloaded/);
@@ -315,7 +483,7 @@ test("runReviewAgent sends the Claude Code identity as the first Claude system b
   const fakeTransport = {
     async messages(body) {
       firstBody = body;
-      return responseWithTool("submit_1", "submit_review", cleanReview("identity checked"));
+      return responseWithTool("submit_1", "submit_review", inconclusiveReview("identity checked"));
     },
   };
   const fakeTools = {
@@ -427,5 +595,33 @@ function cleanReview(summary) {
     findings: [],
     assumptions: [],
     verification_gaps: [],
+  };
+}
+
+function inconclusiveReview(summary) {
+  return {
+    verdict: "inconclusive",
+    summary,
+    findings: [],
+    assumptions: [],
+    verification_gaps: [],
+  };
+}
+
+function reviewToolsForDiffAndFiles() {
+  return {
+    schemas: [],
+    async execute(name) {
+      if (name === "get_diff") {
+        return { ok: true, diffSummary: "1 file changed", diff: "diff --git a/a b/a" };
+      }
+      if (name === "read_file") {
+        return { ok: true, path: "runtime.mjs", content: "1: export {};" };
+      }
+      if (name === "search") {
+        return { ok: true, query: "runReviewAgent", output: "review-agent.mjs:1:export async function runReviewAgent" };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
   };
 }

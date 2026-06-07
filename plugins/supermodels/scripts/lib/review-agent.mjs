@@ -1,6 +1,15 @@
 import { REVIEW_RESULT_SCHEMA, normalizeStructuredReview } from "./review-schema.mjs";
 
-const DEFAULT_MAX_ROUNDS = 12;
+const DEFAULT_REVIEW_POLICY = Object.freeze({
+  maxRounds: 8,
+  forceAfterRounds: 5,
+  minInspection: Object.freeze({
+    diff: true,
+    fileOrSearch: true,
+    cleanExplicitFileOrSearchToolCalls: 2,
+  }),
+  forceInspectionTools: false,
+});
 
 export async function runReviewAgent(options = {}) {
   const {
@@ -11,15 +20,22 @@ export async function runReviewAgent(options = {}) {
     focus = "",
     mode = "review",
     model,
-    maxRounds = DEFAULT_MAX_ROUNDS,
     maxTokens = 8192,
-    minInspection = { diff: true, fileOrSearch: true },
-    forceInspectionTools = false,
     preloadTools = [],
     controller = null,
     timeoutMs,
     onEvent,
   } = options;
+  const maxRounds = options.maxRounds ?? DEFAULT_REVIEW_POLICY.maxRounds;
+  const forceAfterRounds = options.forceAfterRounds
+    ?? (options.maxRounds === undefined
+      ? DEFAULT_REVIEW_POLICY.forceAfterRounds
+      : Math.max(1, maxRounds - 1));
+  const minInspection = {
+    ...DEFAULT_REVIEW_POLICY.minInspection,
+    ...(options.minInspection ?? {}),
+  };
+  const forceInspectionTools = options.forceInspectionTools ?? DEFAULT_REVIEW_POLICY.forceInspectionTools;
   if (!transport?.messages) {
     throw new Error("runReviewAgent requires a transport with messages(body, options).");
   }
@@ -33,12 +49,15 @@ export async function runReviewAgent(options = {}) {
     content: [{ type: "text", text: initialPrompt({ provider, brief, focus, mode }) }],
   }];
   const toolUsage = {};
-  const inspection = { diff: false, fileOrSearch: false };
+  const inspection = {
+    diff: false,
+    fileOrSearch: false,
+    explicitFileOrSearchToolCalls: 0,
+  };
   const schemas = [
     ...(tools.schemas ?? []),
     submitReviewToolSchema(),
   ];
-  const forceAfterRounds = options.forceAfterRounds ?? maxRounds;
 
   try {
     if (preloadTools.length) {
@@ -130,21 +149,36 @@ export async function runReviewAgent(options = {}) {
       }
 
       const toolResults = [];
-      for (const call of toolCalls) {
-        if (call.name === "submit_review") {
-          const submitted = handleSubmittedReview(call, inspection, minInspection);
-          if (submitted.done) {
-            return {
-              ...submitted.review,
-              toolUsage,
-              rounds: round,
-              usage: response.usage ?? null,
-            };
-          }
-          toolResults.push(submitted.toolResult);
-          continue;
+      const submitCall = toolCalls.find((call) => call.name === "submit_review");
+      if (submitCall) {
+        const submitted = handleSubmittedReview(submitCall, inspection, minInspection);
+        if (submitted.done) {
+          return {
+            ...submitted.review,
+            toolUsage,
+            rounds: round,
+            usage: response.usage ?? null,
+          };
         }
+        for (const call of toolCalls) {
+          if (call.id === submitCall.id) {
+            toolResults.push(submitted.toolResult);
+            continue;
+          }
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: call.id,
+            content: JSON.stringify({
+              ok: false,
+              error: "Tool call skipped because submit_review was present but invalid. Retry with either more repository inspection or a valid submit_review.",
+            }),
+          });
+        }
+        messages.push({ role: "user", content: toolResults });
+        continue;
+      }
 
+      for (const call of toolCalls) {
         let result;
         try {
           result = await tools.execute(call.name, call.input ?? {}, {
@@ -212,6 +246,23 @@ function handleSubmittedReview(call, inspection, minInspection) {
       },
     };
   }
+  if (normalized.verdict === "clean" && !cleanInspectionSatisfied(inspection, minInspection)) {
+    return {
+      done: false,
+      toolResult: {
+        type: "tool_result",
+        tool_use_id: call.id,
+        content: JSON.stringify({
+          ok: false,
+          error: "submit_review refused: clean verdict requires more repository inspection. Use read_file or search on at least two relevant files/search targets before returning clean.",
+          inspection,
+          required: {
+            cleanExplicitFileOrSearchToolCalls: minInspection.cleanExplicitFileOrSearchToolCalls,
+          },
+        }),
+      },
+    };
+  }
   return { done: true, review: normalized };
 }
 
@@ -245,7 +296,13 @@ function updateInspection(inspection, name, result) {
   }
   if (["read_file", "search"].includes(name)) {
     inspection.fileOrSearch = true;
+    inspection.explicitFileOrSearchToolCalls += 1;
   }
+}
+
+function cleanInspectionSatisfied(inspection, required) {
+  const requiredExplicitCalls = Number(required.cleanExplicitFileOrSearchToolCalls ?? 0);
+  return inspection.explicitFileOrSearchToolCalls >= requiredExplicitCalls;
 }
 
 function submitReviewToolSchema() {
@@ -262,6 +319,7 @@ function initialPrompt({ provider, brief, focus, mode }) {
     `Perform a serious ${modeLabel} of the current workspace as ${provider}.`,
     "",
     "You have read-only repository tools. Use them. Do not submit a final review until you have inspected the diff and at least one relevant file or search result.",
+    "If you intend to return verdict clean, you must first use read_file or search on at least two relevant files/search targets. A shallow clean verdict will be rejected.",
     "",
     "Review rules:",
     "- Prefer concrete bugs, regressions, security issues, lifecycle races, and missing verification.",
@@ -314,7 +372,7 @@ function finalInstruction() {
     role: "user",
     content: [{
       type: "text",
-      text: "Stop using repository tools now. Submit the final structured review with the evidence you have. If you found no concrete bugs, return verdict clean or inconclusive and explain the remaining verification gaps.",
+      text: "Submit the final structured review with the evidence you have. If you found no concrete bugs but have not used read_file or search on at least two relevant files/search targets, return verdict inconclusive and explain the remaining verification gaps instead of clean.",
     }],
   };
 }

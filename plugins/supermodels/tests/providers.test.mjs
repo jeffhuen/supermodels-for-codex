@@ -164,7 +164,7 @@ test("Claude direct reviews preload repository context before the first model tu
       async messages(body) {
         firstRequest ??= body;
         return directToolResponse("submit_1", "submit_review", {
-          verdict: "clean",
+          verdict: "inconclusive",
           summary: "preloaded context was enough",
           findings: [],
           assumptions: [],
@@ -203,7 +203,7 @@ test("Claude direct reviews preload repository context before the first model tu
     timeoutMs: 5000,
   });
 
-  assert.equal(result.structured.verdict, "clean");
+  assert.equal(result.structured.verdict, "inconclusive");
   assert.deepEqual(executed, ["get_review_context"]);
   assert.match(JSON.stringify(firstRequest.messages), /Codex preloaded/);
 });
@@ -611,6 +611,9 @@ test("Antigravity direct reviews default to Flash High Code Assist model", async
         if (this.calls === 2) {
           return directToolResponse("read_1", "read_file", { path: "plugins/supermodels/scripts/lib/runtime.mjs" });
         }
+        if (this.calls === 3) {
+          return directToolResponse("search_1", "search", { query: "runReviewAgent" });
+        }
         return directToolResponse("submit_1", "submit_review", {
           verdict: "clean",
           summary: "done",
@@ -649,6 +652,9 @@ test("Antigravity direct review aliases keep pro on Flash High by default", asyn
         }
         if (this.calls === 2) {
           return directToolResponse("read_1", "read_file", { path: "plugins/supermodels/scripts/lib/runtime.mjs" });
+        }
+        if (this.calls === 3) {
+          return directToolResponse("search_1", "search", { query: "runReviewAgent" });
         }
         return directToolResponse("submit_1", "submit_review", {
           verdict: "clean",
@@ -742,6 +748,9 @@ function fakeDirectReviewFactory(provider) {
         if (this.calls === 2) {
           return directToolResponse("read_1", "read_file", { path: "plugins/supermodels/scripts/lib/runtime.mjs" });
         }
+        if (this.calls === 3) {
+          return directToolResponse("search_1", "search", { query: "runReviewAgent" });
+        }
         return directToolResponse("submit_1", "submit_review", {
           verdict: "clean",
           summary: `${provider} inspected repository tools.`,
@@ -774,6 +783,9 @@ function fakeDirectReviewFactory(provider) {
         }
         if (name === "list_changed_files") {
           return { ok: true, files: ["M plugins/supermodels/scripts/lib/runtime.mjs"] };
+        }
+        if (name === "search") {
+          return { ok: true, query: "runReviewAgent", output: "review-agent.mjs:1:export async function runReviewAgent" };
         }
         throw new Error(`unexpected tool ${name}`);
       },

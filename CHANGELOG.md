@@ -25,14 +25,17 @@ Initial public release.
 - Centralized worker cancellation lifecycle handling, with contract tests plus process-level signal regression coverage.
 - Foreground, live, and background review/task paths now all execute through the same persisted worker lifecycle instead of mixing direct CLI execution with detached background children.
 - Reviews run through a shared Supermodels-owned tool loop, so Claude Code and Antigravity both inspect repository evidence with the same read-only tools before returning structured findings.
+- The shared review loop now enforces one provider-independent completion contract: forced-submit retry margin, stronger clean-verdict evidence, and deterministic handling for mixed `submit_review`/tool-call turns.
 - Review/task runs check only the requested providers, so an unavailable unrequested provider cannot block a single-provider run.
 - Antigravity readiness on macOS prefers the native Keychain token store over stale default token files, while explicit/fake `HOME` credential paths remain hermetic.
 - Claude Code OAuth review rate limits are surfaced as provider `rate-limited` results instead of invalid structured output.
 - Antigravity rejected-token `401` responses force direct OAuth refresh before retrying the request.
 - Claude Code direct reviews prepend the official Claude Code system identity block before Supermodels review instructions.
 - Claude Code direct reviews emit Anthropic-compatible `tool_result` blocks without provider-internal helper fields.
+- Claude Code streamed tool-call arguments prefer streamed deltas over stale block-start input, avoiding corrupted tool inputs if both shapes appear.
 - Claude Code credential loading accepts the hex-encoded macOS Keychain payload used by current Claude Code secure storage.
 - Claude Code token refresh writes macOS Keychain payloads back in the same hex-encoded form.
+- Claude Code token refresh persists the resolved or returned OAuth scopes instead of re-saving stale empty scope metadata.
 - Claude Code readiness now validates the same direct OAuth credentials used by review transport, so stale CLI auth cannot fail mid-review.
 - Antigravity OAuth refresh now matches the AGY/TradingAgents credential flow: expired local CLI tokens are refreshed directly through Google's token endpoint and persisted back to the same Keychain or token file.
 - Antigravity direct reviews default to Gemini 3.5 Flash High (`gemini-3-flash-preview`) instead of Pro, matching the provider alias table and avoiding avoidable Code Assist Pro quota spikes.

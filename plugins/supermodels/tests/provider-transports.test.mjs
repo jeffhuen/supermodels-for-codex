@@ -61,6 +61,37 @@ test("ClaudeCodeCredentials refreshes expired tokens without a client secret", a
   }
 });
 
+test("ClaudeCodeCredentials persists resolved refresh scopes", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "supermodels-claude-oauth-scopes-"));
+  const file = path.join(dir, "credentials.json");
+  try {
+    await writeFile(file, JSON.stringify({
+      claudeAiOauth: {
+        accessToken: "old-access",
+        refreshToken: "old-refresh",
+        expiresAt: 1,
+        scopes: [],
+      },
+    }), "utf8");
+    const credentials = new ClaudeCodeCredentials({
+      credentialsPath: file,
+      fetchImpl: async () => new Response(JSON.stringify({
+        access_token: "new-access",
+        refresh_token: "new-refresh",
+        expires_in: 3600,
+        scope: "user:profile user:inference",
+      }), { status: 200, headers: { "content-type": "application/json" } }),
+      now: () => 1_000_000,
+    });
+
+    await credentials.accessToken();
+    const persisted = JSON.parse(await readFile(file, "utf8"));
+    assert.deepEqual(persisted.claudeAiOauth.scopes, ["user:profile", "user:inference"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("ClaudeCodeCredentials decodes hex-encoded macOS Keychain JSON", async () => {
   const envelope = {
     claudeAiOauth: {
@@ -138,6 +169,29 @@ test("collectClaudeMessageEvents preserves streamed tool calls and text", () => 
   assert.equal(result.model, "claude-sonnet-4-6");
   assert.deepEqual(result.tool_calls, [{ id: "toolu_1", name: "read_file", input: { path: "runtime.mjs" } }]);
   assert.deepEqual(result.usage, { input_tokens: 10, output_tokens: 8 });
+});
+
+test("collectClaudeMessageEvents prefers streamed tool argument deltas over block-start input", () => {
+  const result = collectClaudeMessageEvents([
+    {
+      type: "content_block_start",
+      index: 0,
+      content_block: {
+        type: "tool_use",
+        id: "toolu_1",
+        name: "read_file",
+        input: { path: "stale.mjs" },
+      },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "input_json_delta", partial_json: "{\"path\":\"runtime.mjs\"" },
+    },
+    { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "}" } },
+  ]);
+
+  assert.deepEqual(result.tool_calls, [{ id: "toolu_1", name: "read_file", input: { path: "runtime.mjs" } }]);
 });
 
 test("parseAnthropicSseLines yields Anthropic data payloads", () => {

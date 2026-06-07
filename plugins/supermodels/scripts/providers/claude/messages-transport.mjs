@@ -80,6 +80,7 @@ export function collectClaudeMessageEvents(events) {
         id: "",
         name: "",
         argsJson: "",
+        argsFromDelta: false,
       });
       order.push(index);
     }
@@ -128,6 +129,10 @@ export function collectClaudeMessageEvents(events) {
         current.text += typeof delta.text === "string" ? delta.text : "";
       } else if (delta.type === "input_json_delta") {
         current.type ||= "tool_use";
+        if (!current.argsFromDelta) {
+          current.argsJson = "";
+          current.argsFromDelta = true;
+        }
         current.argsJson += typeof delta.partial_json === "string" ? delta.partial_json : "";
       }
       continue;

@@ -74,6 +74,7 @@ export class ClaudeCodeCredentials {
   }
 
   async refresh(creds) {
+    const requestedScopes = creds.scopes.length ? creds.scopes : DEFAULT_SCOPES;
     const response = await this.fetchImpl(TOKEN_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -81,7 +82,7 @@ export class ClaudeCodeCredentials {
         client_id: creds.clientId || DEFAULT_CLIENT_ID,
         grant_type: "refresh_token",
         refresh_token: creds.refreshToken,
-        scope: (creds.scopes.length ? creds.scopes : DEFAULT_SCOPES).join(" "),
+        scope: requestedScopes.join(" "),
       }),
     });
     if (!response.ok) {
@@ -95,6 +96,8 @@ export class ClaudeCodeCredentials {
     const refreshToken = stringValue(body.refresh_token) || creds.refreshToken;
     const expiresIn = Number(body.expires_in);
     const expiresAt = this.now() + (Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn * 1000 : 3_600_000);
+    const returnedScopes = parseScopes(body.scope);
+    const persistedScopes = returnedScopes.length ? returnedScopes : requestedScopes;
     const envelope = {
       ...creds.envelope,
       claudeAiOauth: {
@@ -102,7 +105,7 @@ export class ClaudeCodeCredentials {
         accessToken,
         refreshToken,
         expiresAt,
-        scopes: creds.scopes,
+        scopes: persistedScopes,
         clientId: creds.clientId || DEFAULT_CLIENT_ID,
       },
     };
@@ -112,7 +115,7 @@ export class ClaudeCodeCredentials {
       accessToken,
       refreshToken,
       expiresAt,
-      scopes: creds.scopes,
+      scopes: persistedScopes,
       clientId: creds.clientId || DEFAULT_CLIENT_ID,
     };
     return this.cache;
@@ -186,6 +189,10 @@ export function defaultClaudeCredentialsPath() {
 
 function stringValue(value) {
   return typeof value === "string" && value ? value : "";
+}
+
+function parseScopes(value) {
+  return stringValue(value).split(/\s+/).map((item) => item.trim()).filter(Boolean);
 }
 
 function parseCredentialPayload(raw) {
