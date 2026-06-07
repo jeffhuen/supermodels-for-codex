@@ -137,6 +137,9 @@ async function getReviewContext(workspaceRoot, options, maxToolBytes, controller
   const fileSnippets = [];
   for (const changed of changedFiles.slice(0, fileLimit)) {
     throwIfCancelled(controller);
+    if (changed.status === "D") {
+      continue;
+    }
     const snippet = await readWorkspaceFile(workspaceRoot, {
       path: changed.path,
       start_line: 1,
@@ -280,7 +283,7 @@ async function changedFilesForReview(workspaceRoot, options = {}, controller) {
   throwIfCancelled(controller);
   const diff = await runCommand({
     bin: "git",
-    args: ["diff", "--name-status", `${baseRef}...HEAD`],
+    args: ["diff", "--name-status", baseRef],
   }, {
     cwd: workspaceRoot,
     timeoutMs: 10_000,

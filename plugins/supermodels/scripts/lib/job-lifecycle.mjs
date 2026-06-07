@@ -43,6 +43,7 @@ export async function startWorkerJob({ scriptPath, workspaceRoot, dataRoot, requ
     background: request.background,
     live: request.live,
     focus: request.focus,
+    contextBrief: request.contextBrief,
     task: request.task,
     write: request.write,
     options: request.options,

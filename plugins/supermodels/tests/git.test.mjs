@@ -72,6 +72,25 @@ test("collectGitContext uses base refs for committed changes without requiring b
   }
 });
 
+test("collectGitContext with base ref includes uncommitted tracked changes", async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-git-base-working-"));
+  try {
+    git(workspaceRoot, ["init"]);
+    await writeFile(path.join(workspaceRoot, "README.md"), "tracked\n");
+    git(workspaceRoot, ["add", "README.md"]);
+    git(workspaceRoot, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"]);
+
+    await writeFile(path.join(workspaceRoot, "README.md"), "tracked\nworking\n");
+
+    const context = await collectGitContext({ workspaceRoot, baseRef: "HEAD" });
+
+    assert.match(context.diffSummary, /1 file changed/);
+    assert.match(context.diff, /^\+working$/m);
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("collectGitContext omits oversized unreadable untracked files before reading", async () => {
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-git-large-"));
   try {

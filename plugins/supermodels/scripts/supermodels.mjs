@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFile } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -175,10 +175,23 @@ async function readReviewContext(options = {}) {
   }
   if (options["context-file"]) {
     const contextPath = path.resolve(process.cwd(), options["context-file"]);
-    const text = await readFile(contextPath, "utf8");
-    parts.push(text);
+    parts.push(await readContextFileWithinLimit(contextPath));
   }
   return limitReviewContext(parts.map((part) => part.trim()).filter(Boolean).join("\n\n"));
+}
+
+async function readContextFileWithinLimit(contextPath) {
+  const handle = await open(contextPath, "r");
+  try {
+    const buffer = Buffer.alloc(MAX_REVIEW_CONTEXT_BYTES + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, 0);
+    const text = buffer.subarray(0, Math.min(bytesRead, MAX_REVIEW_CONTEXT_BYTES)).toString("utf8");
+    return bytesRead > MAX_REVIEW_CONTEXT_BYTES
+      ? `${text}\n\n[Supermodels truncated review context to ${MAX_REVIEW_CONTEXT_BYTES} bytes.]`
+      : text;
+  } finally {
+    await handle.close();
+  }
 }
 
 function limitReviewContext(value) {

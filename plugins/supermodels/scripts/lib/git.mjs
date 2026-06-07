@@ -30,7 +30,7 @@ export async function collectGitContext(options = {}) {
   }
 
   const primaryDiffArgs = baseRef
-    ? ["-C", workspaceRoot, "diff", `${baseRef}...HEAD`]
+    ? ["-C", workspaceRoot, "diff", baseRef]
     : ["-C", workspaceRoot, "diff", "HEAD"];
   const primaryDiff = await runCommand({ bin: "git", args: primaryDiffArgs }, { timeoutMs: 30000 });
   let usedDiffArgs = primaryDiffArgs;

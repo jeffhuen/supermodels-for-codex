@@ -128,6 +128,62 @@ test("get_review_context uses base refs for committed changes on clean working t
   }
 });
 
+test("get_review_context with base refs includes staged and unstaged tracked changes", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-context-base-working-"));
+  try {
+    await runGit(workspace, ["init"]);
+    await runGit(workspace, ["config", "user.email", "test@example.com"]);
+    await runGit(workspace, ["config", "user.name", "Test User"]);
+    await mkdir(path.join(workspace, "src"));
+    await writeFile(path.join(workspace, "src", "staged.mjs"), "export const staged = 1;\n", "utf8");
+    await writeFile(path.join(workspace, "src", "unstaged.mjs"), "export const unstaged = 1;\n", "utf8");
+    await runGit(workspace, ["add", "."]);
+    await runGit(workspace, ["commit", "-m", "initial"]);
+    await writeFile(path.join(workspace, "src", "staged.mjs"), "export const staged = 2;\n", "utf8");
+    await runGit(workspace, ["add", "src/staged.mjs"]);
+    await writeFile(path.join(workspace, "src", "unstaged.mjs"), "export const unstaged = 2;\n", "utf8");
+
+    const tools = createReviewTools({ workspaceRoot: workspace, baseRef: "HEAD" });
+    const context = await tools.execute("get_review_context");
+    const changed = await tools.execute("list_changed_files");
+
+    assert.match(context.diff, /export const staged = 2/);
+    assert.match(context.diff, /export const unstaged = 2/);
+    assert(changed.changedFiles.some((file) => file.path === "src/staged.mjs"));
+    assert(changed.changedFiles.some((file) => file.path === "src/unstaged.mjs"));
+    assert(context.fileSnippets.some((snippet) => {
+      return snippet.path === "src/staged.mjs" && snippet.content.includes("1: export const staged = 2;");
+    }));
+    assert(context.fileSnippets.some((snippet) => {
+      return snippet.path === "src/unstaged.mjs" && snippet.content.includes("1: export const unstaged = 2;");
+    }));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("get_review_context lists deleted files without noisy snippet errors", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-context-delete-"));
+  try {
+    await runGit(workspace, ["init"]);
+    await runGit(workspace, ["config", "user.email", "test@example.com"]);
+    await runGit(workspace, ["config", "user.name", "Test User"]);
+    await mkdir(path.join(workspace, "src"));
+    await writeFile(path.join(workspace, "src", "deleted.mjs"), "export const deleted = true;\n", "utf8");
+    await runGit(workspace, ["add", "."]);
+    await runGit(workspace, ["commit", "-m", "initial"]);
+    await rm(path.join(workspace, "src", "deleted.mjs"));
+
+    const tools = createReviewTools({ workspaceRoot: workspace, baseRef: "HEAD" });
+    const context = await tools.execute("get_review_context");
+
+    assert(context.changedFiles.some((file) => file.status === "D" && file.path === "src/deleted.mjs"));
+    assert(!context.fileSnippets.some((snippet) => snippet.path === "src/deleted.mjs"));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("get_review_context surfaces git status failures instead of returning incomplete context", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-context-not-git-"));
   try {
