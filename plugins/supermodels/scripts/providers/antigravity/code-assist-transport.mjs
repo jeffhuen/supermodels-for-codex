@@ -244,16 +244,21 @@ export function collectAntigravityResponse(body = {}) {
     if (part.functionCall) {
       const id = `call_${callIndex}`;
       callIndex += 1;
+      const thoughtSignature = stringValue(part.thoughtSignature) || stringValue(part.thought_signature);
       const call = {
         id,
         name: String(part.functionCall.name ?? ""),
         input: normalizeObject(part.functionCall.args),
       };
+      if (thoughtSignature) {
+        call.thoughtSignature = thoughtSignature;
+      }
       content.push({
         type: "tool_use",
         id,
         name: call.name,
         input: call.input,
+        ...(thoughtSignature ? { thoughtSignature } : {}),
       });
       toolCalls.push(call);
     }
@@ -296,13 +301,19 @@ function messagesToContents(messages) {
       const parts = [];
       for (const block of message.content ?? []) {
         if (block.type === "text" && block.text) {
-          parts.push({ text: block.text });
+          const thoughtSignature = stringValue(block.thoughtSignature) || stringValue(block.thought_signature);
+          parts.push({
+            text: block.text,
+            ...(thoughtSignature ? { thoughtSignature } : {}),
+          });
         } else if (block.type === "tool_use") {
+          const thoughtSignature = stringValue(block.thoughtSignature) || stringValue(block.thought_signature);
           parts.push({
             functionCall: {
               name: block.name,
               args: normalizeObject(block.input),
             },
+            ...(thoughtSignature ? { thoughtSignature } : {}),
           });
         }
       }
@@ -432,6 +443,10 @@ function toUsage(usage) {
 
 function normalizeObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function stringValue(value) {
+  return typeof value === "string" && value ? value : "";
 }
 
 function mapAntigravityModel(model) {

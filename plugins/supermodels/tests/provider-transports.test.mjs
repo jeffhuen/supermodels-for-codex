@@ -404,7 +404,13 @@ test("toCodeAssistRequest converts tool turns into function call and response pa
       { role: "user", content: [{ type: "text", text: "review this" }] },
       {
         role: "assistant",
-        content: [{ type: "tool_use", id: "call_1", name: "get_diff", input: {} }],
+        content: [{
+          type: "tool_use",
+          id: "call_1",
+          name: "get_diff",
+          input: {},
+          thoughtSignature: "sig-get-diff",
+        }],
       },
       {
         role: "user",
@@ -421,7 +427,10 @@ test("toCodeAssistRequest converts tool turns into function call and response pa
   });
 
   assert.equal(request.systemInstruction.parts[0].text, "system prompt");
-  assert.deepEqual(request.contents[1].parts, [{ functionCall: { name: "get_diff", args: {} } }]);
+  assert.deepEqual(request.contents[1].parts, [{
+    functionCall: { name: "get_diff", args: {} },
+    thoughtSignature: "sig-get-diff",
+  }]);
   assert.deepEqual(request.contents[2].parts, [{
     functionResponse: { name: "get_diff", response: { ok: true } },
   }]);
@@ -456,7 +465,10 @@ test("collectAntigravityResponse parses function calls, text, and usage", () => 
       content: {
         parts: [
           { text: "Inspecting." },
-          { functionCall: { name: "read_file", args: { path: "runtime.mjs" } } },
+          {
+            functionCall: { name: "read_file", args: { path: "runtime.mjs" } },
+            thoughtSignature: "sig-read-file",
+          },
         ],
       },
       finishReason: "STOP",
@@ -473,7 +485,15 @@ test("collectAntigravityResponse parses function calls, text, and usage", () => 
     id: "call_1",
     name: "read_file",
     input: { path: "runtime.mjs" },
+    thoughtSignature: "sig-read-file",
   }]);
+  assert.deepEqual(result.content[1], {
+    type: "tool_use",
+    id: "call_1",
+    name: "read_file",
+    input: { path: "runtime.mjs" },
+    thoughtSignature: "sig-read-file",
+  });
   assert.deepEqual(result.usage, {
     input_tokens: 10,
     output_tokens: 5,

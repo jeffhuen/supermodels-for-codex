@@ -36,6 +36,7 @@ Initial public release.
 - Claude Code readiness now validates the same direct OAuth credentials used by review transport, so stale CLI auth cannot fail mid-review.
 - Antigravity OAuth refresh now matches the AGY/TradingAgents credential flow: expired local CLI tokens are refreshed directly through Google's token endpoint and persisted back to the same Keychain or token file.
 - Antigravity direct reviews default to Gemini 3.5 Flash High (`gemini-3-flash-preview`) instead of Pro, matching the provider alias table and avoiding avoidable Code Assist Pro quota spikes.
+- Antigravity Code Assist tool-call `thoughtSignature` values are preserved across model/tool turns, matching the TradingAgents transport and avoiding missing-signature request rejection.
 - Setup output now mirrors actual readiness for providers without setup hooks, avoiding contradictory provider setup/check status.
 - Review failures now include provider-specific readiness reasons when no requested provider can run.
 - Human review output now prints failed job errors instead of an empty synthesized review section.
