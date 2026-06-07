@@ -281,6 +281,30 @@ test("runReviewAgent default review loop is not capped at eight rounds", async (
   assert.equal(result.toolUsage.read_file, 9);
 });
 
+test("runReviewAgent uses timeout as an aggregate review budget", async () => {
+  const seenTimeouts = [];
+  const fakeTransport = {
+    async messages(_body, options) {
+      seenTimeouts.push(options.timeoutMs);
+      await sleep(70);
+      return { content: [], tool_calls: [], text: "still thinking" };
+    },
+  };
+
+  await assert.rejects(
+    () => runReviewAgent({
+      provider: "antigravity",
+      transport: fakeTransport,
+      tools: { schemas: [], async execute() {} },
+      timeoutMs: 50,
+    }),
+    /timed out before completion/i,
+  );
+
+  assert.equal(seenTimeouts.length, 1);
+  assert(seenTimeouts[0] > 0 && seenTimeouts[0] <= 50);
+});
+
 test("runReviewAgent refuses shallow clean verdicts until multiple files or searches are inspected", async () => {
   const calls = [];
   const fakeTransport = {
@@ -822,4 +846,8 @@ function reviewToolsForDiffAndFiles() {
       throw new Error(`unexpected tool ${name}`);
     },
   };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

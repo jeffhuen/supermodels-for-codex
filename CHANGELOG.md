@@ -43,6 +43,7 @@ Initial public release.
 - Claude Code streamed thinking blocks are preserved across tool turns, so adaptive-thinking reviews keep the context Anthropic requires after tool use.
 - Claude Code direct reviews no longer combine adaptive thinking with forced `tool_choice`; required final/inspection turns are enforced by prompt instruction instead.
 - The shared review loop is not capped by a low fixed round count by default; provider timeout/cancellation now own runaway protection.
+- Review provider timeouts are enforced as aggregate wall-clock budgets across the whole review loop, not just as per-request timeouts.
 - The shared review loop rejects final submissions until providers have made enough explicit file/search tool calls, preventing a shallow review from completing only because preloaded context was available.
 - Mixed repository tool calls with an invalid `submit_review` now execute the repository tools before returning submit errors, so providers can satisfy evidence requirements in the same turn.
 - Antigravity direct reviews request Code Assist dynamic thinking with `thinkingBudget: -1` and a 64k response budget.

@@ -64,6 +64,7 @@ export async function runReviewAgent(options = {}) {
     ...(tools.schemas ?? []),
     submitReviewToolSchema(),
   ];
+  const reviewStartedAt = Date.now();
 
   try {
     if (preloadTools.length) {
@@ -139,7 +140,7 @@ export async function runReviewAgent(options = {}) {
         ...(forcedToolChoice ? { tool_choice: forcedToolChoice } : {}),
       }, {
         signal: abort.signal,
-        timeoutMs,
+        timeoutMs: remainingReviewTimeoutMs(timeoutMs, reviewStartedAt, provider),
       });
       throwIfCancelled(controller);
 
@@ -292,6 +293,17 @@ function providerMaxTokens(provider) {
     return DEFAULT_REVIEW_POLICY.antigravityMaxTokens;
   }
   return DEFAULT_REVIEW_POLICY.antigravityMaxTokens;
+}
+
+function remainingReviewTimeoutMs(timeoutMs, startedAt, provider) {
+  if (!Number.isFinite(timeoutMs)) {
+    return timeoutMs;
+  }
+  const remaining = Math.ceil(timeoutMs - (Date.now() - startedAt));
+  if (remaining <= 0) {
+    throw new Error(`${provider} review timed out before completion after ${timeoutMs}ms.`);
+  }
+  return remaining;
 }
 
 function handleSubmittedReview(call, inspection, minInspection) {
