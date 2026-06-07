@@ -22,7 +22,7 @@ test("runReview executes two ready providers and stores independent artifacts", 
         explicit: false,
         requested: ["claude", "antigravity"],
       },
-      mode: "adversarial-review",
+      mode: "review",
       options: {
         "data-root": dataRoot,
       },
@@ -36,13 +36,61 @@ test("runReview executes two ready providers and stores independent artifacts", 
     assert.match(output.job.providerRuns.antigravity.rawResultPath, /provider-antigravity\.raw\.txt/);
     assert.match(output.synthesis, /Claude Code/);
     assert.match(output.synthesis, /Antigravity/);
+    assert.doesNotMatch(output.synthesis, /Cross-Challenge Results/);
   } finally {
     await rm(dataRoot, { recursive: true, force: true });
     await rm(workspaceRoot, { recursive: true, force: true });
   }
 });
 
-function fakeAdapter(provider, rawText, expectedFocus = "focus on data loss") {
+test("runReview adversarial mode cross-challenges usable first-pass provider output", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-adversarial-review-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-workspace-"));
+  try {
+    const calls = [];
+    const adapters = {
+      claude: fakeAdapter("claude", "High: claude finding", "focus on data loss", calls),
+      antigravity: fakeAdapter("antigravity", "Medium: agy finding", "focus on data loss", calls),
+    };
+
+    const output = await runReview({
+      adapters,
+      providerSelection: {
+        explicit: false,
+        requested: ["claude", "antigravity"],
+      },
+      mode: "adversarial-review",
+      options: {
+        "data-root": dataRoot,
+      },
+      focus: "focus on data loss",
+      workspaceRoot,
+    });
+
+    assert.deepEqual(output.selected, ["claude", "antigravity"]);
+    assert.deepEqual(Object.keys(output.job.providerRuns).sort(), [
+      "antigravity",
+      "antigravity-challenge-claude",
+      "claude",
+      "claude-challenge-antigravity",
+    ]);
+    assert.equal(output.challengeResults.length, 2);
+    assert.equal(output.job.providerRuns["claude-challenge-antigravity"].phase, "cross-challenge");
+    assert.equal(output.job.providerRuns["claude-challenge-antigravity"].sourceProvider, "claude");
+    assert.deepEqual(output.job.providerRuns["claude-challenge-antigravity"].challengeTargets, ["antigravity"]);
+    assert.match(output.job.providerRuns["claude-challenge-antigravity"].rawResultPath, /provider-claude-challenge-antigravity\.raw\.txt/);
+    assert.match(output.job.providerRuns["antigravity-challenge-claude"].rawResultPath, /provider-antigravity-challenge-claude\.raw\.txt/);
+    assert.match(output.synthesis, /Cross-Challenge Results/);
+    assert.match(output.synthesis, /Claude Code challenging Antigravity/);
+    assert.match(output.synthesis, /Antigravity challenging Claude Code/);
+    assert(calls.some((call) => /Peer Reviews To Challenge/.test(call.prompt)));
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+function fakeAdapter(provider, rawText, expectedFocus = "focus on data loss", calls = null) {
   return {
     check: async () => ({
       provider,
@@ -55,6 +103,7 @@ function fakeAdapter(provider, rawText, expectedFocus = "focus on data loss") {
       assert.match(input.prompt, /Shared Review Charter/);
       assert.match(input.prompt, new RegExp(escapeRegExp(expectedFocus)));
       assert.equal(options.bin, `/${provider}/bin`);
+      calls?.push({ provider, prompt: input.prompt, mode: input.mode });
       return {
         provider,
         exitCode: 0,

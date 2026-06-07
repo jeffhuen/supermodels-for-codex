@@ -16,6 +16,7 @@ import {
   runTask,
   selectProviders,
   setupProviders,
+  synthesizeAdversarialResults,
   synthesizeProviderResults,
 } from "../scripts/lib/runtime.mjs";
 import { createJob, createState, jobPath, listJobs, updateJob } from "../scripts/lib/state.mjs";
@@ -453,6 +454,47 @@ test("synthesizeProviderResults groups provider output without cross-examining",
   assert.match(text, /Claude Code/);
   assert.match(text, /Antigravity/);
   assert.doesNotMatch(text, /cross-exam/i);
+});
+
+test("synthesizeAdversarialResults appends attributed cross-challenge output", () => {
+  const text = synthesizeAdversarialResults([
+    {
+      provider: "claude",
+      verdict: "needs-attention",
+      summary: "Claude first pass found a bug.",
+      findings: [],
+    },
+    {
+      provider: "antigravity",
+      verdict: "clean",
+      summary: "Antigravity first pass found no concrete issue.",
+      findings: [],
+    },
+  ], [
+    {
+      provider: "claude-challenge-antigravity",
+      verdict: "needs-attention",
+      summary: "Claude challenged Antigravity and confirmed the bug.",
+      findings: [{
+        severity: "medium",
+        confidence: "high",
+        title: "Challenge-confirmed issue",
+        evidence: "runtime.mjs:10",
+        impact: "The issue survives peer challenge.",
+        recommendation: "Fix the bug.",
+        file: "plugins/supermodels/scripts/lib/runtime.mjs",
+        line_start: 10,
+        line_end: 10,
+      }],
+      assumptions: [],
+      verification_gaps: [],
+    },
+  ]);
+
+  assert.match(text, /## Provider Results/);
+  assert.match(text, /## Cross-Challenge Results/);
+  assert.match(text, /Claude Code challenging Antigravity/);
+  assert.match(text, /Challenge-confirmed issue/);
 });
 
 test("synthesizeProviderResults preserves provider attribution and full finding details", () => {

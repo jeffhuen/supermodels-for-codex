@@ -25,6 +25,7 @@ Initial public release.
 - Centralized worker cancellation lifecycle handling, with contract tests plus process-level signal regression coverage.
 - Foreground, live, and background review/task paths now all execute through the same persisted worker lifecycle instead of mixing direct CLI execution with detached background children.
 - Reviews run through a shared Supermodels-owned tool loop, so Claude Code and Antigravity both inspect repository evidence with the same read-only tools before returning structured findings.
+- Adversarial review now runs a provider cross-challenge phase after blind first-pass reviews when at least two usable provider outputs are available.
 - The shared review loop now enforces one provider-independent completion contract: forced-submit retry margin, stronger clean-verdict evidence, and deterministic handling for mixed `submit_review`/tool-call turns.
 - Review/task runs check only the requested providers, so an unavailable unrequested provider cannot block a single-provider run.
 - Antigravity readiness on macOS prefers the native Keychain token store over stale default token files, while explicit/fake `HOME` credential paths remain hermetic.

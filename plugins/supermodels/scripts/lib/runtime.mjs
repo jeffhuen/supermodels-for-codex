@@ -2,7 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 
 import { collectGitContext } from "./git.mjs";
 import { commandLine, isProcessAlive, processStartedAt, processStartedAtLookup } from "./process.mjs";
-import { renderReviewPrompt, renderTaskPrompt } from "./prompts.mjs";
+import { renderChallengePrompt, renderReviewPrompt, renderTaskPrompt } from "./prompts.mjs";
 import { createRunController, signalExitCode } from "./run-control.mjs";
 import {
   normalizeStructuredReview,
@@ -138,45 +138,24 @@ export function normalizeProviderResult(input) {
 export function synthesizeProviderResults(results) {
   const lines = ["# Supermodels Review", "", "## Provider Results", ""];
   for (const result of results) {
-    const label = providerLabel(result.provider);
-    lines.push(`### ${label}`);
-    lines.push(`Verdict: ${result.verdict ?? "inconclusive"}`);
-    if (result.output_valid === false) {
-      lines.push(result.summary ?? "Provider output was invalid.");
-    } else if (Array.isArray(result.findings) && result.findings.length) {
-      if (result.summary) {
-        lines.push(result.summary);
-      }
-      lines.push("");
-      lines.push("Findings:");
-      for (const finding of [...result.findings].sort(compareFindings)) {
-        const location = formatFindingLocation(finding);
-        const confidence = finding.confidence ? `[${finding.confidence} confidence]` : "";
-        lines.push(`- [${finding.severity}]${confidence} ${finding.title || finding.body}${location ? ` (${location})` : ""}`);
-        pushFindingDetail(lines, "Evidence", finding.evidence || finding.body);
-        pushFindingDetail(lines, "Impact", finding.impact);
-        pushFindingDetail(lines, "Recommendation", finding.recommendation);
-      }
-    } else {
-      lines.push(`No material findings reported by ${label}.`);
-      if (result.summary) {
-        lines.push(result.summary);
-      }
+    appendProviderResult(lines, result);
+  }
+  return lines.join("\n").trim();
+}
+
+export function synthesizeAdversarialResults(providerResults, challengeResults, options = {}) {
+  const lines = [
+    synthesizeProviderResults(providerResults),
+    "",
+    "## Cross-Challenge Results",
+    "",
+  ];
+  if (challengeResults.length) {
+    for (const result of challengeResults) {
+      appendProviderResult(lines, result);
     }
-    if (Array.isArray(result.assumptions) && result.assumptions.length) {
-      lines.push("");
-      lines.push("Assumptions:");
-      for (const assumption of result.assumptions) {
-        lines.push(`- ${assumption}`);
-      }
-    }
-    if (Array.isArray(result.verification_gaps) && result.verification_gaps.length) {
-      lines.push("");
-      lines.push("Verification gaps:");
-      for (const gap of result.verification_gaps) {
-        lines.push(`- ${gap}`);
-      }
-    }
+  } else {
+    lines.push(options.skippedReason || "Cross-challenge skipped because fewer than two providers returned usable structured first-pass output.");
     lines.push("");
   }
   return lines.join("\n").trim();
@@ -278,80 +257,30 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
     const writeQueue = createSerializedWriteQueue();
     const enqueueWrite = writeQueue.enqueue;
     const providerRuns = await Promise.all(providerPlan.selected.map(async (provider) => {
-      const adapter = adapters[provider];
-      const check = checks[provider] ?? {};
       const prompt = await renderReviewPrompt({
         mode,
         providerId: provider,
         focus,
         context,
       });
-      await enqueueWrite(() => updateProviderRun(state, job.id, provider, {
-        status: "running",
-        startedAt: new Date().toISOString(),
-      }));
-      const liveEvents = [];
-      const recordStart = createProviderStartRecorder({
+      return await runReviewPhase({
+        adapters,
+        checks,
         state,
-        jobId: job.id,
-        provider,
-        enqueueWrite,
-      });
-      const recordEvent = createProviderEventRecorder({
-        state,
-        jobId: job.id,
-        provider,
-        events: liveEvents,
-        enqueueWrite,
-      });
-      const run = await runProviderSafely(provider, () => adapter.review({
-        prompt,
+        job,
+        workspaceRoot,
         context,
         mode,
         focus,
-      }, {
-        model: options.model,
-        effort: options.effort,
-        resume: options.resume,
-        bin: check.path || undefined,
-        cwd: workspaceRoot,
-        promptDir: job.dir,
-        dataRoot: state.dataRoot,
+        options,
         timeoutMs,
         controller,
-        onStart: recordStart,
-        onEvent: recordEvent,
-      }));
-      const events = mergeProviderEvents(liveEvents, run.events);
-      const normalized = normalizeProviderResult({
-        provider,
-        rawText: run.rawText,
-        stderr: run.stderr,
-        sessionId: run.sessionId,
-        structured: run.structured,
-        requireStructured: true,
+        enqueueWrite,
+        adapterProvider: provider,
+        runProvider: provider,
+        prompt,
+        phase: "first-pass",
       });
-      const providerRun = {
-        provider,
-        status: providerRunStatus(run, normalized, { cancelled: controller.cancelled }),
-        exitCode: run.exitCode,
-        signal: run.signal ?? null,
-        timedOut: run.timedOut ?? false,
-        rawText: run.rawText,
-        stderr: run.stderr,
-        sessionId: run.sessionId,
-        pid: run.pid ?? null,
-        commandLine: run.commandLine,
-        normalized,
-        structured: run.structured ?? null,
-        usage: run.usage ?? null,
-        events,
-        lastEvent: lastProviderEventMessage(events),
-        startedAt: run.startedAt,
-        completedAt: run.completedAt,
-      };
-      await enqueueWrite(() => writeProviderResult(state, job.id, providerRun));
-      return providerRun;
     }));
     await writeQueue.drain();
     const providerResults = [];
@@ -359,11 +288,35 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
       providerResults.push(run.normalized);
     }
 
-    const synthesis = synthesizeProviderResults(providerResults);
+    const challengeRuns = mode === "adversarial-review"
+      ? await runAdversarialChallenges({
+        adapters,
+        checks,
+        state,
+        job,
+        workspaceRoot,
+        context,
+        focus,
+        options,
+        timeoutMs,
+        controller,
+        enqueueWrite,
+        firstPassRuns: providerRuns,
+      })
+      : [];
+    await writeQueue.drain();
+    const challengeResults = challengeRuns.map((run) => run.normalized);
+    const challengeSkippedReason = mode === "adversarial-review" && !challengeRuns.length
+      ? "Cross-challenge skipped because fewer than two providers returned usable structured first-pass output."
+      : "";
+    const allRuns = [...providerRuns, ...challengeRuns];
+    const synthesis = mode === "adversarial-review"
+      ? synthesizeAdversarialResults(providerResults, challengeResults, { skippedReason: challengeSkippedReason })
+      : synthesizeProviderResults(providerResults);
     const completed = await updateJob(
       state,
       job.id,
-      (current) => finalizeJob(current, providerRuns, synthesis, { controller }),
+      (current) => finalizeJob(current, allRuns, synthesis, { controller }),
     );
 
     return {
@@ -372,6 +325,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
       selected: providerPlan.selected,
       skipped: providerPlan.skipped,
       results: providerResults,
+      challengeResults,
       synthesis: completed.synthesis ?? synthesis,
     };
   } catch (error) {
@@ -666,6 +620,116 @@ function terminalOutput({ job, checks, selected, skipped }) {
   };
 }
 
+async function runAdversarialChallenges(input) {
+  const usableRuns = input.firstPassRuns.filter(isUsableStructuredReviewRun);
+  if (usableRuns.length < 2) {
+    return [];
+  }
+  await input.enqueueWrite(() => updateJob(input.state, input.job.id, (current) => ({
+    ...current,
+    stage: "cross-challenging",
+  })), { critical: false });
+
+  return await Promise.all(usableRuns.map(async (ownRun) => {
+    const peers = usableRuns.filter((run) => run.provider !== ownRun.provider);
+    const peerProviders = peers.map((run) => run.provider);
+    const runProvider = challengeRunId(ownRun.provider, peerProviders);
+    const prompt = await renderChallengePrompt({
+      challengerId: ownRun.provider,
+      focus: input.focus,
+      context: input.context,
+      ownResult: ownRun.normalized,
+      peerResults: peers.map((run) => run.normalized),
+    });
+    return await runReviewPhase({
+      ...input,
+      mode: "adversarial-review",
+      adapterProvider: ownRun.provider,
+      runProvider,
+      prompt,
+      phase: "cross-challenge",
+      challengeTargets: peerProviders,
+    });
+  }));
+}
+
+async function runReviewPhase(input) {
+  const adapter = input.adapters[input.adapterProvider];
+  const check = input.checks[input.adapterProvider] ?? {};
+  await input.enqueueWrite(() => updateProviderRun(input.state, input.job.id, input.runProvider, {
+    status: "running",
+    phase: input.phase,
+    sourceProvider: input.adapterProvider,
+    challengeTargets: input.challengeTargets ?? [],
+    startedAt: new Date().toISOString(),
+  }));
+  const liveEvents = [];
+  const recordStart = createProviderStartRecorder({
+    state: input.state,
+    jobId: input.job.id,
+    provider: input.runProvider,
+    enqueueWrite: input.enqueueWrite,
+  });
+  const recordEvent = createProviderEventRecorder({
+    state: input.state,
+    jobId: input.job.id,
+    provider: input.runProvider,
+    events: liveEvents,
+    enqueueWrite: input.enqueueWrite,
+  });
+  const run = await runProviderSafely(input.runProvider, () => adapter.review({
+    prompt: input.prompt,
+    context: input.context,
+    mode: input.mode,
+    focus: input.focus,
+  }, {
+    model: input.options.model,
+    effort: input.options.effort,
+    resume: input.options.resume,
+    bin: check.path || undefined,
+    cwd: input.workspaceRoot,
+    promptDir: input.job.dir,
+    dataRoot: input.state.dataRoot,
+    timeoutMs: input.timeoutMs,
+    controller: input.controller,
+    onStart: recordStart,
+    onEvent: recordEvent,
+  }));
+  const events = mergeProviderEvents(liveEvents, run.events);
+  const normalized = normalizeProviderResult({
+    provider: input.runProvider,
+    rawText: run.rawText,
+    stderr: run.stderr,
+    sessionId: run.sessionId,
+    structured: run.structured,
+    requireStructured: true,
+  });
+  const providerRun = {
+    provider: input.runProvider,
+    sourceProvider: input.adapterProvider,
+    phase: input.phase,
+    challengeTargets: input.challengeTargets ?? [],
+    status: providerRunStatus(run, normalized, { cancelled: input.controller.cancelled }),
+    exitCode: run.exitCode,
+    signal: run.signal ?? null,
+    timedOut: run.timedOut ?? false,
+    rawText: run.rawText,
+    stderr: run.stderr,
+    sessionId: run.sessionId,
+    pid: run.pid ?? null,
+    commandLine: run.commandLine,
+    normalized,
+    structured: run.structured ?? null,
+    usage: run.usage ?? null,
+    events,
+    lastEvent: lastProviderEventMessage(events),
+    startedAt: run.startedAt,
+    completedAt: run.completedAt,
+  };
+  await input.enqueueWrite(() => writeProviderResult(input.state, input.job.id, providerRun));
+  return providerRun;
+}
+
 async function runProviderSafely(provider, operation) {
   try {
     return await operation();
@@ -748,11 +812,77 @@ function lastProviderEventMessage(events) {
   return events?.length ? events[events.length - 1].message : "";
 }
 
+function appendProviderResult(lines, result) {
+  const label = providerLabel(result.provider);
+  lines.push(`### ${label}`);
+  lines.push(`Verdict: ${result.verdict ?? "inconclusive"}`);
+  if (result.output_valid === false) {
+    lines.push(result.summary ?? "Provider output was invalid.");
+  } else if (Array.isArray(result.findings) && result.findings.length) {
+    if (result.summary) {
+      lines.push(result.summary);
+    }
+    lines.push("");
+    lines.push("Findings:");
+    for (const finding of [...result.findings].sort(compareFindings)) {
+      const location = formatFindingLocation(finding);
+      const confidence = finding.confidence ? `[${finding.confidence} confidence]` : "";
+      lines.push(`- [${finding.severity}]${confidence} ${finding.title || finding.body}${location ? ` (${location})` : ""}`);
+      pushFindingDetail(lines, "Evidence", finding.evidence || finding.body);
+      pushFindingDetail(lines, "Impact", finding.impact);
+      pushFindingDetail(lines, "Recommendation", finding.recommendation);
+    }
+  } else {
+    lines.push(`No material findings reported by ${label}.`);
+    if (result.summary) {
+      lines.push(result.summary);
+    }
+  }
+  if (Array.isArray(result.assumptions) && result.assumptions.length) {
+    lines.push("");
+    lines.push("Assumptions:");
+    for (const assumption of result.assumptions) {
+      lines.push(`- ${assumption}`);
+    }
+  }
+  if (Array.isArray(result.verification_gaps) && result.verification_gaps.length) {
+    lines.push("");
+    lines.push("Verification gaps:");
+    for (const gap of result.verification_gaps) {
+      lines.push(`- ${gap}`);
+    }
+  }
+  lines.push("");
+}
+
 function providerLabel(provider) {
+  const challenge = parseChallengeProvider(provider);
+  if (challenge) {
+    const targets = challenge.targets.map((target) => providerLabel(target)).join(", ");
+    return `${providerLabel(challenge.source)} challenging ${targets}`;
+  }
   return {
     claude: "Claude Code",
     antigravity: "Antigravity",
   }[provider] ?? provider;
+}
+
+function parseChallengeProvider(provider) {
+  const value = String(provider ?? "");
+  const marker = "-challenge-";
+  const markerIndex = value.indexOf(marker);
+  if (markerIndex < 0) {
+    return null;
+  }
+  const source = value.slice(0, markerIndex);
+  const targetValue = value.slice(markerIndex + marker.length);
+  if (!source || !targetValue) {
+    return null;
+  }
+  return {
+    source,
+    targets: targetValue.split("-").filter(Boolean),
+  };
 }
 
 function compareFindings(left, right) {
@@ -863,6 +993,17 @@ function markJobCancelledForSignal(job, signal, controller) {
       at: controller?.cancelledAt ?? job.cancellation?.at ?? now,
     },
   };
+}
+
+function isUsableStructuredReviewRun(run) {
+  return run.status === "completed"
+    && run.normalized?.output_valid !== false
+    && run.normalized?.verdict !== "invalid-output"
+    && run.normalized?.verdict !== "rate-limited";
+}
+
+function challengeRunId(provider, targets) {
+  return `${provider}-challenge-${targets.join("-")}`;
 }
 
 async function markJobFailedBestEffort(state, jobId, error) {

@@ -81,8 +81,8 @@ Use the plugin skills from Codex:
 | --- | --- |
 | `$supermodels:setup` | Check Node, Git, provider CLI installation, auth state, and plugin data paths. |
 | `$supermodels:providers` | Show Claude Code and Antigravity readiness. |
-| `$supermodels:review` | Run a normal working-tree review with all ready providers. |
-| `$supermodels:adversarial-review` | Run a stricter review focused on bugs, false assumptions, overcomplication, and missing verification. |
+| `$supermodels:review` | Run blind independent first-pass working-tree reviews with all ready providers, then synthesize attributed results. |
+| `$supermodels:adversarial-review` | Run blind first-pass reviews, then have providers challenge each other when at least two usable outputs are available. |
 | `$supermodels:task` | Delegate a bounded task to one provider. |
 | `$supermodels:status` | List jobs or inspect a specific job. |
 | `$supermodels:result` | Read a completed job and artifact paths. |
@@ -96,6 +96,8 @@ node scripts/supermodels.mjs adversarial-review --live
 node scripts/supermodels.mjs task --provider claude "Investigate the failing test"
 node scripts/supermodels.mjs status
 ```
+
+`review` and `adversarial-review` intentionally have different depth. Normal review keeps provider feedback independent: Claude Code and Antigravity do not see each other's output. Adversarial review is heavier: after the blind first pass, each usable provider receives its own review plus the peer review and must attack unsupported claims, missed bugs, weak evidence, severity mistakes, and overcomplicated recommendations. If fewer than two providers return usable structured output, Supermodels skips the cross-challenge phase and records that limitation in synthesis.
 
 ## Provider Behavior
 

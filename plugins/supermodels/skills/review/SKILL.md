@@ -30,6 +30,8 @@ Do not mention provider internals in progress updates: no auth details, session 
 
 Default behavior uses all ready v1 providers. Use `--provider claude`, `--provider antigravity`, or `--all` to steer provider selection. Pass any remaining text as review focus.
 
+Normal review is a blind independent first-pass workflow. Claude Code and Antigravity do not see each other's output in this mode; Codex synthesizes attributed provider results after they finish. Do not describe `$supermodels:review` as a provider debate or cross-challenge.
+
 If the user invokes bare `$supermodels:review` with no arguments, run exactly the live review command with no trailing focus text. Do not synthesize focus from prior conversation, previous review findings, build notes, validation history, or your own assumptions. Only pass focus text that the user explicitly supplied after the skill invocation. Do not announce that the invocation is bare or that no focus text was added.
 
 Do not answer from prior context or summarize the plugin build. Run the runtime and then synthesize findings for the user. Lead with concrete bugs and risks; do not treat provider praise as evidence.

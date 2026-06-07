@@ -583,18 +583,43 @@ function providerProgressSummary(job) {
     const total = job.request?.requestedProviders?.length ?? 0;
     return total ? `0/${total} providers completed` : "no providers selected";
   }
+  const hasChallengeRuns = runs.some((run) => run.phase === "cross-challenge" || String(run.provider ?? "").includes("-challenge-"));
   const completed = runs.filter((run) => run.status === "completed").length;
   const failed = runs.filter((run) => run.status === "failed").length;
   const invalid = runs.filter((run) => run.status === "invalid-output").length;
   const rateLimited = runs.filter((run) => run.status === "rate-limited").length;
-  return `${completed}/${runs.length} providers completed${failed ? `, ${failed} failed` : ""}${invalid ? `, ${invalid} invalid` : ""}${rateLimited ? `, ${rateLimited} rate-limited` : ""}`;
+  const noun = hasChallengeRuns ? "review runs" : "providers";
+  return `${completed}/${runs.length} ${noun} completed${failed ? `, ${failed} failed` : ""}${invalid ? `, ${invalid} invalid` : ""}${rateLimited ? `, ${rateLimited} rate-limited` : ""}`;
 }
 
 function providerLabel(provider) {
+  const challenge = parseChallengeProvider(provider);
+  if (challenge) {
+    const targets = challenge.targets.map((target) => providerLabel(target)).join(", ");
+    return `${providerLabel(challenge.source)} challenging ${targets}`;
+  }
   return {
     claude: "Claude Code",
     antigravity: "Antigravity",
   }[provider] ?? provider;
+}
+
+function parseChallengeProvider(provider) {
+  const value = String(provider ?? "");
+  const marker = "-challenge-";
+  const markerIndex = value.indexOf(marker);
+  if (markerIndex < 0) {
+    return null;
+  }
+  const source = value.slice(0, markerIndex);
+  const targetValue = value.slice(markerIndex + marker.length);
+  if (!source || !targetValue) {
+    return null;
+  }
+  return {
+    source,
+    targets: targetValue.split("-").filter(Boolean),
+  };
 }
 
 function providerStatusText(run) {

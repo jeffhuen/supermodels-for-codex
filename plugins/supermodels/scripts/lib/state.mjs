@@ -134,6 +134,11 @@ export async function writeProviderResult(state, jobId, result) {
     providerRuns[provider] = {
       ...(providerRuns[provider] ?? {}),
       provider,
+      phase: result.phase ?? providerRuns[provider]?.phase ?? "first-pass",
+      sourceProvider: result.sourceProvider ?? providerRuns[provider]?.sourceProvider ?? provider,
+      challengeTargets: Array.isArray(result.challengeTargets)
+        ? result.challengeTargets
+        : providerRuns[provider]?.challengeTargets ?? [],
       status: result.status ?? "completed",
       exitCode: result.exitCode ?? null,
       signal: result.signal ?? null,
@@ -165,6 +170,9 @@ export async function initializeProviderRuns(state, jobId, providers) {
     for (const provider of providers) {
       providerRuns[provider] = {
         provider,
+        phase: providerRuns[provider]?.phase ?? "first-pass",
+        sourceProvider: providerRuns[provider]?.sourceProvider ?? provider,
+        challengeTargets: providerRuns[provider]?.challengeTargets ?? [],
         status: providerRuns[provider]?.status ?? "queued",
         exitCode: providerRuns[provider]?.exitCode ?? null,
         signal: providerRuns[provider]?.signal ?? null,

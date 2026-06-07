@@ -30,6 +30,8 @@ Do not mention provider internals in progress updates: no auth details, session 
 
 Default behavior uses all ready v1 providers. Pass focus text after flags, for example `focus on auth, data loss, and rollback`.
 
+Adversarial review is a two-phase workflow when at least two providers return usable structured output. Providers first run blind independent reviews. Then each provider receives its own first-pass output plus the peer output and challenges unsupported claims, missed bugs, weak evidence, severity mistakes, and overcomplicated recommendations. If fewer than two usable outputs are available, the runtime skips the cross-challenge phase and records that limitation.
+
 If the user invokes bare `$supermodels:adversarial-review` with no arguments, run exactly the live review command with no trailing focus text. Do not synthesize focus from prior conversation, previous review findings, build notes, validation history, or your own assumptions. Only pass focus text that the user explicitly supplied after the skill invocation. Do not announce that the invocation is bare or that no focus text was added.
 
 Do not answer from prior context or summarize the plugin build. Run the runtime and then synthesize provider results critically. Keep false positives and weakly supported claims separate from material findings.

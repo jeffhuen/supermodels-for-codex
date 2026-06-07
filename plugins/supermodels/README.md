@@ -39,6 +39,10 @@ agy
 
 If both providers are ready, reviews run both in parallel. If only one provider is ready, reviews use the available provider.
 
+`$supermodels:review` runs blind independent first-pass reviews and then synthesizes attributed results. Providers do not see each other's output in normal review mode.
+
+`$supermodels:adversarial-review` runs the same blind first pass first. When at least two providers return usable structured output, each provider then challenges the peer review before synthesis. If only one usable provider output is available, Supermodels skips cross-challenge and records that limitation.
+
 ## Data
 
 Job state and provider artifacts are stored outside the repository under the Codex plugin data directory, normally:
