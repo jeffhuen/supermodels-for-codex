@@ -6,7 +6,7 @@ const DEFAULT_REVIEW_POLICY = Object.freeze({
   claudeMaxTokens: 128_000,
   antigravityMaxTokens: 64_000,
   claudeThinking: Object.freeze({ type: "adaptive", display: "summarized" }),
-  claudeEffort: "xhigh",
+  claudeEffort: null,
   antigravityThinkingBudget: -1,
   minInspection: Object.freeze({
     diff: true,
@@ -226,7 +226,8 @@ export async function runReviewAgent(options = {}) {
 function providerReasoningOptions(provider, options = {}) {
   if (provider === "claude") {
     const thinking = options.thinking ?? DEFAULT_REVIEW_POLICY.claudeThinking;
-    const effort = options.effort ?? DEFAULT_REVIEW_POLICY.claudeEffort;
+    const requestedEffort = options.effort ?? DEFAULT_REVIEW_POLICY.claudeEffort;
+    const effort = requestedEffort === "cli-default" ? null : requestedEffort;
     return {
       ...(thinking ? { thinking } : {}),
       ...(effort ? { output_config: { effort } } : {}),

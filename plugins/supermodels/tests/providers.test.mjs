@@ -208,6 +208,52 @@ test("Claude direct reviews preload repository context before the first model tu
   assert.match(JSON.stringify(firstRequest.messages), /Codex preloaded/);
 });
 
+test("Claude direct reviews pass explicit effort overrides to the Messages request", async () => {
+  let firstRequest;
+  const adapter = createClaudeAdapter({
+    reviewTransport: {
+      async messages(body) {
+        firstRequest ??= body;
+        return directToolResponse("submit_1", "submit_review", {
+          verdict: "inconclusive",
+          summary: "effort override checked",
+          findings: [],
+          assumptions: [],
+          verification_gaps: [],
+        });
+      },
+    },
+    reviewTools: {
+      schemas: [],
+      async execute(name) {
+        if (name === "get_review_context") {
+          return {
+            ok: true,
+            diffSummary: "1 file changed",
+            diff: "diff --git a/a b/a",
+            changedFiles: [{ status: "M", path: "a" }],
+            fileSnippets: [{ path: "a", content: "1: export {};" }],
+          };
+        }
+        throw new Error(`unexpected tool ${name}`);
+      },
+    },
+  });
+
+  await adapter.review({
+    mode: "review",
+    focus: "inspect direct transport",
+    context: {},
+    prompt: "brief",
+  }, {
+    cwd: process.cwd(),
+    timeoutMs: 5000,
+    effort: "max",
+  });
+
+  assert.deepEqual(firstRequest.output_config, { effort: "max" });
+});
+
 test("Claude check validates direct OAuth credentials used by reviews", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-claude-direct-ready-"));
   try {

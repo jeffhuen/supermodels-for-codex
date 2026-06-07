@@ -31,7 +31,7 @@ Initial public release.
 - Claude Code OAuth review rate limits are surfaced as provider `rate-limited` results instead of invalid structured output.
 - Antigravity rejected-token `401` responses force direct OAuth refresh before retrying the request.
 - Claude Code direct reviews prepend the official Claude Code system identity block before Supermodels review instructions.
-- Claude Code direct reviews request Opus adaptive thinking with explicit `xhigh` effort and a 128k response budget for deeper tool-using reviews.
+- Claude Code direct reviews request Opus adaptive thinking with a 128k response budget while leaving effort at Claude's default `high`; explicit `--effort` overrides are still honored.
 - Claude Code streamed thinking blocks are preserved across tool turns, so adaptive-thinking reviews keep the context Anthropic requires after tool use.
 - Antigravity direct reviews request Code Assist dynamic thinking with `thinkingBudget: -1` and a 64k response budget.
 - Claude Code direct reviews retry transient Anthropic overloaded stream errors instead of failing the review immediately.

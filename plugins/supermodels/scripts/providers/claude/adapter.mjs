@@ -274,6 +274,7 @@ async function runClaudeReview(input, options = {}, factoryOptions = {}) {
     focus: input.focus,
     mode: input.mode,
     model,
+    effort: options.effort,
     maxRounds: factoryOptions.maxRounds,
     forceAfterRounds: factoryOptions.forceAfterRounds,
     forceInspectionTools: factoryOptions.forceInspectionTools,

@@ -515,7 +515,7 @@ test("runReviewAgent sends the Claude Code identity as the first Claude system b
   assert.match(firstBody.system[1].text, /reviewing for Codex/i);
 });
 
-test("runReviewAgent requests high-effort Claude reasoning by default", async () => {
+test("runReviewAgent requests adaptive Claude thinking without xhigh effort by default", async () => {
   let firstBody;
   const fakeTransport = {
     async messages(body) {
@@ -535,7 +535,37 @@ test("runReviewAgent requests high-effort Claude reasoning by default", async ()
 
   assert.equal(firstBody.max_tokens, 128_000);
   assert.deepEqual(firstBody.thinking, { type: "adaptive", display: "summarized" });
-  assert.deepEqual(firstBody.output_config, { effort: "xhigh" });
+  assert.equal(Object.hasOwn(firstBody, "output_config"), false);
+});
+
+test("runReviewAgent omits CLI default effort sentinel for Claude direct reviews", async () => {
+  let firstBody;
+  const fakeTransport = {
+    async messages(body) {
+      firstBody = body;
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "inconclusive",
+        summary: "checked effort sentinel",
+        findings: [],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+
+  await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: { schemas: [], async execute() {} },
+    mode: "review",
+    focus: "",
+    minInspection: { diff: false, fileOrSearch: false, cleanExplicitFileOrSearchToolCalls: 0 },
+    forceAfterRounds: 1,
+    maxRounds: 1,
+    effort: "cli-default",
+  });
+
+  assert.equal(Object.hasOwn(firstBody, "output_config"), false);
 });
 
 test("runReviewAgent requests dynamic Antigravity thinking budget by default", async () => {
