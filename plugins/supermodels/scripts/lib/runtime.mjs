@@ -548,9 +548,15 @@ export function renderHumanResult(output) {
   if (output.skipped.length) {
     lines.push(`Skipped providers: ${output.skipped.map((item) => `${item.provider} (${item.reason})`).join(", ")}`);
   }
+  if (output.job.error) {
+    lines.push(`Error: ${output.job.error}`);
+  }
+  const synthesis = output.synthesis
+    ?? (output.results?.length ? synthesizeProviderResults(output.results) : "");
   lines.push("");
-  lines.push(output.synthesis ?? synthesizeProviderResults(output.results ?? []));
-  lines.push("");
+  if (synthesis) {
+    lines.push(synthesis, "");
+  }
   lines.push("Provider session IDs:");
   for (const run of Object.values(output.job.providerRuns ?? {})) {
     lines.push(`- ${run.provider}: ${run.sessionId || "not exposed"} (${run.rawResultPath})`);

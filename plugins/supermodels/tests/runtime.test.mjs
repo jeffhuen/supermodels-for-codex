@@ -11,6 +11,7 @@ import {
   markCancelled,
   normalizeProviderResult,
   providerTimeoutMs,
+  renderHumanResult,
   runReview,
   runTask,
   selectProviders,
@@ -115,6 +116,23 @@ test("selectProviders includes readiness reasons when no providers are ready", (
       }),
     /No requested providers are ready: claude: direct OAuth refresh failed; antigravity: missing local auth/,
   );
+});
+
+test("renderHumanResult includes failed job errors", () => {
+  const text = renderHumanResult({
+    job: {
+      id: "job-20260607000000-deadbe",
+      status: "failed",
+      error: "No requested providers are ready: claude: direct auth invalid; antigravity: missing local auth.",
+      providerRuns: {},
+    },
+    selected: ["claude", "antigravity"],
+    skipped: [],
+    results: [],
+  });
+
+  assert.match(text, /Supermodels job job-20260607000000-deadbe: failed/);
+  assert.match(text, /No requested providers are ready: claude: direct auth invalid; antigravity: missing local auth/);
 });
 
 test("checkProviders reports provider capabilities without lifecycle ownership claims", async () => {
