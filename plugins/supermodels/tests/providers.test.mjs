@@ -596,7 +596,7 @@ test("Antigravity adapter runs reviews through the direct Code Assist tool-loop 
   assert.equal(result.structured.verdict, "clean");
 });
 
-test("Antigravity direct reviews default to a Code Assist model id", async () => {
+test("Antigravity direct reviews default to Flash High Code Assist model", async () => {
   let seenModel = "";
   const adapter = createAntigravityAdapter({
     ...fakeDirectReviewFactory("antigravity"),
@@ -632,7 +632,47 @@ test("Antigravity direct reviews default to a Code Assist model id", async () =>
     timeoutMs: 5000,
   });
 
-  assert.equal(seenModel, "gemini-2.5-pro");
+  assert.equal(seenModel, "gemini-3-flash-preview");
+});
+
+test("Antigravity direct review aliases keep pro on Flash High by default", async () => {
+  let seenModel = "";
+  const adapter = createAntigravityAdapter({
+    ...fakeDirectReviewFactory("antigravity"),
+    reviewTransport: {
+      calls: 0,
+      async messages(body) {
+        seenModel ||= body.model;
+        this.calls += 1;
+        if (this.calls === 1) {
+          return directToolResponse("diff_1", "get_diff", {});
+        }
+        if (this.calls === 2) {
+          return directToolResponse("read_1", "read_file", { path: "plugins/supermodels/scripts/lib/runtime.mjs" });
+        }
+        return directToolResponse("submit_1", "submit_review", {
+          verdict: "clean",
+          summary: "ok",
+          findings: [],
+          verification_gaps: [],
+          assumptions: [],
+        });
+      },
+    },
+  });
+
+  await adapter.review({
+    mode: "review",
+    focus: "inspect aliases",
+    context: {},
+    prompt: "brief",
+  }, {
+    cwd: process.cwd(),
+    timeoutMs: 5000,
+    model: "pro",
+  });
+
+  assert.equal(seenModel, "gemini-3-flash-preview");
 });
 
 test("runAntigravityPrompt keeps task delegation on native CLI and writes prompt file", async () => {

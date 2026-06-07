@@ -20,7 +20,8 @@ const DEFAULT_REVIEW_MODEL = process.env.SUPERMODELS_ANTIGRAVITY_REVIEW_MODEL
   || MODEL_CONFIG.defaultReviewModel
   || "";
 const DEFAULT_CODE_ASSIST_REVIEW_MODEL = process.env.SUPERMODELS_ANTIGRAVITY_CODE_ASSIST_MODEL
-  || "gemini-2.5-pro";
+  || MODEL_CONFIG.defaultReviewModel
+  || "Gemini 3.5 Flash (High)";
 
 const CANONICAL_MODELS = new Set(Object.values(MODEL_ALIASES));
 
@@ -240,23 +241,28 @@ async function runAntigravityReview(input, options = {}, factoryOptions = {}) {
 }
 
 function resolveAntigravityCodeAssistModel(model) {
-  if (!model || model === "cli-default") {
-    return DEFAULT_CODE_ASSIST_REVIEW_MODEL;
-  }
-  const lower = String(model).toLowerCase();
+  const candidate = (!model || model === "cli-default")
+    ? DEFAULT_CODE_ASSIST_REVIEW_MODEL
+    : model;
+  const lower = String(candidate).toLowerCase();
   const directAliases = {
-    pro: "gemini-2.5-pro",
-    "pro-high": "gemini-2.5-pro",
+    "pro-low": "gemini-3-flash-preview",
+    pro: "gemini-3-flash-preview",
+    "pro-high": "gemini-3-flash-preview",
     flash: "gemini-3-flash-preview",
     "flash-high": "gemini-3-flash-preview",
+    "gemini 3.5 flash (low)": "gemini-3-flash-preview",
+    "gemini 3.5 flash (medium)": "gemini-3-flash-preview",
+    "gemini 3.5 flash (high)": "gemini-3-flash-preview",
+    "gemini 3.5 pro": "gemini-3.1-pro-preview",
   };
   if (directAliases[lower]) {
     return directAliases[lower];
   }
-  if (/^gemini-[\w.-]+$/i.test(model)) {
-    return model;
+  if (/^gemini-[\w.-]+$/i.test(candidate)) {
+    return candidate;
   }
-  return resolveAntigravityModelAlias(model);
+  return resolveAntigravityModelAlias(candidate);
 }
 
 async function antigravityLogFile(options = {}) {
