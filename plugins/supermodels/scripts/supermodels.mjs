@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { parseRuntimeArgs, resolveProviderIds } from "./lib/args.mjs";
@@ -27,6 +29,7 @@ import { createAntigravityAdapter } from "./providers/antigravity/adapter.mjs";
 import { createClaudeAdapter } from "./providers/claude/adapter.mjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
+const MAX_REVIEW_CONTEXT_BYTES = 200_000;
 
 const adapters = {
   claude: createClaudeAdapter(),
@@ -124,11 +127,13 @@ async function handleProviders(parsed) {
 async function handleReview(parsed) {
   const providerSelection = resolveProviderIds(parsed.options);
   const focus = parsed.positionals.join(" ").trim();
+  const contextBrief = await readReviewContext(parsed.options);
   const request = buildReviewRequest({
     command: parsed.command,
     options: parsed.options,
     providerSelection,
     focus,
+    contextBrief,
     live: parsed.options.live,
     background: parsed.options.background,
   });
@@ -161,6 +166,31 @@ async function handleReview(parsed) {
 
   const output = await runForegroundWorkerJob({ parsed, request });
   writeOutput(parsed, output, renderHumanResult(output));
+}
+
+async function readReviewContext(options = {}) {
+  const parts = [];
+  if (options.context) {
+    parts.push(String(options.context));
+  }
+  if (options["context-file"]) {
+    const contextPath = path.resolve(process.cwd(), options["context-file"]);
+    const text = await readFile(contextPath, "utf8");
+    parts.push(text);
+  }
+  return limitReviewContext(parts.map((part) => part.trim()).filter(Boolean).join("\n\n"));
+}
+
+function limitReviewContext(value) {
+  const text = String(value ?? "");
+  if (Buffer.byteLength(text, "utf8") <= MAX_REVIEW_CONTEXT_BYTES) {
+    return text;
+  }
+  let end = text.length;
+  while (end > 0 && Buffer.byteLength(text.slice(0, end), "utf8") > MAX_REVIEW_CONTEXT_BYTES) {
+    end = Math.floor(end * 0.9);
+  }
+  return `${text.slice(0, end)}\n\n[Supermodels truncated review context to ${MAX_REVIEW_CONTEXT_BYTES} bytes.]`;
 }
 
 async function runLiveWorkerJob({ parsed, request }) {
@@ -663,8 +693,8 @@ function usage() {
 Commands:
   setup [--json]
   providers [--json]
-  review [--all|--provider claude,antigravity] [--live|--background] [focus]
-  adversarial-review [--all|--provider claude,antigravity] [--model MODEL] [--effort xhigh|max] [--live|--background] [focus]
+  review [--all|--provider claude,antigravity] [--base REF] [--context-file PATH] [--live|--background] [focus]
+  adversarial-review [--all|--provider claude,antigravity] [--base REF] [--context-file PATH] [--model MODEL] [--effort xhigh|max] [--live|--background] [focus]
   task [--provider claude|antigravity] [--write] [--background] <task>
   status [job-id] [--json]
   watch <job-id> [--interval seconds] [--max-wait seconds]

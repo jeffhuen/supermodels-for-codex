@@ -64,6 +64,7 @@ test("runReview adversarial mode cross-challenges usable first-pass provider out
         "data-root": dataRoot,
       },
       focus: "focus on data loss",
+      contextBrief: "session context: challenge workflow was just committed",
       workspaceRoot,
     });
 
@@ -83,6 +84,7 @@ test("runReview adversarial mode cross-challenges usable first-pass provider out
     assert.match(output.synthesis, /Cross-Challenge Results/);
     assert.match(output.synthesis, /Claude Code challenging Antigravity/);
     assert.match(output.synthesis, /Antigravity challenging Claude Code/);
+    assert(calls.every((call) => /session context: challenge workflow was just committed/.test(call.prompt)));
     assert(calls.some((call) => /Peer Reviews To Challenge/.test(call.prompt)));
   } finally {
     await rm(dataRoot, { recursive: true, force: true });

@@ -206,7 +206,7 @@ export async function setupProviders(adapters, options = {}) {
   return Object.fromEntries(entries);
 }
 
-export async function runReview({ adapters, providerSelection, mode, options, focus, workspaceRoot }) {
+export async function runReview({ adapters, providerSelection, mode, options, focus, contextBrief = "", workspaceRoot }) {
   const timeoutMs = providerTimeoutMs(options.timeout);
   const state = createState({
     workspaceRoot,
@@ -236,6 +236,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
       skippedProviders: providerPlan.skipped,
       background: false,
       focus,
+      contextBrief,
     });
   const controller = createRunController();
   const cleanupSignalCancellation = installJobSignalCancellation(state, job.id, controller);
@@ -261,6 +262,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
         mode,
         providerId: provider,
         focus,
+        contextBrief,
         context,
       });
       return await runReviewPhase({
@@ -272,6 +274,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
         context,
         mode,
         focus,
+        contextBrief,
         options,
         timeoutMs,
         controller,
@@ -297,6 +300,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
         workspaceRoot,
         context,
         focus,
+        contextBrief,
         options,
         timeoutMs,
         controller,
@@ -637,6 +641,7 @@ async function runAdversarialChallenges(input) {
     const prompt = await renderChallengePrompt({
       challengerId: ownRun.provider,
       focus: input.focus,
+      contextBrief: input.contextBrief,
       context: input.context,
       ownResult: ownRun.normalized,
       peerResults: peers.map((run) => run.normalized),

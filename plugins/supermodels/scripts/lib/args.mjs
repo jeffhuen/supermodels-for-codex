@@ -152,6 +152,8 @@ export function parseRuntimeArgs(argv) {
     ],
     valueOptions: [
       "base",
+      "context",
+      "context-file",
       "data-root",
       "effort",
       "interval",

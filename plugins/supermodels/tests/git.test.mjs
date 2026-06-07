@@ -50,6 +50,28 @@ test("collectGitContext diff summary matches staged diff body", async () => {
   }
 });
 
+test("collectGitContext uses base refs for committed changes without requiring branch scope", async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-git-base-"));
+  try {
+    git(workspaceRoot, ["init"]);
+    await writeFile(path.join(workspaceRoot, "README.md"), "tracked\n");
+    git(workspaceRoot, ["add", "README.md"]);
+    git(workspaceRoot, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"]);
+
+    await writeFile(path.join(workspaceRoot, "README.md"), "tracked\ncommitted\n");
+    git(workspaceRoot, ["add", "README.md"]);
+    git(workspaceRoot, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "change"]);
+
+    const context = await collectGitContext({ workspaceRoot, baseRef: "HEAD^" });
+
+    assert.equal(context.baseRef, "HEAD^");
+    assert.match(context.diffSummary, /1 file changed/);
+    assert.match(context.diff, /^\+committed$/m);
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("collectGitContext omits oversized unreadable untracked files before reading", async () => {
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-git-large-"));
   try {

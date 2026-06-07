@@ -55,9 +55,10 @@ test("parseArgs rejects missing option values when the next token is another fla
 });
 
 test("parseRuntimeArgs accepts live review mode", () => {
-  const parsed = parseRuntimeArgs(["review", "--live", "--provider", "antigravity"]);
+  const parsed = parseRuntimeArgs(["review", "--live", "--provider", "antigravity", "--context-file", "brief.md"]);
   assert.equal(parsed.options.live, true);
   assert.equal(parsed.options.provider, "antigravity");
+  assert.equal(parsed.options["context-file"], "brief.md");
 });
 
 test("resolveProviderIds caps v1 providers to claude and antigravity", () => {

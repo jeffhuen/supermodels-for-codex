@@ -6,7 +6,7 @@ import { createJob, createState, readJob, updateJob } from "./state.mjs";
 
 const TERMINAL_STATUSES = new Set(["cancelled", "completed", "failed", "partial"]);
 
-export function buildReviewRequest({ command, options, providerSelection, focus, live = false, background = false }) {
+export function buildReviewRequest({ command, options, providerSelection, focus, contextBrief = "", live = false, background = false }) {
   return {
     command,
     mode: command,
@@ -14,6 +14,7 @@ export function buildReviewRequest({ command, options, providerSelection, focus,
     requestedProviders: providerSelection.requested,
     options: workerOptions(options),
     focus,
+    contextBrief,
     live: Boolean(live),
     background: Boolean(background),
   };
@@ -81,6 +82,7 @@ export async function runStoredWorkerJob({ adapters, workspaceRoot, dataRoot, jo
       mode: request.mode ?? request.command,
       options,
       focus: request.focus ?? "",
+      contextBrief: request.contextBrief ?? "",
       workspaceRoot,
     });
   }
@@ -211,5 +213,7 @@ function workerOptions(options = {}) {
   delete next.live;
   delete next.json;
   delete next["job-id"];
+  delete next.context;
+  delete next["context-file"];
   return next;
 }

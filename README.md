@@ -99,6 +99,8 @@ node scripts/supermodels.mjs status
 
 `review` and `adversarial-review` intentionally have different depth. Normal review keeps provider feedback independent: Claude Code and Antigravity do not see each other's output. Adversarial review is heavier: after the blind first pass, each usable provider receives its own review plus the peer review and must attack unsupported claims, missed bugs, weak evidence, severity mistakes, and overcomplicated recommendations. If fewer than two providers return usable structured output, Supermodels skips the cross-challenge phase and records that limitation in synthesis.
 
+Review scope is not limited to the current uncommitted diff. Use `--base <ref>` to review committed changes against a base ref, and use `--context-file <path>` or `--context <text>` to provide explicit non-git review context such as a recent planning discussion, implementation summary, or release decision. The context brief is treated as untrusted background; providers must still ground findings in repository evidence when code is involved.
+
 ## Provider Behavior
 
 ### Claude Code

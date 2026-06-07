@@ -38,7 +38,7 @@ export function createReviewTools(options = {}) {
         return await getReviewContext(workspaceRoot, options, maxToolBytes, activeController);
       }
       if (name === "list_changed_files") {
-        return await listChangedFiles(workspaceRoot, maxToolBytes, activeController);
+        return await listChangedFiles(workspaceRoot, options, maxToolBytes, activeController);
       }
       if (name === "list_files") {
         return await listFiles(workspaceRoot, input, maxToolBytes, activeController);
@@ -131,7 +131,7 @@ async function getReviewContext(workspaceRoot, options, maxToolBytes, controller
     baseRef: options.baseRef ?? "",
   });
   throwIfCancelled(controller);
-  const changedFiles = await changedFilesFromGitStatus(workspaceRoot, controller);
+  const changedFiles = await changedFilesForReview(workspaceRoot, options, controller);
   const fileLimit = options.contextFileLimit ?? DEFAULT_CONTEXT_FILE_LIMIT;
   const fileBytes = options.contextFileBytes ?? DEFAULT_CONTEXT_FILE_BYTES;
   const fileSnippets = [];
@@ -256,9 +256,9 @@ async function listFiles(workspaceRoot, input, maxBytes, controller) {
   };
 }
 
-async function listChangedFiles(workspaceRoot, maxBytes, controller) {
+async function listChangedFiles(workspaceRoot, options, maxBytes, controller) {
   throwIfCancelled(controller);
-  const files = await changedFilesFromGitStatus(workspaceRoot, controller);
+  const files = await changedFilesForReview(workspaceRoot, options, controller);
   return {
     ok: true,
     changedFiles: files,
@@ -270,6 +270,30 @@ async function listChangedFiles(workspaceRoot, maxBytes, controller) {
     ),
     truncated: Buffer.byteLength(files.map((file) => `${file.status} ${file.path}`).join("\n"), "utf8") > maxBytes,
   };
+}
+
+async function changedFilesForReview(workspaceRoot, options = {}, controller) {
+  const baseRef = String(options.baseRef ?? "").trim();
+  if (!baseRef) {
+    return await changedFilesFromGitStatus(workspaceRoot, controller);
+  }
+  throwIfCancelled(controller);
+  const diff = await runCommand({
+    bin: "git",
+    args: ["diff", "--name-status", `${baseRef}...HEAD`],
+  }, {
+    cwd: workspaceRoot,
+    timeoutMs: 10_000,
+    controller,
+  });
+  throwIfCancelled(controller);
+  if (diff.exitCode !== 0) {
+    throw new Error(`git diff --name-status failed: ${diff.stderr || diff.stdout || `exit ${diff.exitCode}`}`);
+  }
+  const committed = parseGitNameStatus(diff.stdout);
+  const untracked = (await changedFilesFromGitStatus(workspaceRoot, controller))
+    .filter((file) => file.status === "??");
+  return dedupeChangedFiles([...committed, ...untracked]);
 }
 
 async function changedFilesFromGitStatus(workspaceRoot, controller) {
@@ -287,6 +311,46 @@ async function changedFilesFromGitStatus(workspaceRoot, controller) {
     throw new Error(`git status failed: ${status.stderr || status.stdout || `exit ${status.exitCode}`}`);
   }
   return parseGitStatus(status.stdout);
+}
+
+function parseGitNameStatus(stdout) {
+  return String(stdout ?? "")
+    .split(/\r?\n/)
+    .filter((line) => line.trim())
+    .map((line) => {
+      const parts = line.split("\t");
+      const status = normalizeNameStatus(parts[0]);
+      const filePath = parts.at(-1) ?? "";
+      return {
+        status,
+        path: unquoteGitPath(filePath.trim()),
+      };
+    })
+    .filter((file) => file.path);
+}
+
+function normalizeNameStatus(status) {
+  const value = String(status ?? "").trim();
+  if (/^R\d*/.test(value)) {
+    return "R";
+  }
+  if (/^C\d*/.test(value)) {
+    return "C";
+  }
+  return value.slice(0, 2).trim() || value;
+}
+
+function dedupeChangedFiles(files) {
+  const out = [];
+  const seen = new Set();
+  for (const file of files) {
+    if (!file.path || seen.has(file.path)) {
+      continue;
+    }
+    seen.add(file.path);
+    out.push(file);
+  }
+  return out;
 }
 
 function parseGitStatus(stdout) {

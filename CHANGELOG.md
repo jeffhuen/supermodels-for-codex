@@ -28,6 +28,7 @@ Initial public release.
 - Adversarial review now runs a provider cross-challenge phase after blind first-pass reviews when at least two usable provider outputs are available.
 - The shared review loop now enforces one provider-independent completion contract: forced-submit retry margin, stronger clean-verdict evidence, and deterministic handling for mixed `submit_review`/tool-call turns.
 - Review/task runs check only the requested providers, so an unavailable unrequested provider cannot block a single-provider run.
+- Review commands accept explicit non-git context through `--context` and `--context-file`, and base-ref review context now works for committed changes without requiring a separate scope flag.
 - Antigravity readiness on macOS prefers the native Keychain token store over stale default token files, while explicit/fake `HOME` credential paths remain hermetic.
 - Claude Code OAuth review rate limits are surfaced as provider `rate-limited` results instead of invalid structured output.
 - Antigravity rejected-token `401` responses force direct OAuth refresh before retrying the request.

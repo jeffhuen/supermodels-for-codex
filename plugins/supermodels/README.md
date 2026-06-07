@@ -43,6 +43,8 @@ If both providers are ready, reviews run both in parallel. If only one provider 
 
 `$supermodels:adversarial-review` runs the same blind first pass first. When at least two providers return usable structured output, each provider then challenges the peer review before synthesis. If only one usable provider output is available, Supermodels skips cross-challenge and records that limitation.
 
+Review context can come from git or from an explicit brief. Use `--base <ref>` for committed changes and `--context-file <path>` or `--context <text>` for non-git background such as a recent planning discussion or implementation summary.
+
 ## Data
 
 Job state and provider artifacts are stored outside the repository under the Codex plugin data directory, normally:
