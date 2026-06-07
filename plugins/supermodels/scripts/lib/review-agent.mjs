@@ -362,8 +362,8 @@ function updateInspection(inspection, name, result) {
     return;
   }
   if (name === "get_review_context") {
-    inspection.diff = Boolean(result.diff || result.diffSummary);
-    inspection.fileOrSearch = Array.isArray(result.fileSnippets)
+    inspection.diff ||= Boolean(result.diff || result.diffSummary);
+    inspection.fileOrSearch ||= Array.isArray(result.fileSnippets)
       && result.fileSnippets.some((snippet) => snippet.content);
     return;
   }

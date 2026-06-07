@@ -383,6 +383,47 @@ test("runReviewAgent executes repository tools from mixed invalid submit turns",
   assert.match(toolResults[1].content, /runtime\.mjs/i);
 });
 
+test("runReviewAgent does not let empty review context erase prior file inspection", async () => {
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("read_1", "read_file", { path: "runtime.mjs" });
+      }
+      if (this.calls === 2) {
+        return responseWithTool("context_1", "get_review_context", {});
+      }
+      return responseWithTool("submit_1", "submit_review", inconclusiveReview("prior inspection preserved"));
+    },
+  };
+  const fakeTools = {
+    schemas: [],
+    async execute(name) {
+      if (name === "read_file") {
+        return { ok: true, path: "runtime.mjs", content: "1: export {};" };
+      }
+      if (name === "get_review_context") {
+        return { ok: true, diff: "", diffSummary: "", changedFiles: [], fileSnippets: [] };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    minInspection: { diff: false, fileOrSearch: true },
+    maxRounds: 3,
+  });
+
+  assert.equal(result.verdict, "inconclusive");
+  assert.equal(result.rounds, 3);
+  assert.equal(result.toolUsage.read_file, 1);
+  assert.equal(result.toolUsage.get_review_context, 1);
+});
+
 test("runReviewAgent passes cancellation signals to provider transports and tools", async () => {
   const controller = createRunController();
   const seen = {
