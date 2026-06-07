@@ -28,12 +28,13 @@ Initial public release.
 - Review/task runs check only the requested providers, so an unavailable unrequested provider cannot block a single-provider run.
 - Antigravity readiness on macOS prefers the native Keychain token store over stale default token files, while explicit/fake `HOME` credential paths remain hermetic.
 - Claude Code OAuth review rate limits are surfaced as provider `rate-limited` results instead of invalid structured output.
-- Antigravity rejected-token `401` responses force native AGY refresh before retrying the request.
+- Antigravity rejected-token `401` responses force direct OAuth refresh before retrying the request.
 - Claude Code direct reviews prepend the official Claude Code system identity block before Supermodels review instructions.
 - Claude Code direct reviews emit Anthropic-compatible `tool_result` blocks without provider-internal helper fields.
 - Claude Code credential loading accepts the hex-encoded macOS Keychain payload used by current Claude Code secure storage.
 - Claude Code token refresh writes macOS Keychain payloads back in the same hex-encoded form.
 - Claude Code readiness now validates the same direct OAuth credentials used by review transport, so stale CLI auth cannot fail mid-review.
+- Antigravity OAuth refresh now matches the AGY/TradingAgents credential flow: expired local CLI tokens are refreshed directly through Google's token endpoint and persisted back to the same Keychain or token file.
 - Setup output now mirrors actual readiness for providers without setup hooks, avoiding contradictory provider setup/check status.
 - Review failures now include provider-specific readiness reasons when no requested provider can run.
 - Human review output now prints failed job errors instead of an empty synthesized review section.
@@ -46,7 +47,7 @@ Initial public release.
 
 - v1 supports exactly two providers: Claude Code and Google Antigravity.
 - Reviews run one ready provider if only one is configured, or both providers in parallel when both are ready.
-- Provider CLIs keep their own auth/session behavior; Supermodels does not embed provider API keys, provider account credentials, or AGY OAuth client metadata.
+- Provider CLIs keep their own auth/session behavior; Supermodels does not embed provider API keys or provider account credentials. AGY token refresh uses the public installed-app OAuth client metadata required by tokens minted for the Antigravity CLI.
 
 ### Known Limitations
 

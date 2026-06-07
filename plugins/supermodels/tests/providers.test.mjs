@@ -531,8 +531,8 @@ test("Antigravity check treats expired credentials without refresh metadata as m
   }
 });
 
-test("Antigravity check refreshes expired credentials through native agy", async () => {
-  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-agy-native-refresh-"));
+test("Antigravity check refreshes expired credentials directly", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-agy-direct-refresh-"));
   try {
     const fakeAgy = path.join(tempDir, "agy");
     const tokenPath = path.join(tempDir, "antigravity-oauth-token");
@@ -546,17 +546,20 @@ test("Antigravity check refreshes expired credentials through native agy", async
     }));
     await writeFile(fakeAgy, [
       "#!/usr/bin/env node",
-      "const fs = require('node:fs');",
       "if (process.argv.includes('--version')) { console.log('1.2.3-test'); process.exit(0); }",
-      "if (process.argv[2] === 'models') {",
-      "  fs.writeFileSync(process.env.ANTIGRAVITY_OAUTH_CREDS_PATH, JSON.stringify({ token: { access_token: 'new-access', refresh_token: 'refresh', expiry: '2099-01-01T00:00:00.000Z' }, auth_method: 'consumer' }));",
-      "  console.log('Gemini 3.5 Flash (High)');",
-      "}",
       "",
     ].join("\n"));
     await chmod(fakeAgy, 0o755);
 
-    const adapter = createAntigravityAdapter();
+    const adapter = createAntigravityAdapter({
+      credentialsOptions: {
+        fetchImpl: async () => new Response(JSON.stringify({
+          access_token: "new-access",
+          expires_in: 3600,
+        }), { status: 200, headers: { "content-type": "application/json" } }),
+        now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+      },
+    });
     const check = await adapter.check({
       env: {
         PATH: tempDir,
@@ -569,6 +572,7 @@ test("Antigravity check refreshes expired credentials through native agy", async
     assert.equal(check.auth, "local-oauth");
     const refreshed = JSON.parse(await readFile(tokenPath, "utf8"));
     assert.equal(refreshed.token.access_token, "new-access");
+    assert.equal(refreshed.token.refresh_token, "refresh");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

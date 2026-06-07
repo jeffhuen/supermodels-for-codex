@@ -37,7 +37,7 @@ export function createAntigravityAdapter(factoryOptions = {}) {
       nativeInterrupt: false,
       background: "worker",
     }),
-    check,
+    check: (options) => check(options, factoryOptions),
     setup,
     review: (input, options) => runAntigravityReview(input, options, factoryOptions),
     task: runAntigravityPrompt,
@@ -54,7 +54,7 @@ export async function setup(options = {}) {
   };
 }
 
-export async function check(options = {}) {
+export async function check(options = {}, factoryOptions = {}) {
   const binPath = await findExecutable("agy", options);
   if (!binPath) {
     return {
@@ -70,7 +70,7 @@ export async function check(options = {}) {
   }
 
   const version = await runCommand({ bin: binPath, args: ["--version"] }, { timeoutMs: 5000 });
-  const auth = await antigravityAuthStatus(options);
+  const auth = await antigravityAuthStatus(options, factoryOptions);
   const ready = auth !== "missing";
 
   return {
@@ -279,10 +279,10 @@ async function writePromptFile(prompt, options = {}) {
   return promptPath;
 }
 
-async function antigravityAuthStatus(options = {}) {
+async function antigravityAuthStatus(options = {}, factoryOptions = {}) {
   const env = options.env ?? process.env;
   if (await hasAntigravityOauthToken(env)) {
-    return "local-oauth";
+    return await canLoadAntigravityCredentials(env, factoryOptions) ? "local-oauth" : "missing";
   }
   return "missing";
 }
@@ -291,17 +291,20 @@ async function hasAntigravityOauthToken(env) {
   const candidate = defaultAntigravityCredentialsPath(env);
   const info = await stat(candidate).catch(() => null);
   if (info?.isFile()) {
-    return await canLoadAntigravityCredentials(env);
+    return true;
   }
   if (process.platform === "darwin" && (!env.HOME || env.HOME === process.env.HOME)) {
-    return await canLoadAntigravityCredentials(env);
+    return true;
   }
   return false;
 }
 
-async function canLoadAntigravityCredentials(env) {
+async function canLoadAntigravityCredentials(env, factoryOptions = {}) {
   try {
-    await new AntigravityCredentials({ env }).accessToken();
+    await new AntigravityCredentials({
+      ...(factoryOptions.credentialsOptions ?? {}),
+      env,
+    }).accessToken();
     return true;
   } catch {
     return false;

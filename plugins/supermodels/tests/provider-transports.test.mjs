@@ -174,76 +174,103 @@ test("ClaudeOAuthMessagesTransport surfaces 429 responses without blind retry", 
   assert.equal(calls, 1);
 });
 
-test("AntigravityCredentials reads CLI token envelope and refreshes through native AGY", async () => {
+test("AntigravityCredentials reads fresh CLI token envelope", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "supermodels-agy-oauth-"));
   const file = path.join(dir, "antigravity-oauth-token");
   try {
     await writeFile(file, JSON.stringify({
       token: {
-        access_token: "old-access",
+        access_token: "access",
         refresh_token: "old-refresh",
-        expiry: "2000-01-01T00:00:00.000Z",
+        expiry: "2099-01-01T00:00:00.000Z",
       },
       auth_method: "consumer",
     }), "utf8");
-    let refreshed = false;
     const credentials = new AntigravityCredentials({
       credentialsPath: file,
-      refreshAuth: async () => {
-        refreshed = true;
-        await writeFile(file, JSON.stringify({
-          token: {
-            access_token: "new-access",
-            refresh_token: "new-refresh",
-            expiry: "2099-01-01T00:00:00.000Z",
-          },
-          auth_method: "consumer",
-        }), "utf8");
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+
+    assert.equal(await credentials.accessToken(), "access");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("AntigravityCredentials refreshes expired flat CLI credentials directly", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "supermodels-agy-oauth-missing-client-"));
+  const file = path.join(dir, "oauth_creds.json");
+  try {
+    await writeFile(file, JSON.stringify({
+      access_token: "old-access",
+      refresh_token: "old-refresh",
+      expiry_date: 1,
+      extra: "kept",
+    }), "utf8");
+    const requests = [];
+    const credentials = new AntigravityCredentials({
+      credentialsPath: file,
+      fetchImpl: async (_url, init) => {
+        requests.push(String(init.body));
+        return new Response(JSON.stringify({
+          access_token: "new-access",
+          refresh_token: "new-refresh",
+          expires_in: 3600,
+        }), { status: 200, headers: { "content-type": "application/json" } });
       },
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
     });
 
     assert.equal(await credentials.accessToken(), "new-access");
-    assert.equal(refreshed, true);
+    assert.match(requests[0], /grant_type=refresh_token/);
+    assert.match(requests[0], /refresh_token=old-refresh/);
     const persisted = JSON.parse(await readFile(file, "utf8"));
-    assert.equal(persisted.token.access_token, "new-access");
-    assert.equal(persisted.auth_method, "consumer");
+    assert.equal(persisted.extra, "kept");
+    assert.equal(persisted.access_token, "new-access");
+    assert.equal(persisted.refresh_token, "new-refresh");
+    assert.equal(persisted.expiry_date, Date.parse("2026-01-01T01:00:00.000Z"));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("AntigravityCredentials fails clearly when native AGY does not refresh an expired token", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "supermodels-agy-oauth-missing-client-"));
-  const file = path.join(dir, "antigravity-oauth-token");
-  try {
-    await writeFile(file, JSON.stringify({
-      token: {
-        access_token: "old-access",
-        refresh_token: "old-refresh",
-        expiry: "2000-01-01T00:00:00.000Z",
-      },
-      auth_method: "consumer",
-    }), "utf8");
-    const credentials = new AntigravityCredentials({
-      credentialsPath: file,
-      refreshAuth: async () => {},
-      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
-    });
+test("AntigravityCredentials refreshes expired keychain credentials directly", async () => {
+  const envelope = {
+    token: {
+      access_token: "old-access",
+      refresh_token: "old-refresh",
+      expiry: "2000-01-01T00:00:00.000Z",
+    },
+    auth_method: "consumer",
+    extra: "kept",
+  };
+  let writtenPassword = "";
+  const credentials = new AntigravityCredentials({
+    platform: "darwin",
+    keychainReader: async () => envelope,
+    keychainWriter: async (password) => {
+      writtenPassword = password;
+    },
+    fetchImpl: async () => new Response(JSON.stringify({
+      access_token: "new-access",
+      refresh_token: "new-refresh",
+      expires_in: 3600,
+    }), { status: 200, headers: { "content-type": "application/json" } }),
+    now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+  });
 
-    await assert.rejects(
-      () => credentials.accessToken(),
-      /after native AGY refresh/i,
-    );
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
+  assert.equal(await credentials.accessToken(), "new-access");
+  assert.match(writtenPassword, /^go-keyring-base64:/);
+  const persisted = JSON.parse(Buffer.from(writtenPassword.slice("go-keyring-base64:".length), "base64").toString("utf8"));
+  assert.equal(persisted.extra, "kept");
+  assert.equal(persisted.token.access_token, "new-access");
+  assert.equal(persisted.token.refresh_token, "new-refresh");
+  assert.equal(Date.parse(persisted.token.expiry), Date.parse("2026-01-01T01:00:00.000Z"));
 });
 
-test("AntigravityCredentials wraps native AGY refresh failures with setup guidance", async () => {
+test("AntigravityCredentials surfaces direct refresh failures with setup guidance", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "supermodels-agy-oauth-refresh-fails-"));
   const file = path.join(dir, "antigravity-oauth-token");
-  const fakeAgy = path.join(dir, "agy");
   try {
     await writeFile(file, JSON.stringify({
       token: {
@@ -253,22 +280,18 @@ test("AntigravityCredentials wraps native AGY refresh failures with setup guidan
       },
       auth_method: "consumer",
     }), "utf8");
-    await writeFile(fakeAgy, [
-      "#!/usr/bin/env node",
-      "console.error('native auth expired');",
-      "process.exit(42);",
-      "",
-    ].join("\n"));
-    await chmod(fakeAgy, 0o755);
     const credentials = new AntigravityCredentials({
       credentialsPath: file,
-      refreshBin: fakeAgy,
+      fetchImpl: async () => new Response(JSON.stringify({
+        error: "invalid_grant",
+        error_description: "Bad Request",
+      }), { status: 400, headers: { "content-type": "application/json" } }),
       now: () => Date.parse("2026-01-01T00:00:00.000Z"),
     });
 
     await assert.rejects(
       () => credentials.accessToken(),
-      /agy models.*native auth expired.*run `agy`/is,
+      /Antigravity OAuth token refresh failed.*Run `agy`/is,
     );
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -488,7 +511,7 @@ test("AntigravityCodeAssistTransport wraps requests in the Code Assist envelope"
   assert.match(requests[0].headers.Authorization, /^Bearer /);
 });
 
-test("AntigravityCodeAssistTransport forces native refresh before retrying generateContent 401", async () => {
+test("AntigravityCodeAssistTransport forces OAuth refresh before retrying generateContent 401", async () => {
   const authorizations = [];
   let refreshed = false;
   let calls = 0;
@@ -708,7 +731,7 @@ test("AntigravityCodeAssistTransport returns project-less after bounded onboardi
   assert.equal(loadCalls, 3);
 });
 
-test("AntigravityCodeAssistTransport forces native refresh before retrying project discovery 401", async () => {
+test("AntigravityCodeAssistTransport forces OAuth refresh before retrying project discovery 401", async () => {
   const authorizations = [];
   let refreshed = false;
   let discoveryCalls = 0;

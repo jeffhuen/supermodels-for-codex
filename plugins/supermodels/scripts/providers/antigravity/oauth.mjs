@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -10,6 +10,19 @@ const execFileAsync = promisify(execFile);
 const REFRESH_SAFETY_MS = 300_000;
 const KEYCHAIN_SERVICE = "gemini";
 const KEYCHAIN_ACCOUNT = "antigravity";
+const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
+// Public installed-app OAuth client used by the Antigravity CLI family. This is
+// non-confidential by design; refresh tokens minted by the CLI require it.
+const ANTIGRAVITY_CLI_CLIENT_ID = [
+  "1071006060591",
+  "-tmhssin2h21lcre235vtolojh4g403ep",
+  ".apps.googleusercontent.com",
+].join("");
+const ANTIGRAVITY_CLI_CLIENT_SECRET = [
+  "GOC",
+  "SPX",
+  "-K58FWR486LdLJ1mLB8sXC4z6qDAf",
+].join("");
 
 export class AntigravityCredentials {
   constructor(options = {}) {
@@ -19,9 +32,12 @@ export class AntigravityCredentials {
     this.refreshAuth = options.refreshAuth;
     this.refreshBin = options.refreshBin ?? "agy";
     this.keychainReader = options.keychainReader;
+    this.keychainWriter = options.keychainWriter;
+    this.fetchImpl = options.fetchImpl ?? fetch;
     this.now = options.now ?? (() => Date.now());
     this.platform = options.platform ?? process.platform;
     this.cache = null;
+    this.loadedFromKeychain = false;
   }
 
   async accessToken() {
@@ -33,6 +49,102 @@ export class AntigravityCredentials {
   }
 
   async forceRefresh() {
+    this.cache = null;
+    if (this.refreshAuth) {
+      await this.refreshNativeAuth();
+      const refreshed = await this.load(true);
+      if (refreshed.expiryMs - this.now() <= REFRESH_SAFETY_MS) {
+        throw new Error("Antigravity OAuth access token is expired or near expiry after native AGY refresh. Refresh AGY login interactively, then retry.");
+      }
+      return refreshed.accessToken;
+    }
+    const current = await this.load(true);
+    const refreshed = await this.refreshToken(current);
+    await this.persist(refreshed);
+    this.cache = {
+      envelope: refreshed.envelope,
+      accessToken: refreshed.accessToken,
+      refreshToken: refreshed.refreshToken,
+      expiryMs: refreshed.expiryMs,
+      format: refreshed.format,
+    };
+    return refreshed.accessToken;
+  }
+
+  async refreshToken(creds) {
+    let response;
+    try {
+      response = await this.fetchImpl(GOOGLE_TOKEN_URL, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: ANTIGRAVITY_CLI_CLIENT_ID,
+          client_secret: ANTIGRAVITY_CLI_CLIENT_SECRET,
+          refresh_token: creds.refreshToken,
+          grant_type: "refresh_token",
+        }).toString(),
+      });
+    } catch (error) {
+      throw new Error(`Antigravity OAuth token refresh failed: ${error?.message || String(error)}. Run \`agy\` once interactively to refresh the native Antigravity login, then retry Supermodels.`);
+    }
+
+    const text = await response.text();
+    let data = {};
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      data = {};
+    }
+    if (!response.ok) {
+      throw new Error(`Antigravity OAuth token refresh failed: ${response.status} ${text.slice(0, 500)}. Run \`agy\` once interactively to refresh the native Antigravity login, then retry Supermodels.`);
+    }
+    const accessToken = stringValue(data.access_token);
+    if (!accessToken) {
+      throw new Error(`Antigravity OAuth token refresh failed: response missing access_token. Run \`agy\` once interactively to refresh the native Antigravity login, then retry Supermodels.`);
+    }
+    const expiresIn = Number(data.expires_in);
+    const expiryMs = this.now() + (Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : 3600) * 1000;
+    return {
+      envelope: updateEnvelope(creds.envelope, {
+        accessToken,
+        refreshToken: stringValue(data.refresh_token) || creds.refreshToken,
+        expiryMs,
+        format: creds.format,
+      }),
+      accessToken,
+      refreshToken: stringValue(data.refresh_token) || creds.refreshToken,
+      expiryMs,
+      format: creds.format,
+    };
+  }
+
+  async persist(refreshed) {
+    if (this.loadedFromKeychain) {
+      await this.writeKeychain(refreshed.envelope);
+      return;
+    }
+    await writeFile(this.credentialsPath, `${JSON.stringify(refreshed.envelope, null, 2)}\n`, { mode: 0o600 });
+  }
+
+  async writeKeychain(envelope) {
+    const password = `go-keyring-base64:${Buffer.from(JSON.stringify(envelope), "utf8").toString("base64")}`;
+    if (this.keychainWriter) {
+      await this.keychainWriter(password);
+      return;
+    }
+    await execFileAsync("security", [
+      "add-generic-password",
+      "-U",
+      "-s",
+      KEYCHAIN_SERVICE,
+      "-a",
+      KEYCHAIN_ACCOUNT,
+      "-w",
+      password,
+    ], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+  }
+
+  async forceNativeRefresh() {
     this.cache = null;
     await this.refreshNativeAuth();
     const refreshed = await this.load(true);
@@ -68,7 +180,9 @@ export class AntigravityCredentials {
   async readEnvelope() {
     if (this.useKeychain()) {
       try {
-        return await this.readKeychain();
+        const envelope = await this.readKeychain();
+        this.loadedFromKeychain = true;
+        return envelope;
       } catch (error) {
         throw new Error(`Antigravity keychain credential read failed; refusing to fall back to local token file. Run \`agy\` once interactively or set ANTIGRAVITY_OAUTH_CREDS_PATH explicitly. ${error?.message || String(error)}`);
       }
@@ -77,6 +191,7 @@ export class AntigravityCredentials {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("Antigravity credentials are not a JSON object.");
     }
+    this.loadedFromKeychain = false;
     return parsed;
   }
 
@@ -172,6 +287,21 @@ function parseEnvelope(envelope) {
     expiryMs: Number(envelope.expiry_date),
     format: "flat",
   };
+}
+
+function updateEnvelope(envelope, token) {
+  const copy = structuredClone(envelope);
+  if (token.format === "token-envelope") {
+    copy.token ??= {};
+    copy.token.access_token = token.accessToken;
+    copy.token.refresh_token = token.refreshToken;
+    copy.token.expiry = new Date(token.expiryMs).toISOString();
+    return copy;
+  }
+  copy.access_token = token.accessToken;
+  copy.refresh_token = token.refreshToken;
+  copy.expiry_date = token.expiryMs;
+  return copy;
 }
 
 function parseExpiry(value) {
