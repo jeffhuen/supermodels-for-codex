@@ -2,7 +2,7 @@ import { REVIEW_RESULT_SCHEMA, normalizeStructuredReview } from "./review-schema
 
 const DEFAULT_REVIEW_POLICY = Object.freeze({
   maxRounds: Number.POSITIVE_INFINITY,
-  forceAfterRounds: 5,
+  forceAfterRounds: Number.POSITIVE_INFINITY,
   claudeMaxTokens: 128_000,
   antigravityMaxTokens: 64_000,
   claudeThinking: Object.freeze({ type: "adaptive", display: "summarized" }),
@@ -11,6 +11,7 @@ const DEFAULT_REVIEW_POLICY = Object.freeze({
   minInspection: Object.freeze({
     diff: true,
     fileOrSearch: true,
+    explicitFileOrSearchToolCalls: 2,
     cleanExplicitFileOrSearchToolCalls: 2,
   }),
   forceInspectionTools: false,
@@ -295,6 +296,7 @@ function providerMaxTokens(provider) {
 
 function handleSubmittedReview(call, inspection, minInspection) {
   if (!inspectionSatisfied(inspection, minInspection)) {
+    const requiredExplicitCalls = Number(minInspection.explicitFileOrSearchToolCalls ?? 0);
     return {
       done: false,
       toolResult: {
@@ -302,7 +304,9 @@ function handleSubmittedReview(call, inspection, minInspection) {
         tool_use_id: call.id,
         content: JSON.stringify({
           ok: false,
-          error: "submit_review refused: inspect the diff and at least one relevant file or search result before submitting final findings.",
+          error: requiredExplicitCalls > 0
+            ? `submit_review refused: inspect the diff and use read_file or search on at least ${requiredExplicitCalls} relevant files/search targets before submitting final findings.`
+            : "submit_review refused: inspect the diff and at least one relevant file or search result before submitting final findings.",
           inspection,
         }),
       },
@@ -343,8 +347,10 @@ function handleSubmittedReview(call, inspection, minInspection) {
 }
 
 function inspectionSatisfied(inspection, required) {
+  const requiredExplicitCalls = Number(required.explicitFileOrSearchToolCalls ?? 0);
   return (!required.diff || inspection.diff)
-    && (!required.fileOrSearch || inspection.fileOrSearch);
+    && (!required.fileOrSearch || inspection.fileOrSearch)
+    && inspection.explicitFileOrSearchToolCalls >= requiredExplicitCalls;
 }
 
 function nextForcedInspectionTool(inspection, required) {
@@ -352,6 +358,9 @@ function nextForcedInspectionTool(inspection, required) {
     return "get_diff";
   }
   if (required.fileOrSearch && !inspection.fileOrSearch) {
+    return "search";
+  }
+  if (inspection.explicitFileOrSearchToolCalls < Number(required.explicitFileOrSearchToolCalls ?? 0)) {
     return "search";
   }
   return "";
@@ -363,8 +372,6 @@ function updateInspection(inspection, name, result) {
   }
   if (name === "get_review_context") {
     inspection.diff ||= Boolean(result.diff || result.diffSummary);
-    inspection.fileOrSearch ||= Array.isArray(result.fileSnippets)
-      && result.fileSnippets.some((snippet) => snippet.content);
     return;
   }
   if (name === "get_diff") {
@@ -394,7 +401,7 @@ function initialPrompt({ provider, brief, focus, mode }) {
   const lines = [
     `Perform a serious ${modeLabel} of the current workspace as ${provider}.`,
     "",
-    "You have read-only repository tools. Use them. Do not submit a final review until you have inspected the diff and at least one relevant file or search result.",
+    "You have read-only repository tools. Use them. Do not submit a final review until you have inspected the diff and used read_file or search on at least two relevant files/search targets.",
     "If you intend to return verdict clean, you must first use read_file or search on at least two relevant files/search targets. A shallow clean verdict will be rejected.",
     "",
     "Review rules:",

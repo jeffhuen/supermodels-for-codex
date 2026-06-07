@@ -340,7 +340,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
   }
 }
 
-export async function runTask({ adapters, providerSelection, options, task, workspaceRoot }) {
+export async function runTask({ adapters, providerSelection, options, task, contextBrief = "", workspaceRoot }) {
   const timeoutMs = providerTimeoutMs(options.timeout);
   const state = createState({
     workspaceRoot,
@@ -371,6 +371,7 @@ export async function runTask({ adapters, providerSelection, options, task, work
       skippedProviders: providerPlan.skipped,
       background: false,
       task,
+      contextBrief,
       write: Boolean(options.write),
     });
   const controller = createRunController();
@@ -398,6 +399,7 @@ export async function runTask({ adapters, providerSelection, options, task, work
       const prompt = await renderTaskPrompt({
         providerId: provider,
         task,
+        contextBrief,
         write: Boolean(options.write),
       });
       await enqueueWrite(() => updateProviderRun(state, job.id, provider, {

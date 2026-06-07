@@ -20,7 +20,7 @@ export function buildReviewRequest({ command, options, providerSelection, focus,
   };
 }
 
-export function buildTaskRequest({ options, providerSelection, task, background = false }) {
+export function buildTaskRequest({ options, providerSelection, task, contextBrief = "", background = false }) {
   return {
     command: "task",
     mode: "task",
@@ -28,6 +28,7 @@ export function buildTaskRequest({ options, providerSelection, task, background 
     requestedProviders: providerSelection.requested,
     options: workerOptions(options),
     task,
+    contextBrief,
     write: Boolean(options.write),
     background: Boolean(background),
   };
@@ -94,6 +95,7 @@ export async function runStoredWorkerJob({ adapters, workspaceRoot, dataRoot, jo
       providerSelection,
       options,
       task: request.task ?? "",
+      contextBrief: request.contextBrief ?? "",
       workspaceRoot,
     });
   }

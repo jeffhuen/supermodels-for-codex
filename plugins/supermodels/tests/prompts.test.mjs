@@ -157,3 +157,16 @@ test("renderTaskPrompt does not reuse the adversarial review charter", async () 
   assert.doesNotMatch(prompt, /Do not praise/i);
   assert.doesNotMatch(prompt, /Code review/i);
 });
+
+test("renderTaskPrompt includes explicit task context briefs", async () => {
+  const prompt = await renderTaskPrompt({
+    providerId: "claude",
+    task: "Inspect cancellation behavior.",
+    contextBrief: "Recent session context: cancellation was just refactored.",
+    write: false,
+  });
+
+  assert.match(prompt, /# Task Brief Context/);
+  assert.match(prompt, /\| Recent session context: cancellation was just refactored\./);
+  assert.match(prompt, /<supermodels-task>/);
+});

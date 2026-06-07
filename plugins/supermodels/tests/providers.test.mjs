@@ -161,8 +161,16 @@ test("Claude direct reviews preload repository context before the first model tu
   let firstRequest;
   const adapter = createClaudeAdapter({
     reviewTransport: {
+      calls: 0,
       async messages(body) {
         firstRequest ??= body;
+        this.calls += 1;
+        if (this.calls === 1) {
+          return directToolResponse("read_1", "read_file", { path: "plugins/supermodels/scripts/lib/review-agent.mjs" });
+        }
+        if (this.calls === 2) {
+          return directToolResponse("search_1", "search", { query: "runReviewAgent" });
+        }
         return directToolResponse("submit_1", "submit_review", {
           verdict: "inconclusive",
           summary: "preloaded context was enough",
@@ -188,6 +196,20 @@ test("Claude direct reviews preload repository context before the first model tu
             }],
           };
         }
+        if (name === "read_file") {
+          return {
+            ok: true,
+            path: "plugins/supermodels/scripts/lib/review-agent.mjs",
+            content: "1: export async function runReviewAgent() {}",
+          };
+        }
+        if (name === "search") {
+          return {
+            ok: true,
+            query: "runReviewAgent",
+            output: "plugins/supermodels/scripts/lib/review-agent.mjs:1:export async function runReviewAgent",
+          };
+        }
         throw new Error(`unexpected tool ${name}`);
       },
     },
@@ -204,7 +226,7 @@ test("Claude direct reviews preload repository context before the first model tu
   });
 
   assert.equal(result.structured.verdict, "inconclusive");
-  assert.deepEqual(executed, ["get_review_context"]);
+  assert.deepEqual(executed, ["get_review_context", "read_file", "search"]);
   assert.match(JSON.stringify(firstRequest.messages), /Codex preloaded/);
 });
 
@@ -212,8 +234,16 @@ test("Claude direct reviews pass explicit effort overrides to the Messages reque
   let firstRequest;
   const adapter = createClaudeAdapter({
     reviewTransport: {
+      calls: 0,
       async messages(body) {
         firstRequest ??= body;
+        this.calls += 1;
+        if (this.calls === 1) {
+          return directToolResponse("read_1", "read_file", { path: "a" });
+        }
+        if (this.calls === 2) {
+          return directToolResponse("search_1", "search", { query: "a" });
+        }
         return directToolResponse("submit_1", "submit_review", {
           verdict: "inconclusive",
           summary: "effort override checked",
@@ -234,6 +264,12 @@ test("Claude direct reviews pass explicit effort overrides to the Messages reque
             changedFiles: [{ status: "M", path: "a" }],
             fileSnippets: [{ path: "a", content: "1: export {};" }],
           };
+        }
+        if (name === "read_file") {
+          return { ok: true, path: "a", content: "1: export {};" };
+        }
+        if (name === "search") {
+          return { ok: true, query: "a", output: "a:1:export {}" };
         }
         throw new Error(`unexpected tool ${name}`);
       },

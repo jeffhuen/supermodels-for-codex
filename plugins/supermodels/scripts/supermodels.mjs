@@ -25,6 +25,7 @@ import {
   setupProviders,
 } from "./lib/runtime.mjs";
 import { createJob, createState, readJob, updateJob } from "./lib/state.mjs";
+import { decodeUtf8Prefix } from "./lib/text.mjs";
 import { createAntigravityAdapter } from "./providers/antigravity/adapter.mjs";
 import { createClaudeAdapter } from "./providers/claude/adapter.mjs";
 
@@ -185,7 +186,7 @@ async function readContextFileWithinLimit(contextPath) {
   try {
     const buffer = Buffer.alloc(MAX_REVIEW_CONTEXT_BYTES + 1);
     const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, 0);
-    const text = buffer.subarray(0, Math.min(bytesRead, MAX_REVIEW_CONTEXT_BYTES)).toString("utf8");
+    const text = decodeUtf8Prefix(buffer, Math.min(bytesRead, MAX_REVIEW_CONTEXT_BYTES));
     return bytesRead > MAX_REVIEW_CONTEXT_BYTES
       ? `${text}\n\n[Supermodels truncated review context to ${MAX_REVIEW_CONTEXT_BYTES} bytes.]`
       : text;
@@ -254,6 +255,7 @@ async function runLiveWorkerJob({ parsed, request }) {
 async function handleTask(parsed) {
   const providerSelection = resolveProviderIds(parsed.options);
   const task = parsed.positionals.join(" ").trim();
+  const contextBrief = await readReviewContext(parsed.options);
   if (!task) {
     throw new Error("task requires a task description.");
   }
@@ -264,6 +266,7 @@ async function handleTask(parsed) {
     options: parsed.options,
     providerSelection,
     task,
+    contextBrief,
     background: parsed.options.background,
   });
 

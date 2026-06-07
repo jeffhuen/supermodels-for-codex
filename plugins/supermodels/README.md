@@ -43,7 +43,7 @@ If both providers are ready, reviews run both in parallel. If only one provider 
 
 `$supermodels:adversarial-review` runs the same blind first pass first. When at least two providers return usable structured output, each provider then challenges the peer review before synthesis. If only one usable provider output is available, Supermodels skips cross-challenge and records that limitation.
 
-Review context can come from git or from an explicit brief. Use `--base <ref>` for committed changes and `--context-file <path>` or `--context <text>` for non-git background such as a recent planning discussion or implementation summary.
+Review and task context can come from git or from an explicit brief. Use `--base <ref>` for committed changes and `--context-file <path>` or `--context <text>` for non-git background such as a recent planning discussion, implementation summary, or session transcript.
 
 ## Data
 
@@ -53,7 +53,7 @@ Job state and provider artifacts are stored outside the repository under the Cod
 ~/.codex/plugins/data/supermodels
 ```
 
-The plugin does not embed provider API keys or provider account credentials. Reviews reuse local Claude Code and AGY OAuth credentials. Claude tokens refresh through Claude Code's OAuth store; Claude subscription/API rate limits are surfaced as provider `rate-limited` results. AGY token refresh uses the same direct OAuth refresh flow as AGY-compatible clients and persists back to the native token store, including rejected-token `401` retries. Direct reviews preload bounded diff, changed-file, and file-snippet context before the first provider call. Antigravity review calls default to Gemini 3.5 Flash High (`gemini-3-flash-preview`) and use the reference transport pacing defaults; they can be tuned with `SUPERMODELS_ANTIGRAVITY_CODE_ASSIST_MODEL`, `SUPERMODELS_ANTIGRAVITY_RPM`, and `SUPERMODELS_ANTIGRAVITY_BURST`.
+The plugin does not embed provider API keys or provider account credentials. Reviews reuse local Claude Code and AGY OAuth credentials. Claude tokens refresh through Claude Code's OAuth store; Claude subscription/API rate limits are surfaced as provider `rate-limited` results. AGY token refresh uses the same direct OAuth refresh flow as AGY-compatible clients and persists back to the native token store, including rejected-token `401` retries. Direct reviews preload bounded diff, changed-file, and file-snippet context before the first provider call, but providers still must make explicit `read_file` or `search` tool calls before final review submission. Antigravity review calls default to Gemini 3.5 Flash High (`gemini-3-flash-preview`) and use the reference transport pacing defaults; they can be tuned with `SUPERMODELS_ANTIGRAVITY_CODE_ASSIST_MODEL`, `SUPERMODELS_ANTIGRAVITY_RPM`, and `SUPERMODELS_ANTIGRAVITY_BURST`.
 
 All review and task execution modes run through a dedicated Supermodels worker process. Foreground and live commands wait on that worker, while background commands return the job id immediately. Review cancellation aborts in-process provider HTTP requests through the shared run controller. Task cancellation forwards termination to the provider CLI child process when one is running.
 

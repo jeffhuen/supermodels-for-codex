@@ -29,6 +29,10 @@ export async function collectGitContext(options = {}) {
     };
   }
 
+  if (baseRef) {
+    await assertValidBaseRef(workspaceRoot, baseRef);
+  }
+
   const primaryDiffArgs = baseRef
     ? ["-C", workspaceRoot, "diff", baseRef]
     : ["-C", workspaceRoot, "diff", "HEAD"];
@@ -65,6 +69,16 @@ export async function collectGitContext(options = {}) {
     diff: diffParts.join("\n\n"),
     gitAvailable: true,
   };
+}
+
+async function assertValidBaseRef(workspaceRoot, baseRef) {
+  const resolved = await runCommand({
+    bin: "git",
+    args: ["-C", workspaceRoot, "rev-parse", "--verify", `${baseRef}^{commit}`],
+  }, { timeoutMs: 10000 });
+  if (resolved.exitCode !== 0) {
+    throw new Error(`Base ref '${baseRef}' could not be resolved: ${resolved.stderr || resolved.stdout || `exit ${resolved.exitCode}`}`);
+  }
 }
 
 function diffArgsWithShortstat(args) {

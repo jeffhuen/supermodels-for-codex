@@ -8,7 +8,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import { signalProcessTree } from "../scripts/lib/process.mjs";
-import { buildReviewRequest, startWorkerJob } from "../scripts/lib/job-lifecycle.mjs";
+import { buildReviewRequest, buildTaskRequest, startWorkerJob } from "../scripts/lib/job-lifecycle.mjs";
 import { createState, listJobs, readJob } from "../scripts/lib/state.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -68,6 +68,43 @@ test("worker jobs persist explicit review context briefs", async () => {
 
     const persisted = await readJob(started.state, started.job.id);
     assert.equal(persisted.request.contextBrief, "session context survives worker persistence");
+  } finally {
+    if (child?.pid) {
+      signalProcessTree(child.pid, "SIGKILL");
+    }
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("worker jobs persist explicit task context briefs", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-worker-task-brief-"));
+  const workspaceRoot = path.join(tempDir, "workspace");
+  const dataRoot = path.join(tempDir, "data");
+  const scriptPath = path.join(tempDir, "idle-worker.mjs");
+  let child = null;
+  try {
+    await mkdir(workspaceRoot, { recursive: true });
+    await writeFile(scriptPath, "setInterval(() => {}, 1000);\n", "utf8");
+    const request = buildTaskRequest({
+      options: {},
+      providerSelection: {
+        explicit: true,
+        requested: ["claude"],
+      },
+      task: "task brief persistence",
+      contextBrief: "task context survives worker persistence",
+    });
+
+    const started = await startWorkerJob({
+      scriptPath,
+      workspaceRoot,
+      dataRoot,
+      request,
+    });
+    child = started.child;
+
+    const persisted = await readJob(started.state, started.job.id);
+    assert.equal(persisted.request.contextBrief, "task context survives worker persistence");
   } finally {
     if (child?.pid) {
       signalProcessTree(child.pid, "SIGKILL");

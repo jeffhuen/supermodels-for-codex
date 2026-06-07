@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { collectGitContext } from "../scripts/lib/git.mjs";
 import { createReviewTools } from "../scripts/lib/review-tools.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -49,6 +50,30 @@ test("read_file rejects path traversal and symlink escapes", async () => {
   } finally {
     await rm(workspace, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("read_file can read later line ranges from large files without prefix-only truncation", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-tools-large-"));
+  try {
+    await mkdir(path.join(workspace, "src"));
+    const lines = Array.from({ length: 5000 }, (_, index) => `line ${index + 1}`).join("\n");
+    await writeFile(path.join(workspace, "src", "large.txt"), `${lines}\n`, "utf8");
+    const tools = createReviewTools({ workspaceRoot: workspace, maxFileBytes: 200 });
+
+    const result = await tools.execute("read_file", {
+      path: "src/large.txt",
+      start_line: 4500,
+      end_line: 4502,
+    });
+
+    assert.equal(result.ok, true);
+    assert.match(result.content, /4500: line 4500/);
+    assert.match(result.content, /4502: line 4502/);
+    assert.doesNotMatch(result.content, /line 1/);
+    assert.equal(result.truncated, false);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
   }
 });
 
@@ -179,6 +204,60 @@ test("get_review_context lists deleted files without noisy snippet errors", asyn
 
     assert(context.changedFiles.some((file) => file.status === "D" && file.path === "src/deleted.mjs"));
     assert(!context.fileSnippets.some((snippet) => snippet.path === "src/deleted.mjs"));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("get_review_context does not let deleted files consume readable snippet budget", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-context-delete-budget-"));
+  try {
+    await runGit(workspace, ["init"]);
+    await runGit(workspace, ["config", "user.email", "test@example.com"]);
+    await runGit(workspace, ["config", "user.name", "Test User"]);
+    await mkdir(path.join(workspace, "src"));
+    for (let index = 0; index < 6; index += 1) {
+      await writeFile(path.join(workspace, "src", `a-deleted-${index}.mjs`), `export const deleted${index} = true;\n`, "utf8");
+    }
+    await writeFile(path.join(workspace, "src", "z-modified.mjs"), "export const modified = 1;\n", "utf8");
+    await runGit(workspace, ["add", "."]);
+    await runGit(workspace, ["commit", "-m", "initial"]);
+    for (let index = 0; index < 6; index += 1) {
+      await rm(path.join(workspace, "src", `a-deleted-${index}.mjs`));
+    }
+    await writeFile(path.join(workspace, "src", "z-modified.mjs"), "export const modified = 2;\n", "utf8");
+
+    const tools = createReviewTools({ workspaceRoot: workspace, baseRef: "HEAD" });
+    const context = await tools.execute("get_review_context");
+
+    assert(context.changedFiles.filter((file) => file.status === "D").length >= 6);
+    assert(context.fileSnippets.some((snippet) => {
+      return snippet.path === "src/z-modified.mjs" && snippet.content.includes("1: export const modified = 2;");
+    }));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("git context and review tools reject invalid base refs consistently", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-context-bad-base-"));
+  try {
+    await runGit(workspace, ["init"]);
+    await runGit(workspace, ["config", "user.email", "test@example.com"]);
+    await runGit(workspace, ["config", "user.name", "Test User"]);
+    await writeFile(path.join(workspace, "app.mjs"), "export const value = 1;\n", "utf8");
+    await runGit(workspace, ["add", "."]);
+    await runGit(workspace, ["commit", "-m", "initial"]);
+
+    const tools = createReviewTools({ workspaceRoot: workspace, baseRef: "missing-ref" });
+    await assert.rejects(
+      () => collectGitContext({ workspaceRoot: workspace, baseRef: "missing-ref" }),
+      /base ref 'missing-ref' could not be resolved/i,
+    );
+    await assert.rejects(
+      () => tools.execute("list_changed_files"),
+      /base ref 'missing-ref' could not be resolved/i,
+    );
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

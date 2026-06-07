@@ -55,6 +55,11 @@ test("runReviewAgent returns structured review after diff and file inspection", 
           path: "plugins/supermodels/scripts/lib/runtime.mjs",
         });
       }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", {
+          query: "runReviewAgent",
+        });
+      }
       return responseWithTool("submit_1", "submit_review", {
         verdict: "needs-attention",
         summary: "A real file was inspected.",
@@ -83,6 +88,9 @@ test("runReviewAgent returns structured review after diff and file inspection", 
       if (name === "read_file") {
         return { ok: true, path: "plugins/supermodels/scripts/lib/runtime.mjs", content: "1: export {};" };
       }
+      if (name === "search") {
+        return { ok: true, query: "runReviewAgent", output: "review-agent.mjs:1:export async function runReviewAgent" };
+      }
       throw new Error(`unexpected tool ${name}`);
     },
   };
@@ -92,13 +100,14 @@ test("runReviewAgent returns structured review after diff and file inspection", 
     transport: fakeTransport,
     tools: fakeTools,
     focus: "review lifecycle changes",
-    maxRounds: 4,
+    maxRounds: 5,
   });
 
   assert.equal(result.verdict, "needs-attention");
   assert.equal(result.findings.length, 1);
   assert.equal(result.toolUsage.get_diff, 1);
   assert.equal(result.toolUsage.read_file, 1);
+  assert.equal(result.toolUsage.search, 1);
 });
 
 test("runReviewAgent sends Anthropic-compatible tool_result blocks without names", async () => {
@@ -126,7 +135,7 @@ test("runReviewAgent sends Anthropic-compatible tool_result blocks without names
     provider: "claude",
     transport: fakeTransport,
     tools: fakeTools,
-    minInspection: { diff: false, fileOrSearch: true },
+    minInspection: { diff: false, fileOrSearch: true, explicitFileOrSearchToolCalls: 1 },
     maxRounds: 2,
   });
 
@@ -173,6 +182,7 @@ test("runReviewAgent forces submit_review only after required inspection is sati
     transport: fakeTransport,
     tools: fakeTools,
     focus: "review lifecycle changes",
+    minInspection: { explicitFileOrSearchToolCalls: 1 },
     maxRounds: 3,
   });
 
@@ -225,6 +235,7 @@ test("runReviewAgent leaves a retry round after malformed forced submit_review",
     provider: "antigravity",
     transport: fakeTransport,
     tools: fakeTools,
+    minInspection: { explicitFileOrSearchToolCalls: 1 },
     maxRounds: 4,
   });
 
@@ -294,7 +305,7 @@ test("runReviewAgent refuses shallow clean verdicts until multiple files or sear
     /review did not complete/i,
   );
 
-  assert.match(JSON.stringify(calls[2].messages), /clean verdict requires/i);
+  assert.match(JSON.stringify(calls[2].messages), /at least 2 relevant files/i);
 });
 
 test("runReviewAgent allows clean verdicts after two explicit file or search inspections", async () => {
@@ -368,7 +379,7 @@ test("runReviewAgent executes repository tools from mixed invalid submit turns",
     provider: "claude",
     transport: fakeTransport,
     tools: fakeTools,
-    minInspection: { diff: false, fileOrSearch: false },
+    minInspection: { diff: false, fileOrSearch: false, explicitFileOrSearchToolCalls: 1 },
     forceAfterRounds: 2,
     maxRounds: 2,
   });
@@ -414,7 +425,7 @@ test("runReviewAgent does not let empty review context erase prior file inspecti
     provider: "claude",
     transport: fakeTransport,
     tools: fakeTools,
-    minInspection: { diff: false, fileOrSearch: true },
+    minInspection: { diff: false, fileOrSearch: true, explicitFileOrSearchToolCalls: 1 },
     maxRounds: 3,
   });
 
@@ -498,6 +509,7 @@ test("runReviewAgent can force required inspection tools before final review", a
     transport: fakeTransport,
     tools: fakeTools,
     forceInspectionTools: true,
+    minInspection: { explicitFileOrSearchToolCalls: 1 },
     forceAfterRounds: 3,
     maxRounds: 3,
   });
@@ -544,13 +556,12 @@ test("runReviewAgent does not force Claude tool_choice while thinking is enabled
   assert.deepEqual(firstBody.thinking, { type: "adaptive", display: "summarized" });
 });
 
-test("runReviewAgent can preload required inspection tools before first provider call", async () => {
+test("runReviewAgent preloaded context does not satisfy explicit inspection by itself", async () => {
   const executed = [];
-  let firstBody;
+  const calls = [];
   const fakeTransport = {
     async messages(body) {
-      firstBody = body;
-      assert.deepEqual(body.tool_choice, { type: "tool", name: "submit_review" });
+      calls.push(body);
       return responseWithTool("submit_1", "submit_review", inconclusiveReview("preloaded"));
     },
   };
@@ -571,19 +582,21 @@ test("runReviewAgent can preload required inspection tools before first provider
     },
   };
 
-  const result = await runReviewAgent({
-    provider: "antigravity",
-    transport: fakeTransport,
-    tools: fakeTools,
-    preloadTools: ["get_review_context"],
-    forceAfterRounds: 1,
-    maxRounds: 1,
-  });
+  await assert.rejects(
+    () => runReviewAgent({
+      provider: "antigravity",
+      transport: fakeTransport,
+      tools: fakeTools,
+      preloadTools: ["get_review_context"],
+      maxRounds: 1,
+    }),
+    /review did not complete/i,
+  );
 
-  assert.equal(result.verdict, "inconclusive");
   assert.deepEqual(executed, ["get_review_context"]);
-  assert.equal(result.toolUsage.get_review_context, 1);
-  assert.match(JSON.stringify(firstBody.messages), /Codex preloaded/);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].tool_choice, undefined);
+  assert.match(JSON.stringify(calls[0].messages), /Codex preloaded/);
 });
 
 test("runReviewAgent sends the Claude Code identity as the first Claude system block", async () => {
@@ -615,6 +628,7 @@ test("runReviewAgent sends the Claude Code identity as the first Claude system b
     transport: fakeTransport,
     tools: fakeTools,
     preloadTools: ["get_review_context"],
+    minInspection: { diff: false, fileOrSearch: false, explicitFileOrSearchToolCalls: 0, cleanExplicitFileOrSearchToolCalls: 0 },
     forceAfterRounds: 1,
     maxRounds: 1,
   });
@@ -636,7 +650,7 @@ test("runReviewAgent requests adaptive Claude thinking without xhigh effort by d
     provider: "claude",
     transport: fakeTransport,
     tools: { schemas: [], async execute() {} },
-    minInspection: { diff: false, fileOrSearch: false, cleanExplicitFileOrSearchToolCalls: 0 },
+    minInspection: { diff: false, fileOrSearch: false, explicitFileOrSearchToolCalls: 0, cleanExplicitFileOrSearchToolCalls: 0 },
     forceAfterRounds: 1,
     maxRounds: 1,
   });
@@ -668,7 +682,7 @@ test("runReviewAgent omits CLI default effort sentinel for Claude direct reviews
     tools: { schemas: [], async execute() {} },
     mode: "review",
     focus: "",
-    minInspection: { diff: false, fileOrSearch: false, cleanExplicitFileOrSearchToolCalls: 0 },
+    minInspection: { diff: false, fileOrSearch: false, explicitFileOrSearchToolCalls: 0, cleanExplicitFileOrSearchToolCalls: 0 },
     forceAfterRounds: 1,
     maxRounds: 1,
     effort: "cli-default",
@@ -690,7 +704,7 @@ test("runReviewAgent requests dynamic Antigravity thinking budget by default", a
     provider: "antigravity",
     transport: fakeTransport,
     tools: { schemas: [], async execute() {} },
-    minInspection: { diff: false, fileOrSearch: false, cleanExplicitFileOrSearchToolCalls: 0 },
+    minInspection: { diff: false, fileOrSearch: false, explicitFileOrSearchToolCalls: 0, cleanExplicitFileOrSearchToolCalls: 0 },
     forceAfterRounds: 1,
     maxRounds: 1,
   });

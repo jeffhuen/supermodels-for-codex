@@ -1,4 +1,4 @@
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { lstat, open, realpath } from "node:fs/promises";
 import path from "node:path";
 
 import { collectGitContext } from "./git.mjs";
@@ -135,11 +135,8 @@ async function getReviewContext(workspaceRoot, options, maxToolBytes, controller
   const fileLimit = options.contextFileLimit ?? DEFAULT_CONTEXT_FILE_LIMIT;
   const fileBytes = options.contextFileBytes ?? DEFAULT_CONTEXT_FILE_BYTES;
   const fileSnippets = [];
-  for (const changed of changedFiles.slice(0, fileLimit)) {
+  for (const changed of changedFiles.filter((file) => file.status !== "D").slice(0, fileLimit)) {
     throwIfCancelled(controller);
-    if (changed.status === "D") {
-      continue;
-    }
     const snippet = await readWorkspaceFile(workspaceRoot, {
       path: changed.path,
       start_line: 1,
@@ -182,28 +179,21 @@ async function readWorkspaceFile(workspaceRoot, input, maxBytes, controller) {
   if (!info || !info.isFile()) {
     return { ok: false, error: "Path is not a regular file.", path: safe.relative };
   }
-  const raw = await readFile(safe.absolute);
-  throwIfCancelled(controller);
-  const truncated = raw.byteLength > maxBytes;
-  const text = raw.subarray(0, maxBytes).toString("utf8");
-  const lines = text.split(/\r?\n/);
   const start = normalizeLine(input.start_line, 1);
-  const end = Math.min(
-    normalizeLine(input.end_line, Math.min(lines.length, start + 199)),
-    lines.length,
-    start + 199,
-  );
-  const selected = lines
-    .slice(start - 1, end)
-    .map((line, index) => `${start + index}: ${line}`)
-    .join("\n");
+  const end = Math.max(start, normalizeLine(input.end_line, start + 199));
+  const bounded = await readLineRangeWithinLimit(safe.absolute, {
+    start,
+    end: Math.min(end, start + 199),
+    maxBytes,
+    controller,
+  });
   return {
     ok: true,
     path: safe.relative,
     start_line: start,
-    end_line: end,
-    truncated,
-    content: selected,
+    end_line: bounded.endLine,
+    truncated: bounded.truncated,
+    content: bounded.content,
   };
 }
 
@@ -281,6 +271,7 @@ async function changedFilesForReview(workspaceRoot, options = {}, controller) {
     return await changedFilesFromGitStatus(workspaceRoot, controller);
   }
   throwIfCancelled(controller);
+  await assertValidBaseRef(workspaceRoot, baseRef, controller);
   const diff = await runCommand({
     bin: "git",
     args: ["diff", "--name-status", baseRef],
@@ -297,6 +288,88 @@ async function changedFilesForReview(workspaceRoot, options = {}, controller) {
   const untracked = (await changedFilesFromGitStatus(workspaceRoot, controller))
     .filter((file) => file.status === "??");
   return dedupeChangedFiles([...committed, ...untracked]);
+}
+
+async function assertValidBaseRef(workspaceRoot, baseRef, controller) {
+  const resolved = await runCommand({
+    bin: "git",
+    args: ["rev-parse", "--verify", `${baseRef}^{commit}`],
+  }, {
+    cwd: workspaceRoot,
+    timeoutMs: 10_000,
+    controller,
+  });
+  throwIfCancelled(controller);
+  if (resolved.exitCode !== 0) {
+    throw new Error(`Base ref '${baseRef}' could not be resolved: ${resolved.stderr || resolved.stdout || `exit ${resolved.exitCode}`}`);
+  }
+}
+
+async function readLineRangeWithinLimit(absolutePath, options) {
+  const handle = await open(absolutePath, "r");
+  const decoder = new TextDecoder("utf-8");
+  const chunk = Buffer.alloc(64 * 1024);
+  const lines = [];
+  let pending = "";
+  let position = 0;
+  let lineNumber = 1;
+  let outputBytes = 0;
+  let truncated = false;
+  let lastLine = options.start;
+
+  const addLine = (line) => {
+    const normalized = line.endsWith("\r") ? line.slice(0, -1) : line;
+    if (lineNumber >= options.start && lineNumber <= options.end) {
+      const rendered = `${lineNumber}: ${normalized}`;
+      const separatorBytes = lines.length ? 1 : 0;
+      const renderedBytes = Buffer.byteLength(rendered, "utf8");
+      if (outputBytes + separatorBytes + renderedBytes > options.maxBytes) {
+        truncated = true;
+        return "truncated";
+      }
+      lines.push(rendered);
+      outputBytes += separatorBytes + renderedBytes;
+      lastLine = lineNumber;
+    }
+    lineNumber += 1;
+    return lineNumber <= options.end ? "continue" : "done";
+  };
+
+  try {
+    while (lineNumber <= options.end) {
+      throwIfCancelled(options.controller);
+      const { bytesRead } = await handle.read(chunk, 0, chunk.byteLength, position);
+      if (bytesRead === 0) {
+        break;
+      }
+      position += bytesRead;
+      pending += decoder.decode(chunk.subarray(0, bytesRead), { stream: true });
+      let newlineIndex;
+      while ((newlineIndex = pending.indexOf("\n")) !== -1) {
+        const line = pending.slice(0, newlineIndex);
+        pending = pending.slice(newlineIndex + 1);
+        const result = addLine(line);
+        if (result === "truncated") {
+          return { content: lines.join("\n"), endLine: lastLine, truncated: true };
+        }
+        if (result === "done") {
+          return { content: lines.join("\n"), endLine: lastLine, truncated: false };
+        }
+      }
+    }
+
+    pending += decoder.decode();
+    if (pending && lineNumber <= options.end && !truncated) {
+      addLine(pending);
+    }
+    return {
+      content: lines.join("\n"),
+      endLine: lines.length ? lastLine : options.start,
+      truncated,
+    };
+  } finally {
+    await handle.close();
+  }
 }
 
 async function changedFilesFromGitStatus(workspaceRoot, controller) {
