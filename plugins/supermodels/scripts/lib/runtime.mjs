@@ -58,7 +58,10 @@ export function selectProviders(input) {
   }
 
   if (selected.length === 0) {
-    throw new Error("No requested providers are ready.");
+    const reasonSummary = skipped
+      .map((item) => `${item.provider}: ${item.reason}`)
+      .join("; ");
+    throw new Error(`No requested providers are ready${reasonSummary ? `: ${reasonSummary}` : ""}.`);
   }
 
   return {

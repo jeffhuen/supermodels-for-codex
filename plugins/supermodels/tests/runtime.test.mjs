@@ -94,6 +94,29 @@ test("selectProviders skips unavailable providers for explicit multi-provider re
   assert.deepEqual(selected.skipped.map((item) => item.provider), ["antigravity"]);
 });
 
+test("selectProviders includes readiness reasons when no providers are ready", () => {
+  assert.throws(
+    () =>
+      selectProviders({
+        requested: ["claude", "antigravity"],
+        explicit: false,
+        checks: {
+          claude: {
+            provider: "claude",
+            ready: false,
+            error: "direct OAuth refresh failed",
+          },
+          antigravity: {
+            provider: "antigravity",
+            ready: false,
+            error: "missing local auth",
+          },
+        },
+      }),
+    /No requested providers are ready: claude: direct OAuth refresh failed; antigravity: missing local auth/,
+  );
+});
+
 test("checkProviders reports provider capabilities without lifecycle ownership claims", async () => {
   const output = await checkProviders({
     claude: {
