@@ -2,7 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 
 import {
   buildContextPacket,
-  renderContextPacketMarkdown,
+  renderProviderContextPacketMarkdown,
   writeContextPacketArtifacts,
 } from "./context-packet.mjs";
 import { collectGitContext } from "./git.mjs";
@@ -253,7 +253,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
     providerPlan,
     context,
   });
-  const contextPacketMarkdown = renderContextPacketMarkdown(contextPacket);
+  const providerContextPacketMarkdown = renderProviderContextPacketMarkdown(contextPacket);
   job = await persistContextPacket(state, job, contextPacket);
   const controller = createRunController();
   const cleanupSignalCancellation = installJobSignalCancellation(state, job.id, controller);
@@ -279,7 +279,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
         mode,
         providerId: provider,
         focus,
-        contextBrief: contextPacketMarkdown,
+        contextBrief: providerContextPacketMarkdown,
         context,
       });
       return await runReviewPhase({
@@ -291,7 +291,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
         context,
         mode,
         focus,
-        contextBrief: contextPacketMarkdown,
+        contextBrief: providerContextPacketMarkdown,
         options,
         timeoutMs,
         controller,
@@ -317,7 +317,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
         workspaceRoot,
         context,
         focus,
-        contextBrief: contextPacketMarkdown,
+        contextBrief: providerContextPacketMarkdown,
         options,
         timeoutMs,
         controller,
@@ -407,7 +407,7 @@ export async function runTask({ adapters, providerSelection, options, task, cont
     providerPlan,
     context,
   });
-  const contextPacketMarkdown = renderContextPacketMarkdown(contextPacket);
+  const providerContextPacketMarkdown = renderProviderContextPacketMarkdown(contextPacket);
   job = await persistContextPacket(state, job, contextPacket);
   const controller = createRunController();
   const cleanupSignalCancellation = installJobSignalCancellation(state, job.id, controller);
@@ -434,7 +434,7 @@ export async function runTask({ adapters, providerSelection, options, task, cont
       const prompt = await renderTaskPrompt({
         providerId: provider,
         task,
-        contextBrief: contextPacketMarkdown,
+        contextBrief: providerContextPacketMarkdown,
         write: Boolean(options.write),
       });
       await enqueueWrite(() => updateProviderRun(state, job.id, provider, {
@@ -490,6 +490,7 @@ export async function runTask({ adapters, providerSelection, options, task, cont
         normalized,
         structured: command.structured ?? null,
         usage: command.usage ?? null,
+        reviewConfig: command.reviewConfig ?? null,
         events,
         lastEvent: lastProviderEventMessage(events),
         startedAt: command.startedAt,
@@ -780,6 +781,7 @@ async function runReviewPhase(input) {
     normalized,
     structured: run.structured ?? null,
     usage: run.usage ?? null,
+    reviewConfig: run.reviewConfig ?? null,
     events,
     lastEvent: lastProviderEventMessage(events),
     startedAt: run.startedAt,

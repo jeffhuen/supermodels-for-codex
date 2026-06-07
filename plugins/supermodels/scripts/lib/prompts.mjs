@@ -3,9 +3,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { structuredReviewInstructions } from "./review-schema.mjs";
+import { decodeUtf8Prefix } from "./text.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(__dirname, "..", "..");
+const MAX_PROMPT_DIFF_BYTES = 200_000;
 
 export async function renderReviewPrompt(input) {
   const charter = await readPrompt("review-charter.md");
@@ -60,7 +62,7 @@ export async function renderReviewPrompt(input) {
     `# Diff`,
     "Each diff line is prefixed with `| `; the prefix is not part of the diff.",
     "<supermodels-diff>",
-    renderPrefixedBlock(context.diff?.trim() || "(no diff captured)"),
+    renderPrefixedBlock(limitPromptText(context.diff?.trim() || "(no diff captured)", MAX_PROMPT_DIFF_BYTES)),
     "</supermodels-diff>",
     ``,
     structuredReviewInstructions(),
@@ -178,6 +180,15 @@ function renderPrefixedBlock(value) {
     .split(/\r?\n/)
     .map((line) => `| ${line}`)
     .join("\n");
+}
+
+function limitPromptText(value, maxBytes) {
+  const text = String(value ?? "");
+  const buffer = Buffer.from(text, "utf8");
+  if (buffer.byteLength <= maxBytes) {
+    return text;
+  }
+  return `${decodeUtf8Prefix(buffer, maxBytes)}\n\n[Supermodels truncated prompt section to ${maxBytes} bytes.]`;
 }
 
 function formatReviewResult(result) {

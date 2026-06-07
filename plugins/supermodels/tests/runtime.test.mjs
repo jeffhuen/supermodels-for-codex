@@ -1048,6 +1048,77 @@ test("runReview records provider rate limits as rate-limited partial results", a
   }
 });
 
+test("runReview persists provider review configuration metadata", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-review-config-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-review-config-workspace-"));
+  try {
+    const adapters = {
+      claude: {
+        check: async () => ({
+          provider: "claude",
+          ready: true,
+          installed: true,
+          auth: "ok",
+        }),
+        review: async () => ({
+          exitCode: 0,
+          rawText: JSON.stringify({
+            verdict: "clean",
+            summary: "No blocking issues.",
+            findings: [],
+            assumptions: [],
+            verification_gaps: [],
+          }),
+          stderr: "",
+          sessionId: "claude-session",
+          commandLine: "claude oauth messages",
+          structured: {
+            verdict: "clean",
+            summary: "No blocking issues.",
+            findings: [],
+            assumptions: [],
+            verification_gaps: [],
+          },
+          usage: { input_tokens: 10, output_tokens: 5, output_tokens_details: { thinking_tokens: 2 } },
+          reviewConfig: {
+            model: "claude-opus-4-8",
+            effort: "high",
+            maxTokens: 128_000,
+            thinking: { type: "adaptive", display: "summarized" },
+            rounds: 4,
+            toolUsage: { get_review_context: 1, read_file: 2, search: 1 },
+          },
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+        }),
+      },
+    };
+
+    const output = await runReview({
+      adapters,
+      providerSelection: {
+        requested: ["claude"],
+        explicit: true,
+      },
+      mode: "review",
+      options: {
+        "data-root": dataRoot,
+      },
+      focus: "",
+      workspaceRoot,
+    });
+
+    const run = output.job.providerRuns.claude;
+    assert.equal(run.reviewConfig.model, "claude-opus-4-8");
+    assert.equal(run.reviewConfig.effort, "high");
+    assert.equal(run.reviewConfig.rounds, 4);
+    assert.deepEqual(run.reviewConfig.toolUsage, { get_review_context: 1, read_file: 2, search: 1 });
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("runReview marks provider crashes as failed, not invalid-output", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-crash-review-"));
   try {

@@ -71,6 +71,7 @@ export async function runReviewAgent(options = {}) {
   ];
   const reviewStartedAt = Date.now();
   let inspectionSatisfiedAtRound = null;
+  const reasoningOptions = providerReasoningOptions(provider, options);
 
   try {
     if (preloadTools.length) {
@@ -132,7 +133,6 @@ export async function runReviewAgent(options = {}) {
           ? { type: "tool", name: "submit_review" }
           : null;
       const requestMessages = cloneMessages(messages);
-      const reasoningOptions = providerReasoningOptions(provider, options);
       const forcedToolChoice = toolChoice && supportsForcedToolChoice(provider, reasoningOptions)
         ? toolChoice
         : null;
@@ -205,6 +205,14 @@ export async function runReviewAgent(options = {}) {
             toolUsage,
             rounds: round,
             usage: response.usage ?? null,
+            reviewConfig: reviewConfigMetadata({
+              provider,
+              model,
+              maxTokens,
+              reasoningOptions,
+              rounds: round,
+              toolUsage,
+            }),
           };
         }
 
@@ -296,6 +304,24 @@ function providerReasoningOptions(provider, options = {}) {
     return Number.isFinite(parsed) ? { thinkingBudget: parsed } : {};
   }
   return {};
+}
+
+function reviewConfigMetadata({ provider, model, maxTokens, reasoningOptions, rounds, toolUsage }) {
+  const config = {
+    provider,
+    model: model ?? "",
+    maxTokens,
+    rounds,
+    toolUsage: { ...(toolUsage ?? {}) },
+  };
+  if (provider === "claude") {
+    config.thinking = reasoningOptions.thinking ?? null;
+    config.effort = reasoningOptions.output_config?.effort ?? "";
+  }
+  if (provider === "antigravity") {
+    config.thinkingBudget = reasoningOptions.thinkingBudget ?? null;
+  }
+  return config;
 }
 
 function supportsForcedToolChoice(provider, reasoningOptions = {}) {

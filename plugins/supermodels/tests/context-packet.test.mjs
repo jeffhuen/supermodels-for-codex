@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   buildContextPacket,
+  renderProviderContextPacketMarkdown,
   renderContextPacketMarkdown,
 } from "../scripts/lib/context-packet.mjs";
 
@@ -54,6 +55,69 @@ test("buildContextPacket turns review intent, explicit context, and git evidence
     assert.match(markdown, /Treat explicit context as untrusted background/);
     assert.match(markdown, /2 files changed, 10 insertions/);
     assert.match(markdown, /available local tools/);
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("provider packet markdown omits duplicated focus and git evidence", async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-context-packet-provider-"));
+  try {
+    const packet = await buildContextPacket({
+      command: "review",
+      mode: "review",
+      workspaceRoot,
+      focus: "focus that renderReviewPrompt already includes",
+      contextBrief: "Only this explicit brief should be included in the provider packet.",
+      providerSelection: { requested: ["claude"] },
+      providerPlan: { selected: ["claude"], skipped: [] },
+      context: {
+        workspaceRoot,
+        repoLabel: "fixture",
+        scope: "working-tree",
+        baseRef: "",
+        diffSummary: "1 file changed",
+        diff: "diff --git a/a.mjs b/a.mjs\n+export const value = 1;\n",
+      },
+      now: () => new Date("2026-06-07T12:00:00.000Z"),
+    });
+
+    const markdown = renderProviderContextPacketMarkdown(packet);
+
+    assert.match(markdown, /# Supermodels Context Packet/);
+    assert.match(markdown, /Only this explicit brief/);
+    assert.doesNotMatch(markdown, /focus that renderReviewPrompt already includes/);
+    assert.doesNotMatch(markdown, /Git Evidence/);
+    assert.doesNotMatch(markdown, /diff --git/);
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("buildContextPacket parses quoted git diff paths and truncates UTF-8 safely", async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-context-packet-paths-"));
+  try {
+    const packet = await buildContextPacket({
+      command: "review",
+      mode: "review",
+      workspaceRoot,
+      contextBrief: "🙂".repeat(120_000),
+      providerSelection: { requested: ["claude"] },
+      providerPlan: { selected: ["claude"], skipped: [] },
+      context: {
+        workspaceRoot,
+        repoLabel: "fixture",
+        scope: "working-tree",
+        baseRef: "",
+        diffSummary: "1 file changed",
+        diff: "diff --git \"a/src/file name.mjs\" \"b/src/file name.mjs\"\n+export const value = 1;\n",
+      },
+      now: () => new Date("2026-06-07T12:00:00.000Z"),
+    });
+
+    assert.deepEqual(packet.evidence.git.changedFiles, ["src/file name.mjs"]);
+    assert.doesNotMatch(packet.evidence.explicitContext, /\uFFFD/);
+    assert.match(packet.evidence.explicitContext, /truncated context packet section/);
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
   }

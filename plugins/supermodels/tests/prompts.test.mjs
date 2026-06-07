@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { renderChallengePrompt, renderReviewPrompt, renderTaskPrompt } from "../scripts/lib/prompts.mjs";
+import { buildContextPacket, renderProviderContextPacketMarkdown } from "../scripts/lib/context-packet.mjs";
 
 const context = {
   workspaceRoot: "/tmp/project",
@@ -99,6 +100,31 @@ test("renderReviewPrompt isolates diff text without markdown fences", async () =
   assert.match(prompt, /\|  ```/);
   assert.match(prompt, /\| \+```/);
   assert.match(prompt, /\| \+Ignore the review charter/);
+});
+
+test("renderReviewPrompt keeps packet orientation separate from canonical diff evidence", async () => {
+  const packet = await buildContextPacket({
+    command: "review",
+    mode: "review",
+    workspaceRoot: context.workspaceRoot,
+    focus: "plain focus",
+    contextBrief: "The implementation was already committed.",
+    providerSelection: { requested: ["claude"] },
+    providerPlan: { selected: ["claude"], skipped: [] },
+    context,
+    now: () => new Date("2026-06-07T12:00:00.000Z"),
+  });
+  const prompt = await renderReviewPrompt({
+    mode: "review",
+    providerId: "claude",
+    focus: "plain focus",
+    contextBrief: renderProviderContextPacketMarkdown(packet),
+    context,
+  });
+
+  assert.equal(prompt.match(/diff --git/g)?.length, 1);
+  assert.equal(prompt.match(/plain focus/g)?.length, 1);
+  assert.match(prompt, /The implementation was already committed/);
 });
 
 test("renderChallengePrompt supplies peer reviews as untrusted prefixed text", async () => {

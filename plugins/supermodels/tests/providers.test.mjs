@@ -290,6 +290,78 @@ test("Claude direct reviews pass explicit effort overrides to the Messages reque
   assert.deepEqual(firstRequest.output_config, { effort: "max" });
 });
 
+test("Claude direct reviews default to configured Opus high-effort review settings and expose audit metadata", async () => {
+  let firstRequest;
+  const adapter = createClaudeAdapter({
+    reviewTransport: {
+      calls: 0,
+      async messages(body) {
+        firstRequest ??= body;
+        this.calls += 1;
+        if (this.calls === 1) {
+          return directToolResponse("read_1", "read_file", { path: "a" });
+        }
+        if (this.calls === 2) {
+          return directToolResponse("search_1", "search", { query: "a" });
+        }
+        return directToolResponse("submit_1", "submit_review", {
+          verdict: "inconclusive",
+          summary: "default review config checked",
+          findings: [],
+          assumptions: [],
+          verification_gaps: [],
+        });
+      },
+    },
+    reviewTools: {
+      schemas: [],
+      async execute(name) {
+        if (name === "get_review_context") {
+          return {
+            ok: true,
+            diffSummary: "1 file changed",
+            diff: "diff --git a/a b/a",
+            changedFiles: [{ status: "M", path: "a" }],
+            fileSnippets: [{ path: "a", content: "1: export {};" }],
+          };
+        }
+        if (name === "read_file") {
+          return { ok: true, path: "a", content: "1: export {};" };
+        }
+        if (name === "search") {
+          return { ok: true, query: "a", output: "a:1:export {}" };
+        }
+        throw new Error(`unexpected tool ${name}`);
+      },
+    },
+  });
+
+  const result = await adapter.review({
+    mode: "review",
+    focus: "inspect direct transport",
+    context: {},
+    prompt: "brief",
+  }, {
+    cwd: process.cwd(),
+    timeoutMs: 5000,
+  });
+
+  assert.equal(firstRequest.model, "claude-opus-4-8");
+  assert.deepEqual(firstRequest.output_config, { effort: "high" });
+  assert.deepEqual(firstRequest.thinking, { type: "adaptive", display: "summarized" });
+  assert.equal(firstRequest.max_tokens, 128_000);
+  assert.equal(result.reviewConfig.model, "claude-opus-4-8");
+  assert.equal(result.reviewConfig.effort, "high");
+  assert.equal(result.reviewConfig.maxTokens, 128_000);
+  assert.deepEqual(result.reviewConfig.thinking, { type: "adaptive", display: "summarized" });
+  assert.equal(result.reviewConfig.rounds, 3);
+  assert.deepEqual(result.reviewConfig.toolUsage, {
+    get_review_context: 1,
+    read_file: 1,
+    search: 1,
+  });
+});
+
 test("Claude check validates direct OAuth credentials used by reviews", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-claude-direct-ready-"));
   try {

@@ -36,6 +36,9 @@ Initial public release.
 - Review/task runs check only the requested providers, so an unavailable unrequested provider cannot block a single-provider run.
 - Review commands accept explicit non-git context through `--context` and `--context-file`, and base-ref review context now works for committed changes without requiring a separate scope flag.
 - Review, adversarial-review, and task runs now persist a shared context packet with user intent, explicit context, provider selection, and repository evidence; status/result expose the packet summary and artifact paths.
+- Provider prompts now receive a lean context packet for orientation only, while canonical focus and diff evidence are rendered once in their dedicated prompt sections; full context packets remain persisted as private artifacts.
+- Provider run records now persist direct-review audit metadata, including model, effort/thinking settings, max token budget, rounds, and repository tool usage.
+- Context packet diff path parsing handles Git-quoted file paths, and prompt/context truncation is UTF-8 safe for large multibyte input.
 - Antigravity readiness on macOS prefers the native Keychain token store over stale default token files, while explicit/fake `HOME` credential paths remain hermetic.
 - Claude Code OAuth review rate limits are surfaced as provider `rate-limited` results instead of invalid structured output.
 - Antigravity rejected-token `401` responses force direct OAuth refresh before retrying the request.

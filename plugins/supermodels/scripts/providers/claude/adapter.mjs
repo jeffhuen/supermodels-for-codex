@@ -254,6 +254,7 @@ async function runClaudePrompt(input, options = {}) {
 async function runClaudeReview(input, options = {}, factoryOptions = {}) {
   const startedAt = new Date().toISOString();
   const model = resolveClaudeModelAlias(options.model ?? DEFAULT_MODEL);
+  const effort = options.effort ?? DEFAULT_EFFORT;
   const transport = factoryOptions.reviewTransport
     ?? new ClaudeOAuthMessagesTransport({
       credentials: factoryOptions.credentials ?? new ClaudeCodeCredentials(factoryOptions.credentialsOptions ?? {}),
@@ -274,7 +275,7 @@ async function runClaudeReview(input, options = {}, factoryOptions = {}) {
     focus: input.focus,
     mode: input.mode,
     model,
-    effort: options.effort,
+    effort,
     maxRounds: factoryOptions.maxRounds,
     forceAfterRounds: factoryOptions.forceAfterRounds,
     forceAfterSatisfiedRounds: factoryOptions.forceAfterSatisfiedRounds,
@@ -296,6 +297,15 @@ async function runClaudeReview(input, options = {}, factoryOptions = {}) {
     commandLine: "claude oauth messages",
     structured,
     usage: structured.usage ?? null,
+    reviewConfig: structured.reviewConfig ?? {
+      provider: "claude",
+      model,
+      effort: effort === "cli-default" ? "" : effort,
+      maxTokens: null,
+      thinking: null,
+      rounds: null,
+      toolUsage: {},
+    },
     events: [],
     startedAt,
     completedAt: new Date().toISOString(),
