@@ -113,8 +113,14 @@ export async function runReviewAgent(options = {}) {
           ? { type: "tool", name: "submit_review" }
           : null;
       const requestMessages = cloneMessages(messages);
+      const reasoningOptions = providerReasoningOptions(provider, options);
+      const forcedToolChoice = toolChoice && supportsForcedToolChoice(provider, reasoningOptions)
+        ? toolChoice
+        : null;
       if (shouldForceSubmit) {
         requestMessages.push(finalInstruction());
+      } else if (toolChoice && !forcedToolChoice) {
+        requestMessages.push(forcedToolInstruction(toolChoice.name));
       }
 
       onEvent?.({
@@ -128,8 +134,8 @@ export async function runReviewAgent(options = {}) {
         system: providerSystemInstructions(provider),
         messages: requestMessages,
         tools: schemas,
-        ...providerReasoningOptions(provider, options),
-        ...(toolChoice ? { tool_choice: toolChoice } : {}),
+        ...reasoningOptions,
+        ...(forcedToolChoice ? { tool_choice: forcedToolChoice } : {}),
       }, {
         signal: abort.signal,
         timeoutMs,
@@ -239,6 +245,10 @@ function providerReasoningOptions(provider, options = {}) {
     return Number.isFinite(parsed) ? { thinkingBudget: parsed } : {};
   }
   return {};
+}
+
+function supportsForcedToolChoice(provider, reasoningOptions = {}) {
+  return !(provider === "claude" && reasoningOptions.thinking);
 }
 
 function providerMaxTokens(provider) {
@@ -407,6 +417,16 @@ function finalInstruction() {
     content: [{
       type: "text",
       text: "Submit the final structured review with the evidence you have. If you found no concrete bugs but have not used read_file or search on at least two relevant files/search targets, return verdict inconclusive and explain the remaining verification gaps instead of clean.",
+    }],
+  };
+}
+
+function forcedToolInstruction(name) {
+  return {
+    role: "user",
+    content: [{
+      type: "text",
+      text: `Call the ${name} tool now. Do not submit a final review until this required repository inspection is complete.`,
     }],
   };
 }

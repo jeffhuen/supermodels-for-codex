@@ -222,7 +222,7 @@ test("runReviewAgent leaves a retry round after malformed forced submit_review",
   const fakeTools = reviewToolsForDiffAndFiles();
 
   const result = await runReviewAgent({
-    provider: "claude",
+    provider: "antigravity",
     transport: fakeTransport,
     tools: fakeTools,
     maxRounds: 4,
@@ -436,6 +436,40 @@ test("runReviewAgent can force required inspection tools before final review", a
   ]);
 });
 
+test("runReviewAgent does not force Claude tool_choice while thinking is enabled", async () => {
+  let firstBody;
+  const fakeTransport = {
+    async messages(body) {
+      firstBody = body;
+      return responseWithTool("diff_1", "get_diff", {});
+    },
+  };
+  const fakeTools = {
+    schemas: [],
+    async execute(name) {
+      if (name === "get_diff") {
+        return { ok: true, diff: "diff", diffSummary: "1 file changed" };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+
+  await assert.rejects(
+    () => runReviewAgent({
+      provider: "claude",
+      transport: fakeTransport,
+      tools: fakeTools,
+      forceInspectionTools: true,
+      maxRounds: 1,
+    }),
+    /review did not complete/i,
+  );
+
+  assert.equal(Object.hasOwn(firstBody, "tool_choice"), false);
+  assert.match(JSON.stringify(firstBody.messages), /Call the get_diff tool now/);
+  assert.deepEqual(firstBody.thinking, { type: "adaptive", display: "summarized" });
+});
+
 test("runReviewAgent can preload required inspection tools before first provider call", async () => {
   const executed = [];
   let firstBody;
@@ -535,6 +569,7 @@ test("runReviewAgent requests adaptive Claude thinking without xhigh effort by d
 
   assert.equal(firstBody.max_tokens, 128_000);
   assert.deepEqual(firstBody.thinking, { type: "adaptive", display: "summarized" });
+  assert.equal(Object.hasOwn(firstBody, "tool_choice"), false);
   assert.equal(Object.hasOwn(firstBody, "output_config"), false);
 });
 
