@@ -273,6 +273,43 @@ test("runReviewAgent can preload required inspection tools before first provider
   assert.match(JSON.stringify(firstBody.messages), /Codex preloaded/);
 });
 
+test("runReviewAgent sends the Claude Code identity as the first Claude system block", async () => {
+  let firstBody;
+  const fakeTransport = {
+    async messages(body) {
+      firstBody = body;
+      return responseWithTool("submit_1", "submit_review", cleanReview("identity checked"));
+    },
+  };
+  const fakeTools = {
+    schemas: [],
+    async execute(name) {
+      if (name === "get_review_context") {
+        return {
+          ok: true,
+          diff: "diff",
+          diffSummary: "1 file changed",
+          changedFiles: [{ status: "M", path: "runtime.mjs" }],
+          fileSnippets: [{ path: "runtime.mjs", content: "1: export {};" }],
+        };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+
+  await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    preloadTools: ["get_review_context"],
+    forceAfterRounds: 1,
+    maxRounds: 1,
+  });
+
+  assert.equal(firstBody.system[0].text, "You are Claude Code, Anthropic's official CLI for Claude.");
+  assert.match(firstBody.system[1].text, /reviewing for Codex/i);
+});
+
 test("runReviewAgent does not treat changed-file lists as file inspection", async () => {
   const fakeTransport = {
     async messages() {

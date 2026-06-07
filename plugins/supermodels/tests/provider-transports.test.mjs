@@ -520,6 +520,57 @@ test("AntigravityCodeAssistTransport discovers project id before generateContent
   assert.equal(requests[1].body.project, "discovered-project");
 });
 
+test("AntigravityCodeAssistTransport continues generateContent when project discovery is unavailable", async () => {
+  const requests = [];
+  const transport = new AntigravityCodeAssistTransport({
+    credentials: { accessToken: async () => "access-token", forceReload: () => {} },
+    rateLimiter: noRateLimit,
+    maxRetries: 0,
+    fetchImpl: async (url, init) => {
+      requests.push({ url, body: JSON.parse(init.body) });
+      if (String(url).endsWith("v1internal:loadCodeAssist")) {
+        return new Response(JSON.stringify({ error: { code: 500, message: "discovery down" } }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({
+        response: {
+          candidates: [{ content: { parts: [{ text: "ok" }] } }],
+          usageMetadata: {},
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+
+  const response = await transport.messages({
+    model: "gemini-2.5-pro",
+    messages: [{ role: "user", content: [{ type: "text", text: "review" }] }],
+    tools: [],
+  });
+
+  assert.equal(response.text, "ok");
+  assert.match(requests[0].url, /v1internal:loadCodeAssist$/);
+  assert.match(requests[1].url, /v1internal:generateContent$/);
+  assert.equal(Object.hasOwn(requests[1].body, "project"), false);
+});
+
+test("AntigravityCodeAssistTransport uses reference onboarding poll bounds with test overrides", async () => {
+  const defaults = new AntigravityCodeAssistTransport({
+    credentials: { accessToken: async () => "access-token" },
+  });
+  assert.equal(defaults.onboardPollAttempts, 24);
+  assert.equal(defaults.onboardPollIntervalMs, 5000);
+
+  const overridden = new AntigravityCodeAssistTransport({
+    credentials: { accessToken: async () => "access-token" },
+    onboardPollAttempts: 2,
+    onboardPollIntervalMs: 0,
+  });
+  assert.equal(overridden.onboardPollAttempts, 2);
+  assert.equal(overridden.onboardPollIntervalMs, 0);
+});
+
 test("AntigravityCodeAssistTransport forces native refresh before retrying project discovery 401", async () => {
   const authorizations = [];
   let refreshed = false;

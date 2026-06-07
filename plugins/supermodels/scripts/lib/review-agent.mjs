@@ -101,7 +101,7 @@ export async function runReviewAgent(options = {}) {
       const response = await transport.messages({
         model,
         max_tokens: maxTokens,
-        system: [{ type: "text", text: providerSystemInstruction(provider) }],
+        system: providerSystemInstructions(provider),
         messages: requestMessages,
         tools: schemas,
         ...(toolChoice ? { tool_choice: toolChoice } : {}),
@@ -293,14 +293,23 @@ function initialPrompt({ provider, brief, focus, mode }) {
   return lines.join("\n");
 }
 
-function providerSystemInstruction(provider) {
+function providerSystemInstructions(provider) {
   if (provider === "claude") {
-    return "You are Claude Code reviewing for Codex. Be concrete, skeptical, and evidence-driven.";
+    return [
+      { type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
+      { type: "text", text: "You are Claude Code reviewing for Codex. Be concrete, skeptical, and evidence-driven." },
+    ];
   }
   if (provider === "antigravity") {
-    return "You are Antigravity reviewing for Codex. Use broad systems judgment, but ground every claim in inspected repository evidence.";
+    return [{
+      type: "text",
+      text: "You are Antigravity reviewing for Codex. Use broad systems judgment, but ground every claim in inspected repository evidence.",
+    }];
   }
-  return `You are ${provider} reviewing for Codex. Make every claim concrete and falsifiable.`;
+  return [{
+    type: "text",
+    text: `You are ${provider} reviewing for Codex. Make every claim concrete and falsifiable.`,
+  }];
 }
 
 function finalInstruction() {

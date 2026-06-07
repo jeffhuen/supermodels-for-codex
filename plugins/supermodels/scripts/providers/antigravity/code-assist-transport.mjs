@@ -13,6 +13,8 @@ const DEFAULT_RPM = 12;
 const DEFAULT_BURST = 2;
 const MIN_RATE_LIMIT_WAIT_MS = 8_000;
 const MAX_RATE_LIMIT_WAIT_MS = 90_000;
+const ONBOARD_POLL_ATTEMPTS = 24;
+const ONBOARD_POLL_INTERVAL_MS = 5_000;
 const CLIENT_METADATA = JSON.stringify({
   ideType: "IDE_UNSPECIFIED",
   platform: "PLATFORM_UNSPECIFIED",
@@ -30,6 +32,8 @@ export class AntigravityCodeAssistTransport {
     this.retryBaseDelayMs = options.retryBaseDelayMs ?? 2000;
     this.retryMinDelayMs = options.retryMinDelayMs ?? MIN_RATE_LIMIT_WAIT_MS;
     this.retryMaxDelayMs = options.retryMaxDelayMs ?? MAX_RATE_LIMIT_WAIT_MS;
+    this.onboardPollAttempts = options.onboardPollAttempts ?? ONBOARD_POLL_ATTEMPTS;
+    this.onboardPollIntervalMs = options.onboardPollIntervalMs ?? ONBOARD_POLL_INTERVAL_MS;
     this.rateLimiter = options.rateLimiter ?? new AsyncTokenBucket({
       rpm: numberFromEnv("SUPERMODELS_ANTIGRAVITY_RPM", options.rateLimitRpm ?? DEFAULT_RPM),
       burst: numberFromEnv("SUPERMODELS_ANTIGRAVITY_BURST", options.rateLimitBurst ?? DEFAULT_BURST),
@@ -84,7 +88,7 @@ export class AntigravityCodeAssistTransport {
             return await this.request(body, { ...options, retryAttempt: attempt + 1 }, refreshed);
           }
         }
-        throw new Error(`Cloud Code Assist request failed: ${response.status} ${bodyText}`);
+        throw new CodeAssistHttpError(response.status, bodyText);
       }
       const data = await response.json();
       return collectAntigravityResponse(data.response ?? data);
@@ -106,16 +110,31 @@ export class AntigravityCodeAssistTransport {
   }
 
   async discoverProject(options = {}) {
-    const body = await this.postJson("v1internal:loadCodeAssist", {}, options, false);
+    let body;
+    try {
+      body = await this.postJson("v1internal:loadCodeAssist", {}, options, false);
+    } catch (error) {
+      if (isAuthStatus(error)) {
+        throw error;
+      }
+      return "";
+    }
     if (body.status === "USER_NOT_ONBOARDED") {
       await this.postJson("v1internal:onboardUser", {}, options, false).catch(() => null);
-      for (let attempt = 0; attempt < 6; attempt += 1) {
-        await sleep(1000, options.signal);
-        const polled = await this.postJson("v1internal:loadCodeAssist", {}, options, false);
-        const project = extractProjectId(polled);
-        if (project) {
-          return project;
+      try {
+        for (let attempt = 0; attempt < this.onboardPollAttempts; attempt += 1) {
+          await sleep(this.onboardPollIntervalMs, options.signal);
+          const polled = await this.postJson("v1internal:loadCodeAssist", {}, options, false);
+          const project = extractProjectId(polled);
+          if (project) {
+            return project;
+          }
         }
+      } catch (error) {
+        if (isAuthStatus(error)) {
+          throw error;
+        }
+        return "";
       }
       return "";
     }
@@ -151,7 +170,7 @@ export class AntigravityCodeAssistTransport {
           return await this.postJson(path, body, { ...options, retryAttempt: attempt + 1 }, refreshed);
         }
       }
-      throw new Error(`Cloud Code Assist request failed: ${response.status} ${bodyText}`);
+      throw new CodeAssistHttpError(response.status, bodyText);
     }
     return await response.json();
   }
@@ -165,6 +184,15 @@ export class AntigravityCodeAssistTransport {
       return null;
     }
     return Math.max(parsed, this.retryMinDelayMs);
+  }
+}
+
+class CodeAssistHttpError extends Error {
+  constructor(status, bodyText) {
+    super(`Cloud Code Assist request failed: ${status} ${bodyText}`);
+    this.name = "CodeAssistHttpError";
+    this.status = status;
+    this.bodyText = bodyText;
   }
 }
 
@@ -419,6 +447,10 @@ function extractProjectId(body) {
 
 function isRetryableStatus(status) {
   return status === 429 || (status >= 500 && status < 600);
+}
+
+function isAuthStatus(error) {
+  return error?.status === 401 || error?.status === 403;
 }
 
 function retryDelayMs(response, bodyText, fallbackMs, attempt) {
