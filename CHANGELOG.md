@@ -34,6 +34,8 @@ Initial public release.
 - Claude Code direct reviews request Opus adaptive thinking with explicit `xhigh` effort and a 128k response budget for deeper tool-using reviews.
 - Claude Code streamed thinking blocks are preserved across tool turns, so adaptive-thinking reviews keep the context Anthropic requires after tool use.
 - Antigravity direct reviews request Code Assist dynamic thinking with `thinkingBudget: -1` and a 64k response budget.
+- Claude Code direct reviews retry transient Anthropic overloaded stream errors instead of failing the review immediately.
+- Antigravity direct reviews honor explicit short Code Assist quota reset windows beyond the fixed retry count, bounded by a retry window.
 - Claude Code direct reviews emit Anthropic-compatible `tool_result` blocks without provider-internal helper fields.
 - Claude Code streamed tool-call arguments prefer streamed deltas over stale block-start input, avoiding corrupted tool inputs if both shapes appear.
 - Claude Code credential loading accepts the hex-encoded macOS Keychain payload used by current Claude Code secure storage.

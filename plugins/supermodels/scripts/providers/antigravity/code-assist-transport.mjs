@@ -13,6 +13,7 @@ const DEFAULT_RPM = 12;
 const DEFAULT_BURST = 2;
 const MIN_RATE_LIMIT_WAIT_MS = 8_000;
 const MAX_RATE_LIMIT_WAIT_MS = 90_000;
+const MAX_RETRY_ELAPSED_MS = 5 * 60 * 1000;
 const ONBOARD_POLL_ATTEMPTS = 24;
 const ONBOARD_POLL_INTERVAL_MS = 5_000;
 const CLIENT_METADATA = JSON.stringify({
@@ -32,6 +33,8 @@ export class AntigravityCodeAssistTransport {
     this.retryBaseDelayMs = options.retryBaseDelayMs ?? 2000;
     this.retryMinDelayMs = options.retryMinDelayMs ?? MIN_RATE_LIMIT_WAIT_MS;
     this.retryMaxDelayMs = options.retryMaxDelayMs ?? MAX_RATE_LIMIT_WAIT_MS;
+    this.retryMaxElapsedMs = options.retryMaxElapsedMs ?? MAX_RETRY_ELAPSED_MS;
+    this.now = options.now ?? (() => Date.now());
     this.onboardPollAttempts = options.onboardPollAttempts ?? ONBOARD_POLL_ATTEMPTS;
     this.onboardPollIntervalMs = options.onboardPollIntervalMs ?? ONBOARD_POLL_INTERVAL_MS;
     this.rateLimiter = options.rateLimiter ?? new AsyncTokenBucket({
@@ -81,12 +84,15 @@ export class AntigravityCodeAssistTransport {
       if (!response.ok) {
         const bodyText = await response.text();
         const attempt = options.retryAttempt ?? 0;
-        if (isRetryableStatus(response.status) && attempt < this.maxRetries) {
-          const delayMs = this.retryDelayMs(response, bodyText, attempt);
-          if (delayMs !== null) {
-            await sleep(delayMs, signal.signal);
-            return await this.request(body, { ...options, retryAttempt: attempt + 1 }, refreshed);
-          }
+        const retryStartedAt = options.retryStartedAt ?? this.now();
+        const retry = this.retryDecision(response, bodyText, attempt, retryStartedAt);
+        if (retry) {
+          await sleep(retry.delayMs, signal.signal);
+          return await this.request(body, {
+            ...options,
+            retryAttempt: attempt + 1,
+            retryStartedAt,
+          }, refreshed);
         }
         throw new CodeAssistHttpError(response.status, bodyText);
       }
@@ -168,27 +174,38 @@ export class AntigravityCodeAssistTransport {
     if (!response.ok) {
       const bodyText = await response.text();
       const attempt = options.retryAttempt ?? 0;
-      if (isRetryableStatus(response.status) && attempt < this.maxRetries) {
-        const delayMs = this.retryDelayMs(response, bodyText, attempt);
-        if (delayMs !== null) {
-          await sleep(delayMs, options.signal);
-          return await this.postJson(path, body, { ...options, retryAttempt: attempt + 1 }, refreshed);
-        }
+      const retryStartedAt = options.retryStartedAt ?? this.now();
+      const retry = this.retryDecision(response, bodyText, attempt, retryStartedAt);
+      if (retry) {
+        await sleep(retry.delayMs, options.signal);
+        return await this.postJson(path, body, {
+          ...options,
+          retryAttempt: attempt + 1,
+          retryStartedAt,
+        }, refreshed);
       }
       throw new CodeAssistHttpError(response.status, bodyText);
     }
     return await response.json();
   }
 
-  retryDelayMs(response, bodyText, attempt) {
-    const parsed = retryDelayMs(response, bodyText, this.retryBaseDelayMs, attempt);
-    if (!Number.isFinite(parsed)) {
-      return this.retryMinDelayMs;
-    }
-    if (parsed > this.retryMaxDelayMs) {
+  retryDecision(response, bodyText, attempt, retryStartedAt) {
+    if (!isRetryableStatus(response.status)) {
       return null;
     }
-    return Math.max(parsed, this.retryMinDelayMs);
+    const parsed = parseRetryDelay(response, bodyText, this.retryBaseDelayMs, attempt);
+    const rawDelayMs = Number.isFinite(parsed.delayMs) ? parsed.delayMs : this.retryMinDelayMs;
+    const delayMs = Math.max(rawDelayMs, this.retryMinDelayMs);
+    if (delayMs > this.retryMaxDelayMs) {
+      return null;
+    }
+    if (attempt < this.maxRetries) {
+      return { delayMs };
+    }
+    if (parsed.explicit && this.now() - retryStartedAt + delayMs <= this.retryMaxElapsedMs) {
+      return { delayMs };
+    }
+    return null;
   }
 }
 
@@ -490,15 +507,17 @@ function isAuthStatus(error) {
   return error?.status === 401 || error?.status === 403;
 }
 
-function retryDelayMs(response, bodyText, fallbackMs, attempt) {
+function parseRetryDelay(response, bodyText, fallbackMs, attempt) {
   const header = response.headers.get("retry-after") ?? response.headers.get("Retry-After");
-  const headerSeconds = Number(header);
-  if (Number.isFinite(headerSeconds) && headerSeconds >= 0) {
-    return headerSeconds * 1000;
+  if (header !== null) {
+    const headerSeconds = Number(header);
+    if (Number.isFinite(headerSeconds) && headerSeconds >= 0) {
+      return { delayMs: headerSeconds * 1000, explicit: true };
+    }
   }
   const match = String(bodyText ?? "").match(/reset after\s+(\d+)\s*s/i);
   if (match) {
-    return Number(match[1]) * 1000;
+    return { delayMs: Number(match[1]) * 1000, explicit: true };
   }
   try {
     const body = JSON.parse(String(bodyText ?? "{}"));
@@ -507,14 +526,14 @@ function retryDelayMs(response, bodyText, fallbackMs, attempt) {
       if (typeof retryDelay === "string" && retryDelay.endsWith("s")) {
         const seconds = Number(retryDelay.slice(0, -1));
         if (Number.isFinite(seconds) && seconds >= 0) {
-          return seconds * 1000;
+          return { delayMs: seconds * 1000, explicit: true };
         }
       }
     }
   } catch {
     // Fall through to conservative backoff.
   }
-  return fallbackMs * (attempt + 1);
+  return { delayMs: fallbackMs * (attempt + 1), explicit: false };
 }
 
 function sleep(ms, signal) {

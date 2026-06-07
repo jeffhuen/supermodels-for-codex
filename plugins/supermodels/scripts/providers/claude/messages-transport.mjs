@@ -1,12 +1,18 @@
 const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
 const OAUTH_BETA = "oauth-2025-04-20";
+const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_RETRY_BASE_DELAY_MS = 1000;
+const DEFAULT_RETRY_MAX_DELAY_MS = 30_000;
 
 export class ClaudeOAuthMessagesTransport {
   constructor(options = {}) {
     this.credentials = options.credentials;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.url = options.url ?? process.env.SUPERMODELS_CLAUDE_MESSAGES_URL ?? ANTHROPIC_MESSAGES_URL;
+    this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.retryBaseDelayMs = options.retryBaseDelayMs ?? DEFAULT_RETRY_BASE_DELAY_MS;
+    this.retryMaxDelayMs = options.retryMaxDelayMs ?? DEFAULT_RETRY_MAX_DELAY_MS;
   }
 
   async messages(body, options = {}) {
@@ -17,6 +23,7 @@ export class ClaudeOAuthMessagesTransport {
     if (!this.credentials) {
       throw new Error("ClaudeOAuthMessagesTransport requires credentials.");
     }
+    const attempt = options.retryAttempt ?? 0;
     const timeoutMs = options.timeoutMs ?? 600_000;
     const signal = combineAbortSignals(options.signal, timeoutMs);
     try {
@@ -38,12 +45,33 @@ export class ClaudeOAuthMessagesTransport {
       }
       if (!response.ok) {
         const bodyText = await response.text();
+        if (isRetryableAnthropicStatus(response.status) && attempt < this.maxRetries) {
+          await sleep(retryDelayMs(response, this.retryBaseDelayMs, this.retryMaxDelayMs, attempt), signal.signal);
+          return await this.request(body, { ...options, retryAttempt: attempt + 1 }, refreshed);
+        }
         throw new Error(`Anthropic Messages request failed: ${response.status} ${bodyText}`);
       }
-      return collectClaudeMessageEvents(parseAnthropicSseLines((await response.text()).split(/\r?\n/)));
+      try {
+        return collectClaudeMessageEvents(parseAnthropicSseLines((await response.text()).split(/\r?\n/)));
+      } catch (error) {
+        if (isRetryableAnthropicStreamError(error) && attempt < this.maxRetries) {
+          await sleep(retryDelayMs(response, this.retryBaseDelayMs, this.retryMaxDelayMs, attempt), signal.signal);
+          return await this.request(body, { ...options, retryAttempt: attempt + 1 }, refreshed);
+        }
+        throw error;
+      }
     } finally {
       signal.cleanup();
     }
+  }
+}
+
+class AnthropicStreamError extends Error {
+  constructor(error) {
+    super(`Anthropic stream error: ${JSON.stringify(error)}`);
+    this.name = "AnthropicStreamError";
+    this.errorType = typeof error?.type === "string" ? error.type : "";
+    this.providerError = error;
   }
 }
 
@@ -162,7 +190,7 @@ export function collectClaudeMessageEvents(events) {
       continue;
     }
     if (kind === "error") {
-      throw new Error(`Anthropic stream error: ${JSON.stringify(event.error ?? event)}`);
+      throw new AnthropicStreamError(event.error ?? event);
     }
   }
 
@@ -219,6 +247,46 @@ function decodeArgs(value) {
   } catch {
     return {};
   }
+}
+
+function isRetryableAnthropicStatus(status) {
+  return status === 529 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+function isRetryableAnthropicStreamError(error) {
+  return error?.name === "AnthropicStreamError"
+    && ["overloaded_error", "api_error"].includes(error.errorType);
+}
+
+function retryDelayMs(response, fallbackMs, maxMs, attempt) {
+  const header = response.headers.get("retry-after") ?? response.headers.get("Retry-After");
+  if (header !== null) {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(seconds * 1000, maxMs);
+    }
+  }
+  const delay = fallbackMs * (attempt + 1);
+  return Math.min(Math.max(0, delay), maxMs);
+}
+
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new Error("Request aborted."));
+      return;
+    }
+    let timer;
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new Error("Request aborted."));
+    };
+    timer = setTimeout(() => {
+      signal?.removeEventListener?.("abort", onAbort);
+      resolve();
+    }, Math.max(0, ms));
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+  });
 }
 
 function combineAbortSignals(parentSignal, timeoutMs) {

@@ -261,6 +261,40 @@ test("ClaudeOAuthMessagesTransport surfaces 429 responses without blind retry", 
   assert.equal(calls, 1);
 });
 
+test("ClaudeOAuthMessagesTransport retries transient overloaded stream errors", async () => {
+  let calls = 0;
+  const transport = new ClaudeOAuthMessagesTransport({
+    credentials: { accessToken: async () => "access-token", forceRefresh: async () => {} },
+    retryBaseDelayMs: 0,
+    fetchImpl: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response([
+          "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}",
+          "",
+        ].join("\n"), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return new Response([
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"ok\"}}",
+        "",
+        "data: [DONE]",
+        "",
+      ].join("\n"), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    },
+  });
+
+  const response = await transport.messages({ model: "claude-test", messages: [] }, { timeoutMs: 5000 });
+
+  assert.equal(response.text, "ok");
+  assert.equal(calls, 2);
+});
+
 test("AntigravityCredentials reads fresh CLI token envelope", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "supermodels-agy-oauth-"));
   const file = path.join(dir, "antigravity-oauth-token");
@@ -938,6 +972,47 @@ test("AntigravityCodeAssistTransport retries retryable 429 responses", async () 
 
   assert.equal(response.text, "ok");
   assert.equal(generateCalls, 2);
+});
+
+test("AntigravityCodeAssistTransport honors explicit short reset windows beyond fixed retry count", async () => {
+  let generateCalls = 0;
+  const transport = new AntigravityCodeAssistTransport({
+    credentials: { accessToken: async () => "access-token", forceReload: () => {} },
+    projectId: "project-1",
+    rateLimiter: noRateLimit,
+    retryBaseDelayMs: 1,
+    retryMinDelayMs: 0,
+    retryMaxElapsedMs: 5_000,
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("v1internal:generateContent")) {
+        generateCalls += 1;
+        if (generateCalls <= 4) {
+          return new Response(JSON.stringify({
+            error: {
+              code: 429,
+              message: "You have exhausted your capacity on this model. Your quota will reset after 0s.",
+              status: "RESOURCE_EXHAUSTED",
+            },
+          }), { status: 429, headers: { "content-type": "application/json" } });
+        }
+      }
+      return new Response(JSON.stringify({
+        response: {
+          candidates: [{ content: { parts: [{ text: "ok" }] } }],
+          usageMetadata: {},
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+
+  const response = await transport.messages({
+    model: "gemini-3-flash-preview",
+    messages: [{ role: "user", content: [{ type: "text", text: "review" }] }],
+    tools: [],
+  });
+
+  assert.equal(response.text, "ok");
+  assert.equal(generateCalls, 5);
 });
 
 test("AntigravityCodeAssistTransport retries retryable project discovery 429 responses", async () => {
