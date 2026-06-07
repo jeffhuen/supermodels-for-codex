@@ -34,6 +34,8 @@ Initial public release.
 - Claude Code direct reviews request Opus adaptive thinking with a 128k response budget while leaving effort at Claude's default `high`; explicit `--effort` overrides are still honored.
 - Claude Code streamed thinking blocks are preserved across tool turns, so adaptive-thinking reviews keep the context Anthropic requires after tool use.
 - Claude Code direct reviews no longer combine adaptive thinking with forced `tool_choice`; required final/inspection turns are enforced by prompt instruction instead.
+- The shared review loop is not capped by a low fixed round count by default; provider timeout/cancellation now own runaway protection.
+- Mixed repository tool calls with an invalid `submit_review` now execute the repository tools before returning submit errors, so providers can satisfy evidence requirements in the same turn.
 - Antigravity direct reviews request Code Assist dynamic thinking with `thinkingBudget: -1` and a 64k response budget.
 - Claude Code direct reviews retry transient Anthropic overloaded stream errors instead of failing the review immediately.
 - Antigravity direct reviews honor explicit short Code Assist quota reset windows beyond the fixed retry count, bounded by a retry window.

@@ -237,6 +237,39 @@ test("runReviewAgent leaves a retry round after malformed forced submit_review",
   ]);
 });
 
+test("runReviewAgent default review loop is not capped at eight rounds", async () => {
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls < 10) {
+        return responseWithTool(`read_${this.calls}`, "read_file", { path: "runtime.mjs" });
+      }
+      return responseWithTool("submit_1", "submit_review", inconclusiveReview("long review completed"));
+    },
+  };
+  const fakeTools = {
+    schemas: [],
+    async execute(name) {
+      if (name === "read_file") {
+        return { ok: true, path: "runtime.mjs", content: "1: export {};" };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    minInspection: { diff: false, fileOrSearch: true },
+  });
+
+  assert.equal(result.verdict, "inconclusive");
+  assert.equal(result.rounds, 10);
+  assert.equal(result.toolUsage.read_file, 9);
+});
+
 test("runReviewAgent refuses shallow clean verdicts until multiple files or searches are inspected", async () => {
   const calls = [];
   const fakeTransport = {
@@ -293,7 +326,7 @@ test("runReviewAgent allows clean verdicts after two explicit file or search ins
   assert.equal(result.toolUsage.search, 1);
 });
 
-test("runReviewAgent prioritizes failed submit_review over mixed tool calls", async () => {
+test("runReviewAgent executes repository tools from mixed invalid submit turns", async () => {
   const executed = [];
   let secondRequest;
   const fakeTransport = {
@@ -341,13 +374,13 @@ test("runReviewAgent prioritizes failed submit_review over mixed tool calls", as
   });
 
   assert.equal(result.verdict, "inconclusive");
-  assert.deepEqual(executed, []);
+  assert.deepEqual(executed, ["read_file"]);
   const toolResults = secondRequest.messages
     .flatMap((message) => message.content ?? [])
     .filter((block) => block.type === "tool_result");
   assert.equal(toolResults.length, 2);
   assert.match(toolResults[0].content, /did not match the review schema/i);
-  assert.match(toolResults[1].content, /skipped/i);
+  assert.match(toolResults[1].content, /runtime\.mjs/i);
 });
 
 test("runReviewAgent passes cancellation signals to provider transports and tools", async () => {

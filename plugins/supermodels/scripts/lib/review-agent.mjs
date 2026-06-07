@@ -1,7 +1,7 @@
 import { REVIEW_RESULT_SCHEMA, normalizeStructuredReview } from "./review-schema.mjs";
 
 const DEFAULT_REVIEW_POLICY = Object.freeze({
-  maxRounds: 8,
+  maxRounds: Number.POSITIVE_INFINITY,
   forceAfterRounds: 5,
   claudeMaxTokens: 128_000,
   antigravityMaxTokens: 64_000,
@@ -160,9 +160,25 @@ export async function runReviewAgent(options = {}) {
         continue;
       }
 
-      const toolResults = [];
       const submitCall = toolCalls.find((call) => call.name === "submit_review");
       if (submitCall) {
+        const executedResults = new Map();
+        for (const call of toolCalls) {
+          if (call.name === "submit_review") {
+            continue;
+          }
+          executedResults.set(call.id, await executeToolCall({
+            call,
+            tools,
+            controller,
+            abort,
+            inspection,
+            toolUsage,
+            onEvent,
+            provider,
+          }));
+        }
+
         const submitted = handleSubmittedReview(submitCall, inspection, minInspection);
         if (submitted.done) {
           return {
@@ -172,17 +188,19 @@ export async function runReviewAgent(options = {}) {
             usage: response.usage ?? null,
           };
         }
+
+        const toolResults = [];
         for (const call of toolCalls) {
           if (call.id === submitCall.id) {
             toolResults.push(submitted.toolResult);
             continue;
           }
-          toolResults.push({
+          toolResults.push(executedResults.get(call.id) ?? {
             type: "tool_result",
             tool_use_id: call.id,
             content: JSON.stringify({
               ok: false,
-              error: "Tool call skipped because submit_review was present but invalid. Retry with either more repository inspection or a valid submit_review.",
+              error: "Additional submit_review calls skipped because another submit_review was already processed.",
             }),
           });
         }
@@ -190,32 +208,18 @@ export async function runReviewAgent(options = {}) {
         continue;
       }
 
+      const toolResults = [];
       for (const call of toolCalls) {
-        let result;
-        try {
-          result = await tools.execute(call.name, call.input ?? {}, {
-            controller,
-            signal: abort.signal,
-          });
-        } catch (error) {
-          result = {
-            ok: false,
-            error: error?.message || String(error),
-          };
-        }
-        throwIfCancelled(controller);
-        toolUsage[call.name] = (toolUsage[call.name] ?? 0) + 1;
-        updateInspection(inspection, call.name, result);
-        onEvent?.({
-          type: "tool_call",
-          message: `${provider} used ${call.name}`,
-          at: new Date().toISOString(),
-        });
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: call.id,
-          content: JSON.stringify(result),
-        });
+        toolResults.push(await executeToolCall({
+          call,
+          tools,
+          controller,
+          abort,
+          inspection,
+          toolUsage,
+          onEvent,
+          provider,
+        }));
       }
 
       if (toolResults.length) {
@@ -227,6 +231,34 @@ export async function runReviewAgent(options = {}) {
   }
 
   throw new Error(`Review did not complete after ${maxRounds} rounds.`);
+}
+
+async function executeToolCall({ call, tools, controller, abort, inspection, toolUsage, onEvent, provider }) {
+  let result;
+  try {
+    result = await tools.execute(call.name, call.input ?? {}, {
+      controller,
+      signal: abort.signal,
+    });
+  } catch (error) {
+    result = {
+      ok: false,
+      error: error?.message || String(error),
+    };
+  }
+  throwIfCancelled(controller);
+  toolUsage[call.name] = (toolUsage[call.name] ?? 0) + 1;
+  updateInspection(inspection, call.name, result);
+  onEvent?.({
+    type: "tool_call",
+    message: `${provider} used ${call.name}`,
+    at: new Date().toISOString(),
+  });
+  return {
+    type: "tool_result",
+    tool_use_id: call.id,
+    content: JSON.stringify(result),
+  };
 }
 
 function providerReasoningOptions(provider, options = {}) {
