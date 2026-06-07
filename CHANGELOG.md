@@ -34,6 +34,7 @@ Initial public release.
 - Claude Code credential loading accepts the hex-encoded macOS Keychain payload used by current Claude Code secure storage.
 - Claude Code token refresh writes macOS Keychain payloads back in the same hex-encoded form.
 - Claude Code readiness now validates the same direct OAuth credentials used by review transport, so stale CLI auth cannot fail mid-review.
+- Setup output now mirrors actual readiness for providers without setup hooks, avoiding contradictory provider setup/check status.
 - Antigravity project discovery matches the reference Code Assist behavior: non-auth discovery failures are non-fatal and onboarding polls use the reference bounds.
 - Antigravity project discovery only caches non-empty project ids, so a transient project-discovery failure can be retried by later requests.
 - Preloaded review context now fails explicitly when changed-file discovery fails, and unreadable snippets no longer satisfy the review inspection gate.

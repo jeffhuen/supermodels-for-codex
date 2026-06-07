@@ -156,6 +156,27 @@ test("setupProviders reports the same provider capabilities as readiness checks"
   });
 });
 
+test("setupProviders mirrors readiness for providers without setup hooks", async () => {
+  const output = await setupProviders({
+    claude: {
+      async check() {
+        return {
+          provider: "claude",
+          ready: false,
+          error: "direct auth invalid",
+        };
+      },
+      capabilities() {
+        return { review: true };
+      },
+    },
+  });
+
+  assert.equal(output.claude.setup.ready, false);
+  assert.equal(output.claude.setup.changed, false);
+  assert.equal(output.claude.check.ready, false);
+});
+
 test("normalizeProviderResult conservatively preserves raw output", () => {
   const normalized = normalizeProviderResult({
     provider: "claude",

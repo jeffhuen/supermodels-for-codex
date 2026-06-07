@@ -209,8 +209,9 @@ export async function checkProviders(adapters, options = {}) {
 export async function setupProviders(adapters, options = {}) {
   const entries = await Promise.all(
     Object.entries(adapters).map(async ([id, adapter]) => {
-      const setup = adapter.setup ? await adapter.setup(options) : { ready: true, changed: false };
+      const setupResult = adapter.setup ? await adapter.setup(options) : null;
       const check = await adapter.check(options);
+      const setup = setupResult ?? { ready: Boolean(check.ready), changed: false };
       return [id, {
         setup,
         check: {
