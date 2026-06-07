@@ -168,7 +168,6 @@ export async function runReviewAgent(options = {}) {
         toolResults.push({
           type: "tool_result",
           tool_use_id: call.id,
-          name: call.name,
           content: JSON.stringify(result),
         });
       }
@@ -191,7 +190,6 @@ function handleSubmittedReview(call, inspection, minInspection) {
       toolResult: {
         type: "tool_result",
         tool_use_id: call.id,
-        name: call.name,
         content: JSON.stringify({
           ok: false,
           error: "submit_review refused: inspect the diff and at least one relevant file or search result before submitting final findings.",
@@ -207,7 +205,6 @@ function handleSubmittedReview(call, inspection, minInspection) {
       toolResult: {
         type: "tool_result",
         tool_use_id: call.id,
-        name: call.name,
         content: JSON.stringify({
           ok: false,
           error: "submit_review input did not match the review schema. Retry with all required fields.",

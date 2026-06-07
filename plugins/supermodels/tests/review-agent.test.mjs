@@ -101,6 +101,43 @@ test("runReviewAgent returns structured review after diff and file inspection", 
   assert.equal(result.toolUsage.read_file, 1);
 });
 
+test("runReviewAgent sends Anthropic-compatible tool_result blocks without names", async () => {
+  const calls = [];
+  const fakeTransport = {
+    async messages(body) {
+      calls.push(body);
+      if (calls.length === 1) {
+        return responseWithTool("read_1", "read_file", { path: "runtime.mjs" });
+      }
+      return responseWithTool("submit_1", "submit_review", cleanReview("tool result shape checked"));
+    },
+  };
+  const fakeTools = {
+    schemas: [],
+    async execute(name) {
+      if (name === "read_file") {
+        return { ok: true, path: "runtime.mjs", content: "1: export {};" };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+
+  await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    minInspection: { diff: false, fileOrSearch: true },
+    maxRounds: 2,
+  });
+
+  const toolResult = calls[1].messages
+    .flatMap((message) => message.content ?? [])
+    .find((block) => block.type === "tool_result");
+  assert.equal(toolResult.type, "tool_result");
+  assert.equal(toolResult.tool_use_id, "read_1");
+  assert.equal(Object.hasOwn(toolResult, "name"), false);
+});
+
 test("runReviewAgent forces submit_review only after required inspection is satisfied", async () => {
   const seenToolChoices = [];
   const fakeTransport = {
