@@ -3,6 +3,7 @@ import { REVIEW_RESULT_SCHEMA, normalizeStructuredReview } from "./review-schema
 const DEFAULT_REVIEW_POLICY = Object.freeze({
   maxRounds: Number.POSITIVE_INFINITY,
   forceAfterRounds: Number.POSITIVE_INFINITY,
+  antigravityForceAfterSatisfiedRounds: 8,
   claudeMaxTokens: 128_000,
   antigravityMaxTokens: 64_000,
   claudeThinking: Object.freeze({ type: "adaptive", display: "summarized" }),
@@ -37,6 +38,8 @@ export async function runReviewAgent(options = {}) {
     ?? (options.maxRounds === undefined
       ? DEFAULT_REVIEW_POLICY.forceAfterRounds
       : Math.max(1, maxRounds - 1));
+  const forceAfterSatisfiedRounds = options.forceAfterSatisfiedRounds
+    ?? providerForceAfterSatisfiedRounds(provider);
   const minInspection = {
     ...DEFAULT_REVIEW_POLICY.minInspection,
     ...(options.minInspection ?? {}),
@@ -59,12 +62,15 @@ export async function runReviewAgent(options = {}) {
     diff: false,
     fileOrSearch: false,
     explicitFileOrSearchToolCalls: 0,
+    explicitFileOrSearchTargets: [],
+    explicitFileOrSearchTargetSet: new Set(),
   };
   const schemas = [
     ...(tools.schemas ?? []),
     submitReviewToolSchema(),
   ];
   const reviewStartedAt = Date.now();
+  let inspectionSatisfiedAtRound = null;
 
   try {
     if (preloadTools.length) {
@@ -104,8 +110,19 @@ export async function runReviewAgent(options = {}) {
 
     for (let round = 1; round <= maxRounds; round += 1) {
       throwIfCancelled(controller);
-      const shouldForceSubmit = inspectionSatisfied(inspection, minInspection)
-        && round >= forceAfterRounds;
+      const satisfied = inspectionSatisfied(inspection, minInspection);
+      if (satisfied && inspectionSatisfiedAtRound === null) {
+        inspectionSatisfiedAtRound = round;
+      }
+      const shouldForceSubmit = satisfied
+        && (
+          round >= forceAfterRounds
+          || (
+            Number.isFinite(forceAfterSatisfiedRounds)
+            && inspectionSatisfiedAtRound !== null
+            && round - inspectionSatisfiedAtRound >= forceAfterSatisfiedRounds
+          )
+        );
       const forcedInspectionTool = forceInspectionTools
         ? nextForcedInspectionTool(inspection, minInspection)
         : "";
@@ -250,7 +267,7 @@ async function executeToolCall({ call, tools, controller, abort, inspection, too
   }
   throwIfCancelled(controller);
   toolUsage[call.name] = (toolUsage[call.name] ?? 0) + 1;
-  updateInspection(inspection, call.name, result);
+  updateInspection(inspection, call.name, result, call.input ?? {});
   onEvent?.({
     type: "tool_call",
     message: `${provider} used ${call.name}`,
@@ -295,6 +312,13 @@ function providerMaxTokens(provider) {
   return DEFAULT_REVIEW_POLICY.antigravityMaxTokens;
 }
 
+function providerForceAfterSatisfiedRounds(provider) {
+  if (provider === "antigravity") {
+    return DEFAULT_REVIEW_POLICY.antigravityForceAfterSatisfiedRounds;
+  }
+  return Number.POSITIVE_INFINITY;
+}
+
 function remainingReviewTimeoutMs(timeoutMs, startedAt, provider) {
   if (!Number.isFinite(timeoutMs)) {
     return timeoutMs;
@@ -307,6 +331,7 @@ function remainingReviewTimeoutMs(timeoutMs, startedAt, provider) {
 }
 
 function handleSubmittedReview(call, inspection, minInspection) {
+  const visibleInspection = visibleInspectionState(inspection);
   if (!inspectionSatisfied(inspection, minInspection)) {
     const requiredExplicitCalls = Number(minInspection.explicitFileOrSearchToolCalls ?? 0);
     return {
@@ -319,7 +344,7 @@ function handleSubmittedReview(call, inspection, minInspection) {
           error: requiredExplicitCalls > 0
             ? `submit_review refused: inspect the diff and use read_file or search on at least ${requiredExplicitCalls} relevant files/search targets before submitting final findings.`
             : "submit_review refused: inspect the diff and at least one relevant file or search result before submitting final findings.",
-          inspection,
+          inspection: visibleInspection,
         }),
       },
     };
@@ -347,7 +372,7 @@ function handleSubmittedReview(call, inspection, minInspection) {
         content: JSON.stringify({
           ok: false,
           error: "submit_review refused: clean verdict requires more repository inspection. Use read_file or search on at least two relevant files/search targets before returning clean.",
-          inspection,
+          inspection: visibleInspection,
           required: {
             cleanExplicitFileOrSearchToolCalls: minInspection.cleanExplicitFileOrSearchToolCalls,
           },
@@ -362,7 +387,7 @@ function inspectionSatisfied(inspection, required) {
   const requiredExplicitCalls = Number(required.explicitFileOrSearchToolCalls ?? 0);
   return (!required.diff || inspection.diff)
     && (!required.fileOrSearch || inspection.fileOrSearch)
-    && inspection.explicitFileOrSearchToolCalls >= requiredExplicitCalls;
+    && distinctInspectionCount(inspection) >= requiredExplicitCalls;
 }
 
 function nextForcedInspectionTool(inspection, required) {
@@ -372,13 +397,13 @@ function nextForcedInspectionTool(inspection, required) {
   if (required.fileOrSearch && !inspection.fileOrSearch) {
     return "search";
   }
-  if (inspection.explicitFileOrSearchToolCalls < Number(required.explicitFileOrSearchToolCalls ?? 0)) {
+  if (distinctInspectionCount(inspection) < Number(required.explicitFileOrSearchToolCalls ?? 0)) {
     return "search";
   }
   return "";
 }
 
-function updateInspection(inspection, name, result) {
+function updateInspection(inspection, name, result, input = {}) {
   if (!result?.ok) {
     return;
   }
@@ -390,14 +415,68 @@ function updateInspection(inspection, name, result) {
     inspection.diff = true;
   }
   if (["read_file", "search"].includes(name)) {
+    const target = inspectionTargetKey(name, result, input);
+    if (!target || !resultHasInspectionContent(name, result)) {
+      return;
+    }
     inspection.fileOrSearch = true;
-    inspection.explicitFileOrSearchToolCalls += 1;
+    if (!inspection.explicitFileOrSearchTargetSet.has(target)) {
+      inspection.explicitFileOrSearchTargetSet.add(target);
+      inspection.explicitFileOrSearchTargets.push(target);
+      inspection.explicitFileOrSearchToolCalls = inspection.explicitFileOrSearchTargets.length;
+    }
   }
 }
 
 function cleanInspectionSatisfied(inspection, required) {
   const requiredExplicitCalls = Number(required.cleanExplicitFileOrSearchToolCalls ?? 0);
-  return inspection.explicitFileOrSearchToolCalls >= requiredExplicitCalls;
+  return distinctInspectionCount(inspection) >= requiredExplicitCalls;
+}
+
+function distinctInspectionCount(inspection) {
+  return inspection.explicitFileOrSearchTargets?.length
+    ?? inspection.explicitFileOrSearchToolCalls
+    ?? 0;
+}
+
+function visibleInspectionState(inspection) {
+  return {
+    diff: Boolean(inspection.diff),
+    fileOrSearch: Boolean(inspection.fileOrSearch),
+    explicitFileOrSearchToolCalls: distinctInspectionCount(inspection),
+    explicitFileOrSearchTargets: inspection.explicitFileOrSearchTargets ?? [],
+  };
+}
+
+function resultHasInspectionContent(name, result) {
+  if (name === "read_file") {
+    return Boolean(String(result.content ?? "").trim());
+  }
+  if (name === "search") {
+    const output = String(result.output ?? "").trim();
+    if (output) {
+      return true;
+    }
+    return Array.isArray(result.matches) && result.matches.length > 0;
+  }
+  return true;
+}
+
+function inspectionTargetKey(name, result, input) {
+  if (name === "read_file") {
+    const filePath = String(result.path ?? input.path ?? "").trim();
+    if (!filePath) {
+      return "";
+    }
+    const start = Number(result.start_line ?? input.start_line ?? 1);
+    const end = Number(result.end_line ?? input.end_line ?? start);
+    return `${name}:${filePath}:${Number.isFinite(start) ? start : 1}:${Number.isFinite(end) ? end : start}`;
+  }
+  if (name === "search") {
+    const query = String(result.query ?? input.query ?? "").trim().replace(/\s+/g, " ");
+    return query ? `${name}:${query}` : "";
+  }
+  return "";
 }
 
 function submitReviewToolSchema() {

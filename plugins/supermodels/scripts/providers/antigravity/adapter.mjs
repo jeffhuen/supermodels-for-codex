@@ -216,6 +216,7 @@ async function runAntigravityReview(input, options = {}, factoryOptions = {}) {
     model,
     maxRounds: factoryOptions.maxRounds,
     forceAfterRounds: factoryOptions.forceAfterRounds,
+    forceAfterSatisfiedRounds: factoryOptions.forceAfterSatisfiedRounds,
     forceInspectionTools: factoryOptions.forceInspectionTools,
     preloadTools: factoryOptions.preloadTools ?? ["get_review_context"],
     timeoutMs: options.timeoutMs ?? 20 * 60 * 1000,

@@ -11,7 +11,7 @@ Initial public release.
 - Direct review transports for Claude Code OAuth and AGY/Code Assist OAuth, plus native CLI adapters for task delegation.
 - Deterministic preloaded review context for Claude Code and Antigravity reviews, including diff, changed files, and bounded snippets from changed files.
 - Preloaded review context is treated as orientation only; providers must still perform explicit repository inspection with `read_file` or `search` before final review submission.
-- Review tools read requested line ranges with bounded streaming reads instead of loading whole files, so later line ranges in large files remain inspectable without memory spikes.
+- Review tools read requested line ranges with bounded streaming reads instead of loading whole files, so later line ranges and oversized single-line prefixes remain inspectable without memory spikes.
 - Deleted files no longer consume changed-file snippet budget for preloaded review context.
 - Invalid `--base` refs now fail explicitly before diff or changed-file collection.
 - Explicit task context briefs are persisted with worker jobs and included in provider task prompts, so non-git session/planning context reaches delegated tasks.
@@ -44,7 +44,8 @@ Initial public release.
 - Claude Code direct reviews no longer combine adaptive thinking with forced `tool_choice`; required final/inspection turns are enforced by prompt instruction instead.
 - The shared review loop is not capped by a low fixed round count by default; provider timeout/cancellation now own runaway protection.
 - Review provider timeouts are enforced as aggregate wall-clock budgets across the whole review loop, not just as per-request timeouts.
-- The shared review loop rejects final submissions until providers have made enough explicit file/search tool calls, preventing a shallow review from completing only because preloaded context was available.
+- The shared review loop rejects final submissions until providers have made enough distinct meaningful file/search inspections, preventing a shallow review from completing only because preloaded context or duplicate tool calls were available.
+- Antigravity direct reviews force structured synthesis after the evidence gate has been satisfied and additional analysis rounds have elapsed, preventing AGY from tool-calling until timeout.
 - Mixed repository tool calls with an invalid `submit_review` now execute the repository tools before returning submit errors, so providers can satisfy evidence requirements in the same turn.
 - Antigravity direct reviews request Code Assist dynamic thinking with `thinkingBudget: -1` and a 64k response budget.
 - Claude Code direct reviews retry transient Anthropic overloaded stream errors instead of failing the review immediately.

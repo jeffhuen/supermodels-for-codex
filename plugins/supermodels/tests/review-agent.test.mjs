@@ -254,16 +254,16 @@ test("runReviewAgent default review loop is not capped at eight rounds", async (
     async messages() {
       this.calls += 1;
       if (this.calls < 10) {
-        return responseWithTool(`read_${this.calls}`, "read_file", { path: "runtime.mjs" });
+        return responseWithTool(`read_${this.calls}`, "read_file", { path: `runtime-${this.calls}.mjs` });
       }
       return responseWithTool("submit_1", "submit_review", inconclusiveReview("long review completed"));
     },
   };
   const fakeTools = {
     schemas: [],
-    async execute(name) {
+    async execute(name, input) {
       if (name === "read_file") {
-        return { ok: true, path: "runtime.mjs", content: "1: export {};" };
+        return { ok: true, path: input.path, content: "1: export {};" };
       }
       throw new Error(`unexpected tool ${name}`);
     },
@@ -279,6 +279,44 @@ test("runReviewAgent default review loop is not capped at eight rounds", async (
   assert.equal(result.verdict, "inconclusive");
   assert.equal(result.rounds, 10);
   assert.equal(result.toolUsage.read_file, 9);
+});
+
+test("runReviewAgent forces Antigravity synthesis after evidence is satisfied", async () => {
+  const seenToolChoices = [];
+  const fakeTransport = {
+    calls: 0,
+    async messages(body) {
+      this.calls += 1;
+      seenToolChoices.push(body.tool_choice ?? null);
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", { path: "a.mjs" });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", { query: "runReviewAgent" });
+      }
+      if (this.calls < 12) {
+        return responseWithTool(`read_${this.calls}`, "read_file", { path: `extra-${this.calls}.mjs` });
+      }
+      assert.deepEqual(body.tool_choice, { type: "tool", name: "submit_review" });
+      return responseWithTool("submit_1", "submit_review", inconclusiveReview("forced synthesis"));
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "antigravity",
+    transport: fakeTransport,
+    tools: reviewToolsForDiffAndFiles(),
+    forceAfterRounds: Number.POSITIVE_INFINITY,
+    maxRounds: 12,
+  });
+
+  assert.equal(result.verdict, "inconclusive");
+  assert.equal(result.rounds, 12);
+  assert.deepEqual(seenToolChoices.slice(0, 11), Array.from({ length: 11 }, () => null));
+  assert.deepEqual(seenToolChoices[11], { type: "tool", name: "submit_review" });
 });
 
 test("runReviewAgent uses timeout as an aggregate review budget", async () => {
@@ -303,6 +341,48 @@ test("runReviewAgent uses timeout as an aggregate review budget", async () => {
 
   assert.equal(seenTimeouts.length, 1);
   assert(seenTimeouts[0] > 0 && seenTimeouts[0] <= 50);
+});
+
+test("runReviewAgent requires distinct meaningful file or search inspection", async () => {
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", { path: "same.mjs" });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("read_2", "read_file", { path: "same.mjs" });
+      }
+      return responseWithTool("submit_1", "submit_review", inconclusiveReview("duplicate reads"));
+    },
+  };
+  const fakeTools = {
+    schemas: [],
+    async execute(name, input) {
+      if (name === "get_diff") {
+        return { ok: true, diffSummary: "1 file changed", diff: "diff --git a/a b/a" };
+      }
+      if (name === "read_file") {
+        return { ok: true, path: input.path, start_line: 1, end_line: 1, content: "1: export {};" };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+
+  await assert.rejects(
+    () => runReviewAgent({
+      provider: "claude",
+      transport: fakeTransport,
+      tools: fakeTools,
+      maxRounds: 4,
+      forceAfterRounds: Number.POSITIVE_INFINITY,
+    }),
+    /review did not complete/i,
+  );
 });
 
 test("runReviewAgent refuses shallow clean verdicts until multiple files or searches are inspected", async () => {

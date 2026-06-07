@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { collectGitContext } from "./git.mjs";
 import { runCommand } from "./process.mjs";
+import { decodeUtf8Prefix } from "./text.mjs";
 
 const DEFAULT_MAX_FILE_BYTES = 80_000;
 const DEFAULT_MAX_TOOL_BYTES = 120_000;
@@ -324,6 +325,14 @@ async function readLineRangeWithinLimit(absolutePath, options) {
       const separatorBytes = lines.length ? 1 : 0;
       const renderedBytes = Buffer.byteLength(rendered, "utf8");
       if (outputBytes + separatorBytes + renderedBytes > options.maxBytes) {
+        const remainingLineBytes = Math.max(0, options.maxBytes - outputBytes - separatorBytes);
+        if (remainingLineBytes > 0) {
+          const partial = decodeUtf8Prefix(Buffer.from(rendered, "utf8"), remainingLineBytes);
+          if (partial) {
+            lines.push(partial);
+            lastLine = lineNumber;
+          }
+        }
         truncated = true;
         return "truncated";
       }

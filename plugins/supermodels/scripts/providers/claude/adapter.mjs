@@ -277,6 +277,7 @@ async function runClaudeReview(input, options = {}, factoryOptions = {}) {
     effort: options.effort,
     maxRounds: factoryOptions.maxRounds,
     forceAfterRounds: factoryOptions.forceAfterRounds,
+    forceAfterSatisfiedRounds: factoryOptions.forceAfterSatisfiedRounds,
     forceInspectionTools: factoryOptions.forceInspectionTools,
     preloadTools: factoryOptions.preloadTools ?? ["get_review_context"],
     timeoutMs: options.timeoutMs ?? 20 * 60 * 1000,
