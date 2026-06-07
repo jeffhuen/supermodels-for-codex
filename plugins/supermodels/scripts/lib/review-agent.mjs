@@ -454,7 +454,7 @@ function resultHasInspectionContent(name, result) {
   }
   if (name === "search") {
     const output = String(result.output ?? "").trim();
-    if (output) {
+    if (output && output !== "(no matches)") {
       return true;
     }
     return Array.isArray(result.matches) && result.matches.length > 0;

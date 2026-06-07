@@ -385,6 +385,51 @@ test("runReviewAgent requires distinct meaningful file or search inspection", as
   );
 });
 
+test("runReviewAgent does not count no-match searches as meaningful inspection", async () => {
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("search_1", "search", { query: "definitelyAbsentSymbol" });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("read_1", "read_file", { path: "a.mjs" });
+      }
+      return responseWithTool("submit_1", "submit_review", inconclusiveReview("one no-match search and one read"));
+    },
+  };
+  const fakeTools = {
+    schemas: [],
+    async execute(name, input) {
+      if (name === "get_diff") {
+        return { ok: true, diffSummary: "1 file changed", diff: "diff --git a/a b/a" };
+      }
+      if (name === "search") {
+        return { ok: true, query: input.query, output: "(no matches)" };
+      }
+      if (name === "read_file") {
+        return { ok: true, path: input.path, content: "1: export {};" };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+
+  await assert.rejects(
+    () => runReviewAgent({
+      provider: "claude",
+      transport: fakeTransport,
+      tools: fakeTools,
+      maxRounds: 4,
+      forceAfterRounds: Number.POSITIVE_INFINITY,
+    }),
+    /review did not complete/i,
+  );
+});
+
 test("runReviewAgent refuses shallow clean verdicts until multiple files or searches are inspected", async () => {
   const calls = [];
   const fakeTransport = {
