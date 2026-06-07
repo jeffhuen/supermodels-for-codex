@@ -3,8 +3,7 @@ import { REVIEW_RESULT_SCHEMA, normalizeStructuredReview } from "./review-schema
 const DEFAULT_REVIEW_POLICY = Object.freeze({
   maxRounds: Number.POSITIVE_INFINITY,
   forceAfterRounds: Number.POSITIVE_INFINITY,
-  antigravityReviewForceAfterSatisfiedRounds: 3,
-  antigravityAdversarialForceAfterSatisfiedRounds: 8,
+  forceAfterSatisfiedRounds: Number.POSITIVE_INFINITY,
   claudeMaxTokens: 128_000,
   antigravityMaxTokens: 64_000,
   claudeThinking: Object.freeze({ type: "adaptive", display: "summarized" }),
@@ -35,12 +34,9 @@ export async function runReviewAgent(options = {}) {
   } = options;
   const maxTokens = options.maxTokens ?? providerMaxTokens(provider);
   const maxRounds = options.maxRounds ?? DEFAULT_REVIEW_POLICY.maxRounds;
-  const forceAfterRounds = options.forceAfterRounds
-    ?? (options.maxRounds === undefined
-      ? DEFAULT_REVIEW_POLICY.forceAfterRounds
-      : Math.max(1, maxRounds - 1));
+  const forceAfterRounds = options.forceAfterRounds ?? DEFAULT_REVIEW_POLICY.forceAfterRounds;
   const forceAfterSatisfiedRounds = options.forceAfterSatisfiedRounds
-    ?? providerForceAfterSatisfiedRounds(provider, mode);
+    ?? DEFAULT_REVIEW_POLICY.forceAfterSatisfiedRounds;
   const minInspection = {
     ...DEFAULT_REVIEW_POLICY.minInspection,
     ...(options.minInspection ?? {}),
@@ -72,6 +68,7 @@ export async function runReviewAgent(options = {}) {
   ];
   const reviewStartedAt = Date.now();
   let inspectionSatisfiedAtRound = null;
+  let cumulativeUsage = null;
   const reasoningOptions = providerReasoningOptions(provider, options);
 
   try {
@@ -160,6 +157,7 @@ export async function runReviewAgent(options = {}) {
         signal: abort.signal,
         timeoutMs: remainingReviewTimeoutMs(timeoutMs, reviewStartedAt, provider),
       });
+      cumulativeUsage = mergeUsage(cumulativeUsage, response.usage);
       throwIfCancelled(controller);
 
       if (Array.isArray(response.content) && response.content.length) {
@@ -205,7 +203,7 @@ export async function runReviewAgent(options = {}) {
             ...submitted.review,
             toolUsage,
             rounds: round,
-            usage: response.usage ?? null,
+            usage: cumulativeUsage,
             reviewConfig: reviewConfigMetadata({
               provider,
               model,
@@ -339,15 +337,6 @@ function providerMaxTokens(provider) {
   return DEFAULT_REVIEW_POLICY.antigravityMaxTokens;
 }
 
-function providerForceAfterSatisfiedRounds(provider, mode) {
-  if (provider === "antigravity") {
-    return mode === "adversarial-review"
-      ? DEFAULT_REVIEW_POLICY.antigravityAdversarialForceAfterSatisfiedRounds
-      : DEFAULT_REVIEW_POLICY.antigravityReviewForceAfterSatisfiedRounds;
-  }
-  return Number.POSITIVE_INFINITY;
-}
-
 function remainingReviewTimeoutMs(timeoutMs, startedAt, provider) {
   if (!Number.isFinite(timeoutMs)) {
     return timeoutMs;
@@ -357,6 +346,28 @@ function remainingReviewTimeoutMs(timeoutMs, startedAt, provider) {
     throw new Error(`${provider} review timed out before completion after ${timeoutMs}ms.`);
   }
   return remaining;
+}
+
+function mergeUsage(total, next) {
+  if (!next || typeof next !== "object" || Array.isArray(next)) {
+    return total;
+  }
+  const merged = total && typeof total === "object" && !Array.isArray(total)
+    ? { ...total }
+    : {};
+  for (const [key, value] of Object.entries(next)) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      const previous = typeof merged[key] === "number" && Number.isFinite(merged[key])
+        ? merged[key]
+        : 0;
+      merged[key] = previous + value;
+    } else if (value && typeof value === "object" && !Array.isArray(value)) {
+      merged[key] = mergeUsage(merged[key], value);
+    } else if (merged[key] === undefined) {
+      merged[key] = value;
+    }
+  }
+  return merged;
 }
 
 function handleSubmittedReview(call, inspection, minInspection) {

@@ -183,6 +183,7 @@ test("runReviewAgent forces submit_review only after required inspection is sati
     tools: fakeTools,
     focus: "review lifecycle changes",
     minInspection: { explicitFileOrSearchToolCalls: 1 },
+    forceAfterRounds: 3,
     maxRounds: 3,
   });
 
@@ -236,6 +237,7 @@ test("runReviewAgent leaves a retry round after malformed forced submit_review",
     transport: fakeTransport,
     tools: fakeTools,
     minInspection: { explicitFileOrSearchToolCalls: 1 },
+    forceAfterRounds: 3,
     maxRounds: 4,
   });
 
@@ -281,7 +283,7 @@ test("runReviewAgent default review loop is not capped at eight rounds", async (
   assert.equal(result.toolUsage.read_file, 9);
 });
 
-test("runReviewAgent forces Antigravity synthesis after evidence is satisfied", async () => {
+test("runReviewAgent lets normal Antigravity reviews submit when the model is done", async () => {
   const seenToolChoices = [];
   const fakeTransport = {
     calls: 0,
@@ -297,10 +299,9 @@ test("runReviewAgent forces Antigravity synthesis after evidence is satisfied", 
       if (this.calls === 3) {
         return responseWithTool("search_1", "search", { query: "runReviewAgent" });
       }
-      if (this.calls < 7) {
+      if (this.calls < 10) {
         return responseWithTool(`read_${this.calls}`, "read_file", { path: `extra-${this.calls}.mjs` });
       }
-      assert.deepEqual(body.tool_choice, { type: "tool", name: "submit_review" });
       return responseWithTool("submit_1", "submit_review", inconclusiveReview("forced synthesis"));
     },
   };
@@ -309,17 +310,15 @@ test("runReviewAgent forces Antigravity synthesis after evidence is satisfied", 
     provider: "antigravity",
     transport: fakeTransport,
     tools: reviewToolsForDiffAndFiles(),
-    forceAfterRounds: Number.POSITIVE_INFINITY,
-    maxRounds: 7,
+    maxRounds: 10,
   });
 
   assert.equal(result.verdict, "inconclusive");
-  assert.equal(result.rounds, 7);
-  assert.deepEqual(seenToolChoices.slice(0, 6), Array.from({ length: 6 }, () => null));
-  assert.deepEqual(seenToolChoices[6], { type: "tool", name: "submit_review" });
+  assert.equal(result.rounds, 10);
+  assert.deepEqual(seenToolChoices, Array.from({ length: 10 }, () => null));
 });
 
-test("runReviewAgent keeps longer Antigravity synthesis budget for adversarial review", async () => {
+test("runReviewAgent keeps adversarial Antigravity reviews model-led by default", async () => {
   const seenToolChoices = [];
   const fakeTransport = {
     calls: 0,
@@ -338,7 +337,6 @@ test("runReviewAgent keeps longer Antigravity synthesis budget for adversarial r
       if (this.calls < 12) {
         return responseWithTool(`read_${this.calls}`, "read_file", { path: `extra-${this.calls}.mjs` });
       }
-      assert.deepEqual(body.tool_choice, { type: "tool", name: "submit_review" });
       return responseWithTool("submit_1", "submit_review", inconclusiveReview("adversarial forced synthesis"));
     },
   };
@@ -348,14 +346,51 @@ test("runReviewAgent keeps longer Antigravity synthesis budget for adversarial r
     transport: fakeTransport,
     tools: reviewToolsForDiffAndFiles(),
     mode: "adversarial-review",
-    forceAfterRounds: Number.POSITIVE_INFINITY,
     maxRounds: 12,
   });
 
   assert.equal(result.verdict, "inconclusive");
   assert.equal(result.rounds, 12);
-  assert.deepEqual(seenToolChoices.slice(0, 11), Array.from({ length: 11 }, () => null));
-  assert.deepEqual(seenToolChoices[11], { type: "tool", name: "submit_review" });
+  assert.deepEqual(seenToolChoices, Array.from({ length: 12 }, () => null));
+});
+
+test("runReviewAgent aggregates usage across every model turn", async () => {
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return {
+          ...responseWithTool("read_1", "read_file", { path: "a.mjs" }),
+          usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+        };
+      }
+      if (this.calls === 2) {
+        return {
+          ...responseWithTool("search_1", "search", { query: "runReviewAgent" }),
+          usage: { input_tokens: 20, output_tokens: 3, total_tokens: 23 },
+        };
+      }
+      return {
+        ...responseWithTool("submit_1", "submit_review", inconclusiveReview("usage checked")),
+        usage: { input_tokens: 30, output_tokens: 4, total_tokens: 34 },
+      };
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "antigravity",
+    transport: fakeTransport,
+    tools: reviewToolsForDiffAndFiles(),
+    minInspection: { diff: false, fileOrSearch: true, explicitFileOrSearchToolCalls: 2 },
+    maxRounds: 3,
+  });
+
+  assert.deepEqual(result.usage, {
+    input_tokens: 60,
+    output_tokens: 9,
+    total_tokens: 69,
+  });
 });
 
 test("runReviewAgent uses timeout as an aggregate review budget", async () => {
