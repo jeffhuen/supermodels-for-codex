@@ -33,13 +33,13 @@ export function createClaudeAdapter(factoryOptions = {}) {
       nativeInterrupt: false,
       background: "worker",
     }),
-    check,
+    check: (options) => check(options, factoryOptions),
     review: (input, options) => runClaudeReview(input, options, factoryOptions),
     task: runClaudePrompt,
   };
 }
 
-export async function check(options = {}) {
+export async function check(options = {}, factoryOptions = {}) {
   const binPath = await findExecutable("claude", options);
   if (!binPath) {
     return {
@@ -57,7 +57,23 @@ export async function check(options = {}) {
   const version = await runCommand({ bin: binPath, args: ["--version"] }, { timeoutMs: 5000 });
   const auth = await runCommand({ bin: binPath, args: ["auth", "status"] }, { timeoutMs: 5000 });
   const authInfo = parseClaudeAuth(auth.stdout);
-  const ready = auth.exitCode === 0 && authInfo.loggedIn !== false;
+  const cliReady = auth.exitCode === 0 && authInfo.loggedIn !== false;
+  let ready = cliReady;
+  let error = cliReady ? "" : "Claude Code is installed but not authenticated.";
+  if (cliReady) {
+    try {
+      const credentials = factoryOptions.credentials
+        ?? new ClaudeCodeCredentials(factoryOptions.credentialsOptions ?? {});
+      await credentials.accessToken();
+    } catch (directAuthError) {
+      ready = false;
+      error = [
+        "Claude Code OAuth credentials are not usable for direct reviews.",
+        "Run `claude auth login` to refresh Claude Code auth, then rerun `$supermodels:setup`.",
+        directAuthError?.message ? `Details: ${directAuthError.message}` : "",
+      ].filter(Boolean).join(" ");
+    }
+  }
 
   return {
     provider: "claude",
@@ -68,7 +84,7 @@ export async function check(options = {}) {
     version: version.stdout.trim() || "unknown",
     auth: ready ? authInfo.authMethod || "ok" : "missing",
     subscriptionType: authInfo.subscriptionType || "",
-    error: ready ? "" : "Claude Code is installed but not authenticated.",
+    error: ready ? "" : error,
   };
 }
 

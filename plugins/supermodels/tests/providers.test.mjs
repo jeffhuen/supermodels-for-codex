@@ -208,6 +208,76 @@ test("Claude direct reviews preload repository context before the first model tu
   assert.match(JSON.stringify(firstRequest.messages), /Codex preloaded/);
 });
 
+test("Claude check validates direct OAuth credentials used by reviews", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-claude-direct-ready-"));
+  try {
+    const fakeClaude = path.join(tempDir, "claude");
+    const credentialsPath = path.join(tempDir, "claude-credentials.json");
+    await writeFakeClaudeStatus(fakeClaude);
+    await writeFile(credentialsPath, JSON.stringify({
+      claudeAiOauth: {
+        accessToken: "access",
+        refreshToken: "refresh",
+        expiresAt: Date.now() + 3_600_000,
+        scopes: ["user:inference"],
+      },
+    }), "utf8");
+
+    const adapter = createClaudeAdapter({
+      credentialsOptions: { credentialsPath },
+    });
+    const check = await adapter.check({
+      env: {
+        PATH: tempDir,
+      },
+    });
+
+    assert.equal(check.ready, true);
+    assert.equal(check.auth, "claude.ai");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("Claude check fails when direct OAuth refresh fails", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-claude-direct-invalid-"));
+  try {
+    const fakeClaude = path.join(tempDir, "claude");
+    const credentialsPath = path.join(tempDir, "claude-credentials.json");
+    await writeFakeClaudeStatus(fakeClaude);
+    await writeFile(credentialsPath, JSON.stringify({
+      claudeAiOauth: {
+        accessToken: "expired-access",
+        refreshToken: "invalid-refresh",
+        expiresAt: 1,
+        scopes: ["user:inference"],
+      },
+    }), "utf8");
+
+    const adapter = createClaudeAdapter({
+      credentialsOptions: {
+        credentialsPath,
+        fetchImpl: async () => new Response(JSON.stringify({
+          error: "invalid_grant",
+          error_description: "Refresh token not found or invalid",
+        }), { status: 400, headers: { "content-type": "application/json" } }),
+      },
+    });
+    const check = await adapter.check({
+      env: {
+        PATH: tempDir,
+      },
+    });
+
+    assert.equal(check.ready, false);
+    assert.equal(check.auth, "missing");
+    assert.match(check.error, /OAuth credentials are not usable/i);
+    assert.match(check.error, /claude auth login/i);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("Antigravity model aliases keep review defaults on Flash High and typo-like aliases fail", () => {
   assert.equal(resolveAntigravityModelAlias("pro"), "Gemini 3.5 Flash (High)");
   assert.equal(
@@ -673,4 +743,19 @@ function directToolResponse(id, name, input) {
     tool_calls: [{ id, name, input }],
     text: "",
   };
+}
+
+async function writeFakeClaudeStatus(fakeClaude) {
+  await writeFile(fakeClaude, [
+    "#!/usr/bin/env node",
+    "const args = process.argv.slice(2);",
+    "if (args.includes('--version')) { console.log('2.1.167 (Claude Code)'); process.exit(0); }",
+    "if (args[0] === 'auth' && args[1] === 'status') {",
+    "  console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', subscriptionType: 'max' }));",
+    "  process.exit(0);",
+    "}",
+    "console.error('unexpected fake claude invocation: ' + args.join(' '));",
+    "process.exit(2);",
+  ].join("\n"));
+  await chmod(fakeClaude, 0o755);
 }
