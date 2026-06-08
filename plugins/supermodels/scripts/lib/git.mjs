@@ -5,6 +5,7 @@ import { runCommand } from "./process.mjs";
 
 const MAX_UNTRACKED_FILES = 32;
 const MAX_UNTRACKED_BYTES = 200_000;
+const STANDARD_DIFF_PREFIX_ARGS = ["--src-prefix=a/", "--dst-prefix=b/"];
 
 export async function collectGitContext(options = {}) {
   const workspaceRoot = options.workspaceRoot ?? process.cwd();
@@ -34,13 +35,13 @@ export async function collectGitContext(options = {}) {
   }
 
   const primaryDiffArgs = baseRef
-    ? ["-C", workspaceRoot, "diff", baseRef]
-    : ["-C", workspaceRoot, "diff", "HEAD"];
+    ? gitDiffArgs(workspaceRoot, baseRef)
+    : gitDiffArgs(workspaceRoot, "HEAD");
   const primaryDiff = await runCommand({ bin: "git", args: primaryDiffArgs }, { timeoutMs: 30000 });
   let usedDiffArgs = primaryDiffArgs;
   let fallbackDiff = primaryDiff;
   if (!primaryDiff.stdout.trim()) {
-    usedDiffArgs = ["-C", workspaceRoot, "diff"];
+    usedDiffArgs = gitDiffArgs(workspaceRoot);
     fallbackDiff = await runCommand({
       bin: "git",
       args: usedDiffArgs,
@@ -79,6 +80,10 @@ async function assertValidBaseRef(workspaceRoot, baseRef) {
   if (resolved.exitCode !== 0) {
     throw new Error(`Base ref '${baseRef}' could not be resolved: ${resolved.stderr || resolved.stdout || `exit ${resolved.exitCode}`}`);
   }
+}
+
+function gitDiffArgs(workspaceRoot, ...refs) {
+  return ["-C", workspaceRoot, "diff", ...STANDARD_DIFF_PREFIX_ARGS, ...refs];
 }
 
 function diffArgsWithShortstat(args) {

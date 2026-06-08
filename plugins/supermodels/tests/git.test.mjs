@@ -50,6 +50,31 @@ test("collectGitContext diff summary matches staged diff body", async () => {
   }
 });
 
+test("collectGitContext forces standard diff prefixes despite local git config", async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-git-prefixes-"));
+  try {
+    git(workspaceRoot, ["init"]);
+    git(workspaceRoot, ["config", "diff.noprefix", "true"]);
+    git(workspaceRoot, ["config", "diff.srcPrefix", "old/"]);
+    git(workspaceRoot, ["config", "diff.dstPrefix", "new/"]);
+    await mkdir(path.join(workspaceRoot, "my b"), { recursive: true });
+    await writeFile(path.join(workspaceRoot, "my b", "file.txt"), "one\n");
+    git(workspaceRoot, ["add", "my b/file.txt"]);
+    git(workspaceRoot, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"]);
+
+    await writeFile(path.join(workspaceRoot, "my b", "file.txt"), "two\n");
+
+    const context = await collectGitContext({ workspaceRoot });
+
+    assert.match(context.diff, /diff --git a\/my b\/file\.txt b\/my b\/file\.txt/);
+    assert.doesNotMatch(context.diff, /diff --git my b\/file\.txt my b\/file\.txt/);
+    assert.doesNotMatch(context.diff, /diff --git old\/my b\/file\.txt new\/my b\/file\.txt/);
+    assert.match(context.diffSummary, /1 file changed/);
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("collectGitContext uses base refs for committed changes without requiring branch scope", async () => {
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-git-base-"));
   try {

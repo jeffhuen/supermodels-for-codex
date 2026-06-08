@@ -2,7 +2,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { decodeUtf8Prefix } from "./text.mjs";
-import { parseDiffGitPathTokens, stripGitSidePrefix } from "./diff-paths.mjs";
+import { parseDiffGitPathTokens, parseUnifiedDiffHeaderPath, stripGitSidePrefix } from "./diff-paths.mjs";
 
 const SCHEMA_VERSION = 1;
 const MAX_EXPLICIT_CONTEXT_BYTES = 200_000;
@@ -203,20 +203,45 @@ function reviewerTaskFor(command, mode) {
 function changedFilesFromDiff(diff) {
   const files = [];
   const seen = new Set();
-  for (const line of String(diff ?? "").split(/\r?\n/)) {
-    if (!line.startsWith("diff --git ")) {
-      continue;
+  let current = null;
+
+  const pushCurrent = () => {
+    if (!current) {
+      return;
     }
-    const tokens = parseDiffGitPathTokens(line.slice("diff --git ".length));
-    const file = stripGitSidePrefix(tokens[1] || tokens[0] || "");
-    if (!file) {
-      continue;
-    }
-    if (!seen.has(file)) {
+    const file = current.metadataPath || current.diffGitPath;
+    if (file && !seen.has(file)) {
       seen.add(file);
       files.push(file);
     }
+    current = null;
+  };
+
+  for (const line of String(diff ?? "").split(/\r?\n/)) {
+    if (line.startsWith("diff --git ")) {
+      pushCurrent();
+      const tokens = parseDiffGitPathTokens(line.slice("diff --git ".length));
+      current = {
+        diffGitPath: stripGitSidePrefix(tokens[1] || tokens[0] || ""),
+        metadataPath: "",
+      };
+      continue;
+    }
+    if (!current) {
+      continue;
+    }
+    if (line.startsWith("rename to ")) {
+      current.metadataPath = parseUnifiedDiffHeaderPath(line.slice("rename to ".length));
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      const file = stripGitSidePrefix(parseUnifiedDiffHeaderPath(line.slice("+++ ".length)));
+      if (file && file !== "/dev/null") {
+        current.metadataPath = file;
+      }
+    }
   }
+  pushCurrent();
   return files;
 }
 

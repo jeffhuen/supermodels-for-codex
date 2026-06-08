@@ -134,6 +134,37 @@ test("buildContextPacket parses quoted git diff paths and truncates UTF-8 safely
   }
 });
 
+test("buildContextPacket uses rename metadata for ambiguous unquoted rename paths", async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-context-packet-rename-"));
+  try {
+    const packet = await buildContextPacket({
+      command: "review",
+      mode: "review",
+      workspaceRoot,
+      providerSelection: { requested: ["claude"] },
+      providerPlan: { selected: ["claude"], skipped: [] },
+      context: {
+        workspaceRoot,
+        repoLabel: "fixture",
+        scope: "working-tree",
+        baseRef: "",
+        diffSummary: "1 file changed",
+        diff: [
+          "diff --git a/dir/old.txt b/dir b/new.txt",
+          "similarity index 100%",
+          "rename from dir/old.txt",
+          "rename to dir b/new.txt",
+        ].join("\n"),
+      },
+      now: () => new Date("2026-06-07T12:00:00.000Z"),
+    });
+
+    assert.deepEqual(packet.evidence.git.changedFiles, ["dir b/new.txt"]);
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("persisted packet artifacts are private and round-trip markdown plus JSON", async () => {
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-context-packet-write-"));
   const runDir = await mkdtemp(path.join(tmpdir(), "supermodels-context-packet-run-"));
