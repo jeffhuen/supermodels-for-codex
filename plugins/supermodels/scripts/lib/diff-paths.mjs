@@ -104,6 +104,61 @@ function parseQuotedPath(value) {
   try {
     return JSON.parse(value);
   } catch {
-    return value.replace(/^"|"$/g, "").replace(/\\"/g, "\"").replace(/\\\\/g, "\\");
+    return decodeGitQuotedPath(value);
+  }
+}
+
+function decodeGitQuotedPath(value) {
+  const body = String(value ?? "").replace(/^"|"$/g, "");
+  const bytes = [];
+  for (let index = 0; index < body.length; index += 1) {
+    const char = body[index];
+    if (char !== "\\") {
+      bytes.push(...Buffer.from(char, "utf8"));
+      continue;
+    }
+    const next = body[index + 1];
+    if (/[0-7]/.test(next ?? "")) {
+      const octal = body.slice(index + 1).match(/^[0-7]{1,3}/)?.[0] ?? "";
+      bytes.push(Number.parseInt(octal, 8));
+      index += octal.length;
+      continue;
+    }
+    const escaped = gitEscapeByte(next);
+    if (escaped !== null) {
+      bytes.push(escaped);
+      index += 1;
+      continue;
+    }
+    bytes.push(...Buffer.from(next ?? "\\", "utf8"));
+    if (next) {
+      index += 1;
+    }
+  }
+  return Buffer.from(bytes).toString("utf8");
+}
+
+function gitEscapeByte(value) {
+  switch (value) {
+    case "a":
+      return 0x07;
+    case "b":
+      return 0x08;
+    case "f":
+      return 0x0c;
+    case "n":
+      return 0x0a;
+    case "r":
+      return 0x0d;
+    case "t":
+      return 0x09;
+    case "v":
+      return 0x0b;
+    case "\\":
+      return 0x5c;
+    case "\"":
+      return 0x22;
+    default:
+      return null;
   }
 }

@@ -660,6 +660,64 @@ test("runReviewAgent matches deleted-line diff coverage for real unquoted git pa
   assert.equal(result.findings[0].file, targetPath);
 });
 
+test("runReviewAgent matches deleted-line diff coverage for git octal-quoted UTF-8 paths", async () => {
+  const targetPath = "plugins/supermodels/scripts/lib/café.mjs";
+  const quotedGitPath = "plugins/supermodels/scripts/lib/caf\\303\\251.mjs";
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", { path: targetPath });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", { query: "café" });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "needs-attention",
+        summary: "Octal-quoted UTF-8 diff path accepted.",
+        findings: [{
+          severity: "low",
+          title: "Deleted line in UTF-8 path",
+          evidence: "The finding cites a deleted line in a non-ASCII file path.",
+          impact: "Git quotePath escapes should still validate.",
+          recommendation: "Decode git C-style octal path escapes.",
+          file: targetPath,
+          line_start: 3,
+          line_end: 3,
+          confidence: "medium",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+  const fakeTools = reviewToolsWithDeletedDiff({
+    targetPath,
+    missingLine: 3,
+    diff: [
+      `diff --git "a/${quotedGitPath}" "b/${quotedGitPath}"`,
+      `--- "a/${quotedGitPath}"`,
+      `+++ "b/${quotedGitPath}"`,
+      "@@ -3,1 +3,0 @@",
+      "-deleted validation line",
+    ].join("\n"),
+  });
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    maxRounds: 4,
+  });
+
+  assert.equal(result.verdict, "needs-attention");
+  assert.equal(result.findings[0].file, targetPath);
+});
+
 test("runReviewAgent treats truncated diff coverage as indeterminate for deleted-line findings", async () => {
   const targetPath = "plugins/supermodels/scripts/lib/large-diff.mjs";
   const fakeTransport = {
