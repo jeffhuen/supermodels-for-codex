@@ -145,6 +145,31 @@ test("get_review_context returns diff, changed files, and bounded file snippets"
   }
 });
 
+test("get_review_context decodes Git-quoted UTF-8 changed file paths", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-context-quoted-path-"));
+  try {
+    await runGit(workspace, ["init"]);
+    await runGit(workspace, ["config", "user.email", "test@example.com"]);
+    await runGit(workspace, ["config", "user.name", "Test User"]);
+    await writeFile(path.join(workspace, "café.txt"), "old\n", "utf8");
+    await runGit(workspace, ["add", "."]);
+    await runGit(workspace, ["commit", "-m", "initial"]);
+    await writeFile(path.join(workspace, "café.txt"), "new\n", "utf8");
+
+    const tools = createReviewTools({ workspaceRoot: workspace });
+    const context = await tools.execute("get_review_context");
+    const changed = await tools.execute("list_changed_files");
+
+    assert(context.changedFiles.some((file) => file.path === "café.txt"));
+    assert(changed.changedFiles.some((file) => file.path === "café.txt"));
+    assert(context.fileSnippets.some((snippet) => {
+      return snippet.path === "café.txt" && snippet.content.includes("1: new");
+    }));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("get_review_context uses base refs for committed changes on clean working trees", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-context-base-"));
   try {

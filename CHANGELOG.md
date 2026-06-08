@@ -40,6 +40,7 @@ Initial public release.
 - Provider run records now persist direct-review audit metadata, including model, effort/thinking settings, max token budget, rounds, and repository tool usage.
 - Context packet diff path parsing handles Git-quoted file paths, and prompt/context truncation is UTF-8 safe for large multibyte input.
 - Git diff collection forces standard `a/`/`b/` prefixes and context packets use rename metadata, avoiding advisory changed-file path drift from local Git prefix config or ambiguous unquoted rename paths.
+- Review tools reuse the shared Git-quoted path decoder, so `git status`/`git diff --name-status` paths with UTF-8 octal escapes remain readable by providers.
 - Antigravity readiness on macOS prefers the native Keychain token store over stale default token files, while explicit/fake `HOME` credential paths remain hermetic.
 - Claude Code OAuth review rate limits are surfaced as provider `rate-limited` results instead of invalid structured output.
 - Antigravity rejected-token `401` responses force direct OAuth refresh before retrying the request.

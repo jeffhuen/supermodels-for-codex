@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { collectGitContext } from "./git.mjs";
 import { runCommand } from "./process.mjs";
+import { parseUnifiedDiffHeaderPath } from "./diff-paths.mjs";
 import { decodeUtf8Prefix } from "./text.mjs";
 
 const DEFAULT_MAX_FILE_BYTES = 80_000;
@@ -458,14 +459,7 @@ function parseGitStatus(stdout) {
 }
 
 function unquoteGitPath(filePath) {
-  if (filePath.startsWith('"') && filePath.endsWith('"')) {
-    try {
-      return JSON.parse(filePath);
-    } catch {
-      return filePath.slice(1, -1);
-    }
-  }
-  return filePath;
+  return parseUnifiedDiffHeaderPath(filePath);
 }
 
 async function safeWorkspacePath(workspaceRoot, requestedPath) {
