@@ -134,24 +134,34 @@ export function validateStructuredReview(value) {
 }
 
 export function parseStructuredReviewText(rawText) {
+  return validateStructuredReviewText(rawText).review;
+}
+
+export function validateStructuredReviewText(rawText) {
   const text = String(rawText ?? "").trim();
   if (!text) {
-    return null;
+    return { review: null, errors: [], parsed: false };
   }
 
+  let parsed = false;
+  let errors = [];
   for (const candidate of structuredJsonCandidates(text)) {
     try {
-      const parsed = JSON.parse(candidate);
-      const normalized = normalizeStructuredReview(parsed);
-      if (normalized) {
-        return normalized;
+      const value = JSON.parse(candidate);
+      parsed = true;
+      const validation = validateStructuredReview(value);
+      if (validation.review) {
+        return { ...validation, parsed: true };
+      }
+      if (!errors.length && validation.errors.length) {
+        errors = validation.errors;
       }
     } catch {
       // Try the next candidate.
     }
   }
 
-  return null;
+  return { review: null, errors, parsed };
 }
 
 export function structuredReviewToFindings(review) {

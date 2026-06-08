@@ -2,6 +2,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { decodeUtf8Prefix } from "./text.mjs";
+import { parseDiffGitPathTokens, stripGitSidePrefix } from "./diff-paths.mjs";
 
 const SCHEMA_VERSION = 1;
 const MAX_EXPLICIT_CONTEXT_BYTES = 200_000;
@@ -226,67 +227,4 @@ function limitText(value, maxBytes) {
     return text;
   }
   return `${decodeUtf8Prefix(buffer, maxBytes)}\n\n[Supermodels truncated context packet section to ${maxBytes} bytes.]`;
-}
-
-function parseDiffGitPathTokens(value) {
-  const tokens = [];
-  let index = 0;
-  while (index < value.length && tokens.length < 2) {
-    while (value[index] === " ") {
-      index += 1;
-    }
-    if (index >= value.length) {
-      break;
-    }
-    if (value[index] === "\"") {
-      const token = readQuotedToken(value, index);
-      tokens.push(token.value);
-      index = token.nextIndex;
-      continue;
-    }
-    const nextSpace = value.indexOf(" ", index);
-    if (nextSpace === -1) {
-      tokens.push(value.slice(index));
-      break;
-    }
-    tokens.push(value.slice(index, nextSpace));
-    index = nextSpace + 1;
-  }
-  return tokens;
-}
-
-function readQuotedToken(value, startIndex) {
-  let index = startIndex + 1;
-  let escaped = false;
-  while (index < value.length) {
-    const char = value[index];
-    if (char === "\"" && !escaped) {
-      const raw = value.slice(startIndex, index + 1);
-      return {
-        value: parseQuotedPath(raw),
-        nextIndex: index + 1,
-      };
-    }
-    escaped = char === "\\" && !escaped;
-    if (char !== "\\") {
-      escaped = false;
-    }
-    index += 1;
-  }
-  return {
-    value: parseQuotedPath(value.slice(startIndex)),
-    nextIndex: value.length,
-  };
-}
-
-function parseQuotedPath(value) {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return value.replace(/^"|"$/g, "").replace(/\\"/g, "\"").replace(/\\\\/g, "\\");
-  }
-}
-
-function stripGitSidePrefix(file) {
-  return String(file ?? "").replace(/^[ab]\//, "");
 }

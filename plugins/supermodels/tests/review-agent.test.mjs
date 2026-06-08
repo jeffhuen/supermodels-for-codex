@@ -365,7 +365,49 @@ test("runReviewAgent surfaces concrete schema validation errors for correction",
   assert.match(correctionMessage, /findings\[0\]\.line_end must be greater than or equal to line_start/i);
 });
 
-test("runReviewAgent treats missing current-line content as advisory when the file is readable", async () => {
+test("runReviewAgent surfaces concrete validation errors for natural structured JSON", async () => {
+  const calls = [];
+  const invalidReview = {
+    verdict: "needs-attention",
+    summary: "Bad natural JSON.",
+    findings: [{
+      severity: "medium",
+      title: "Bad natural range",
+      evidence: "The line range is impossible.",
+      impact: "Provider should see the exact issue.",
+      recommendation: "Fix line_end.",
+      file: "plugins/supermodels/scripts/lib/review-agent.mjs",
+      line_start: 20,
+      line_end: 10,
+      confidence: "medium",
+    }],
+    assumptions: [],
+    verification_gaps: [],
+  };
+  const fakeTransport = {
+    async messages(body) {
+      calls.push(body);
+      if (calls.length === 1) {
+        return responseWithText(JSON.stringify(invalidReview));
+      }
+      return responseWithTool("submit_1", "submit_review", inconclusiveReview("natural schema error was corrected"));
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: reviewToolsForDiffAndFiles(),
+    minInspection: { diff: false, fileOrSearch: false, explicitFileOrSearchToolCalls: 0, cleanExplicitFileOrSearchToolCalls: 0 },
+    maxRounds: 2,
+  });
+
+  const correctionMessage = JSON.stringify(calls[1].messages.at(-1).content);
+  assert.equal(result.verdict, "inconclusive");
+  assert.match(correctionMessage, /findings\[0\]\.line_end must be greater than or equal to line_start/i);
+});
+
+test("runReviewAgent accepts missing current-line content only when the diff covers a deleted old line", async () => {
   const fakeTransport = {
     calls: 0,
     async messages() {
@@ -391,7 +433,319 @@ test("runReviewAgent treats missing current-line content as advisory when the fi
           title: "Deleted line",
           evidence: "The finding refers to a deleted or pre-change line.",
           impact: "Valid deletion findings should not be dropped.",
-          recommendation: "Accept readable files even when the current line has no content.",
+          recommendation: "Accept missing current-line content only with matching diff evidence.",
+          file: "plugins/supermodels/scripts/lib/review-agent.mjs",
+          line_start: 5,
+          line_end: 5,
+          confidence: "medium",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+  const fakeTools = {
+    schemas: [],
+    async execute(name, input = {}) {
+      if (name === "get_diff") {
+        return {
+          ok: true,
+          diffSummary: "1 file changed",
+          diff: [
+            "diff --git a/plugins/supermodels/scripts/lib/review-agent.mjs b/plugins/supermodels/scripts/lib/review-agent.mjs",
+            "--- a/plugins/supermodels/scripts/lib/review-agent.mjs",
+            "+++ b/plugins/supermodels/scripts/lib/review-agent.mjs",
+            "@@ -5,1 +5,0 @@",
+            "-deleted validation line",
+          ].join("\n"),
+        };
+      }
+      if (name === "read_file") {
+        const start = Number(input.start_line ?? 1);
+        return {
+          ok: true,
+          path: input.path,
+          start_line: start,
+          end_line: start,
+          content: start === 5 ? "" : `${start}: export {};`,
+        };
+      }
+      if (name === "search") {
+        return { ok: true, query: input.query, output: "plugins/supermodels/scripts/lib/review-agent.mjs:1:export {};" };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    maxRounds: 4,
+  });
+
+  assert.equal(result.verdict, "needs-attention");
+  assert.equal(result.findings[0].line_start, 5);
+});
+
+test("runReviewAgent keeps deleted-line diff counters aligned for deleted lines starting with dashes", async () => {
+  const targetPath = "plugins/supermodels/scripts/lib/review-agent.mjs";
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", { path: targetPath });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", { query: "deleted validation" });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "needs-attention",
+        summary: "Deleted line after dash-prefixed content accepted.",
+        findings: [{
+          severity: "medium",
+          title: "Deleted line after comment",
+          evidence: "The finding cites a deleted line after a dash-prefixed deleted line.",
+          impact: "The diff parser must keep old-line counters aligned.",
+          recommendation: "Treat dash-prefixed code as hunk content.",
+          file: targetPath,
+          line_start: 6,
+          line_end: 6,
+          confidence: "medium",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+  const fakeTools = reviewToolsWithDeletedDiff({
+    targetPath,
+    missingLine: 6,
+    diff: [
+      `diff --git a/${targetPath} b/${targetPath}`,
+      `--- a/${targetPath}`,
+      `+++ b/${targetPath}`,
+      "@@ -5,2 +5,0 @@",
+      "--- markdown separator",
+      "-deleted validation line",
+    ].join("\n"),
+  });
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    maxRounds: 4,
+  });
+
+  assert.equal(result.verdict, "needs-attention");
+  assert.equal(result.findings[0].line_start, 6);
+});
+
+test("runReviewAgent matches deleted-line diff coverage for quoted paths with spaces", async () => {
+  const targetPath = "plugins/supermodels/scripts/lib/file with space.mjs";
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", { path: targetPath });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", { query: "file with space" });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "needs-attention",
+        summary: "Quoted diff path accepted.",
+        findings: [{
+          severity: "low",
+          title: "Deleted line in spaced path",
+          evidence: "The finding cites a deleted line in a file path containing spaces.",
+          impact: "Quoted git paths should still validate.",
+          recommendation: "Parse quoted diff paths.",
+          file: targetPath,
+          line_start: 3,
+          line_end: 3,
+          confidence: "medium",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+  const fakeTools = reviewToolsWithDeletedDiff({
+    targetPath,
+    missingLine: 3,
+    diff: [
+      `diff --git "a/${targetPath}" "b/${targetPath}"`,
+      `--- "a/${targetPath}"`,
+      `+++ "b/${targetPath}"`,
+      "@@ -3,1 +3,0 @@",
+      "-deleted validation line",
+    ].join("\n"),
+  });
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    maxRounds: 4,
+  });
+
+  assert.equal(result.verdict, "needs-attention");
+  assert.equal(result.findings[0].file, targetPath);
+});
+
+test("runReviewAgent matches deleted-line diff coverage for real unquoted git paths with spaces", async () => {
+  const targetPath = "plugins/supermodels/scripts/lib/file with space.mjs";
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", { path: targetPath });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", { query: "file with space" });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "needs-attention",
+        summary: "Unquoted diff path accepted.",
+        findings: [{
+          severity: "low",
+          title: "Deleted line in unquoted spaced path",
+          evidence: "The finding cites a deleted line in a file path containing spaces.",
+          impact: "Git emits unquoted diff --git paths when paths contain ordinary spaces.",
+          recommendation: "Use unambiguous file headers when matching diff hunks.",
+          file: targetPath,
+          line_start: 3,
+          line_end: 3,
+          confidence: "medium",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+  const fakeTools = reviewToolsWithDeletedDiff({
+    targetPath,
+    missingLine: 3,
+    diff: [
+      `diff --git a/${targetPath} b/${targetPath}`,
+      `--- a/${targetPath}\t`,
+      `+++ b/${targetPath}\t`,
+      "@@ -3,1 +3,0 @@",
+      "-deleted validation line",
+    ].join("\n"),
+  });
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    maxRounds: 4,
+  });
+
+  assert.equal(result.verdict, "needs-attention");
+  assert.equal(result.findings[0].file, targetPath);
+});
+
+test("runReviewAgent treats truncated diff coverage as indeterminate for deleted-line findings", async () => {
+  const targetPath = "plugins/supermodels/scripts/lib/large-diff.mjs";
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", { path: targetPath });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", { query: "large diff" });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "needs-attention",
+        summary: "Truncated diff does not reject deleted-line finding.",
+        findings: [{
+          severity: "medium",
+          title: "Deleted line beyond truncated diff",
+          evidence: "The finding cites deleted code, but the review-tool diff was truncated before that hunk.",
+          impact: "Large diffs should not turn valid deleted-line findings into inconclusive reviews.",
+          recommendation: "Treat truncated diff coverage as indeterminate, not disproven.",
+          file: targetPath,
+          line_start: 700,
+          line_end: 700,
+          confidence: "medium",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+  const fakeTools = reviewToolsWithDeletedDiff({
+    targetPath,
+    missingLine: 700,
+    truncated: true,
+    diff: [
+      `diff --git a/${targetPath} b/${targetPath}`,
+      `--- a/${targetPath}`,
+      `+++ b/${targetPath}`,
+      "@@ -1,1 +1,1 @@",
+      "-early line",
+      "+early replacement",
+    ].join("\n"),
+  });
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    maxRounds: 4,
+  });
+
+  assert.equal(result.verdict, "needs-attention");
+  assert.equal(result.findings[0].line_start, 700);
+});
+
+test("runReviewAgent rejects missing current-line content without deleted-line diff evidence", async () => {
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", {
+          path: "plugins/supermodels/scripts/lib/review-agent.mjs",
+        });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", {
+          query: "deleted validation",
+        });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "needs-attention",
+        summary: "Line absence rejected.",
+        findings: [{
+          severity: "medium",
+          title: "Impossible current line",
+          evidence: "The finding cites a line that is not in the current file or deleted diff.",
+          impact: "Unanchored findings should be rejected.",
+          recommendation: "Require current content or deleted-line diff evidence.",
           file: "plugins/supermodels/scripts/lib/review-agent.mjs",
           line_start: 999999,
           line_end: 999999,
@@ -406,7 +760,7 @@ test("runReviewAgent treats missing current-line content as advisory when the fi
     schemas: [],
     async execute(name, input = {}) {
       if (name === "get_diff") {
-        return { ok: true, diffSummary: "1 file changed", diff: "diff --git a/a b/a" };
+        return { ok: true, diffSummary: "1 file changed", diff: "diff --git a/a b/a\n" };
       }
       if (name === "read_file") {
         const start = Number(input.start_line ?? 1);
@@ -430,10 +784,113 @@ test("runReviewAgent treats missing current-line content as advisory when the fi
     transport: fakeTransport,
     tools: fakeTools,
     maxRounds: 4,
+    maxReviewCorrectionAttempts: 0,
   });
 
-  assert.equal(result.verdict, "needs-attention");
-  assert.equal(result.findings[0].line_start, 999999);
+  assert.equal(result.verdict, "inconclusive");
+  assert.match(result.summary, /could not be accepted/i);
+  assert.match(result.verification_gaps.join("\n"), /no current content and no matching deleted-line diff/i);
+});
+
+test("runReviewAgent rejects finding ranges that are too large to verify", async () => {
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", {
+          path: "plugins/supermodels/scripts/lib/review-agent.mjs",
+        });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", {
+          query: "verifyFindingLocations",
+        });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "needs-attention",
+        summary: "Oversized finding range.",
+        findings: [{
+          severity: "low",
+          title: "Huge range",
+          evidence: "The finding cites a huge range.",
+          impact: "The verifier cannot prove the whole span.",
+          recommendation: "Return a tighter location.",
+          file: "plugins/supermodels/scripts/lib/review-agent.mjs",
+          line_start: 1,
+          line_end: 250,
+          confidence: "medium",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: reviewToolsForDiffAndFiles(),
+    maxRounds: 4,
+    maxReviewCorrectionAttempts: 0,
+  });
+
+  assert.equal(result.verdict, "inconclusive");
+  assert.match(result.verification_gaps.join("\n"), /finding range spans more than 200 lines/i);
+});
+
+test("runReviewAgent uses generic correction-attempt wording for configurable budgets", async () => {
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", {
+          path: "plugins/supermodels/scripts/lib/review-agent.mjs",
+        });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", {
+          query: "verifyFindingLocations",
+        });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "needs-attention",
+        summary: "Bad finding.",
+        findings: [{
+          severity: "low",
+          title: "Missing file",
+          evidence: "The file does not exist.",
+          impact: "The verifier rejects it.",
+          recommendation: "Use a real file.",
+          file: "missing-file.mjs",
+          line_start: 1,
+          line_end: 1,
+          confidence: "medium",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: reviewToolsForDiffAndFiles(),
+    maxRounds: 4,
+    maxReviewCorrectionAttempts: 0,
+  });
+
+  assert.equal(result.verdict, "inconclusive");
+  assert.match(result.verification_gaps[0], /allowed correction attempts/i);
+  assert.doesNotMatch(result.verification_gaps[0], /one correction attempt/i);
 });
 
 test("runReviewAgent stops after one repeated finding verification failure", async () => {
@@ -1116,6 +1573,55 @@ test("runReviewAgent refuses shallow clean verdicts until multiple files or sear
   assert.match(JSON.stringify(calls[2].messages), /at least 2 relevant files/i);
 });
 
+test("runReviewAgent stops repeated inspection-gate refusals before aggregate timeout", async () => {
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      return responseWithTool(`submit_early_${this.calls}`, "submit_review", cleanReview("Still too early."));
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "antigravity",
+    transport: fakeTransport,
+    tools: reviewToolsForDiffAndFiles(),
+    minInspection: { diff: true, fileOrSearch: true, explicitFileOrSearchToolCalls: 2 },
+    maxInspectionRefusals: 2,
+    maxRounds: 10,
+  });
+
+  assert.equal(result.verdict, "inconclusive");
+  assert.match(result.summary, /repeated inspection requirements/i);
+  assert.equal(fakeTransport.calls, 2);
+});
+
+test("runReviewAgent does not reset inspection refusals for non-advancing tool calls", async () => {
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      return responseWithTools([
+        { id: `diff_${this.calls}`, name: "get_diff", input: {} },
+        { id: `submit_${this.calls}`, name: "submit_review", input: cleanReview("Still too early.") },
+      ]);
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "antigravity",
+    transport: fakeTransport,
+    tools: reviewToolsForDiffAndFiles(),
+    minInspection: { diff: true, fileOrSearch: true, explicitFileOrSearchToolCalls: 2 },
+    maxInspectionRefusals: 2,
+    maxRounds: 10,
+  });
+
+  assert.equal(result.verdict, "inconclusive");
+  assert.match(result.summary, /repeated inspection requirements/i);
+  assert.equal(fakeTransport.calls, 2);
+});
+
 test("runReviewAgent allows clean verdicts after two explicit file or search inspections", async () => {
   const fakeTransport = {
     calls: 0,
@@ -1619,6 +2125,19 @@ function responseWithTool(id, name, input) {
   };
 }
 
+function responseWithTools(toolCalls) {
+  return {
+    content: toolCalls.map((call) => ({
+      type: "tool_use",
+      id: call.id,
+      name: call.name,
+      input: call.input,
+    })),
+    tool_calls: toolCalls,
+    text: "",
+  };
+}
+
 function responseWithText(text) {
   return {
     content: [{ type: "text", text }],
@@ -1677,6 +2196,34 @@ function reviewToolsForDiffAndFiles() {
       }
       if (name === "search") {
         return { ok: true, query: "runReviewAgent", output: "review-agent.mjs:1:export async function runReviewAgent" };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+}
+
+function reviewToolsWithDeletedDiff({ targetPath, missingLine, diff, truncated = false }) {
+  return {
+    schemas: [],
+    async execute(name, input = {}) {
+      if (name === "get_diff") {
+        return { ok: true, diffSummary: "1 file changed", diff, truncated };
+      }
+      if (name === "read_file") {
+        const start = Number(input.start_line ?? 1);
+        if (String(input.path ?? "") !== targetPath) {
+          return { ok: false, path: input.path, error: "Path resolves outside workspace." };
+        }
+        return {
+          ok: true,
+          path: input.path,
+          start_line: start,
+          end_line: start,
+          content: start === missingLine ? "" : `${start}: export {};`,
+        };
+      }
+      if (name === "search") {
+        return { ok: true, query: input.query, output: `${targetPath}:1:export {};` };
       }
       throw new Error(`unexpected tool ${name}`);
     },

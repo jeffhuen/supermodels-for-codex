@@ -1,8 +1,13 @@
 import {
   REVIEW_RESULT_SCHEMA,
-  parseStructuredReviewText,
+  validateStructuredReviewText,
   validateStructuredReview,
 } from "./review-schema.mjs";
+import {
+  parseDiffGitPathTokens,
+  parseUnifiedDiffHeaderPath,
+  stripGitSidePrefix,
+} from "./diff-paths.mjs";
 
 const DEFAULT_REVIEW_POLICY = Object.freeze({
   maxRounds: Number.POSITIVE_INFINITY,
@@ -15,6 +20,7 @@ const DEFAULT_REVIEW_POLICY = Object.freeze({
   claudeEffort: null,
   antigravityThinkingBudget: -1,
   maxReviewCorrectionAttempts: 1,
+  maxInspectionRefusals: 4,
   minInspection: Object.freeze({
     diff: true,
     fileOrSearch: true,
@@ -24,6 +30,7 @@ const DEFAULT_REVIEW_POLICY = Object.freeze({
   forceInspectionTools: false,
 });
 const ANTIGRAVITY_NORMAL_REVIEW_POST_EVIDENCE_ROUNDS = 4;
+const MAX_FINDING_LOCATION_LINES = 200;
 
 export async function runReviewAgent(options = {}) {
   const {
@@ -53,6 +60,8 @@ export async function runReviewAgent(options = {}) {
     ?? DEFAULT_REVIEW_POLICY.maxNoToolContinuationRounds;
   const maxReviewCorrectionAttempts = options.maxReviewCorrectionAttempts
     ?? DEFAULT_REVIEW_POLICY.maxReviewCorrectionAttempts;
+  const maxInspectionRefusals = options.maxInspectionRefusals
+    ?? DEFAULT_REVIEW_POLICY.maxInspectionRefusals;
   if (!transport?.messages) {
     throw new Error("runReviewAgent requires a transport with messages(body, options).");
   }
@@ -83,6 +92,7 @@ export async function runReviewAgent(options = {}) {
   let structuredConversionRequested = false;
   let noToolContinuationRounds = 0;
   let reviewCorrectionAttempts = 0;
+  let inspectionRefusals = 0;
   const reasoningOptions = providerReasoningOptions(provider, options);
 
   try {
@@ -192,7 +202,8 @@ export async function runReviewAgent(options = {}) {
       const toolCalls = response.tool_calls ?? [];
       if (!toolCalls.length) {
         const finalText = responseText(response);
-        const naturalReview = parseStructuredReviewText(finalText);
+        const naturalReviewValidation = validateStructuredReviewText(finalText);
+        const naturalReview = naturalReviewValidation.review;
         if (naturalReview) {
           const accepted = await acceptStructuredReview(naturalReview, inspection, minInspection, {
             tools,
@@ -229,12 +240,49 @@ export async function runReviewAgent(options = {}) {
           }
           if (countsAsReviewCorrection) {
             reviewCorrectionAttempts += 1;
+          } else if (consumesInspectionRefusal(accepted.error)) {
+            inspectionRefusals += 1;
+            if (inspectionRefusals >= maxInspectionRefusals) {
+              return inconclusiveRepeatedInspectionRefusals(accepted.error, {
+                toolUsage,
+                rounds: round,
+                usage: cumulativeUsage,
+                provider,
+                model,
+                maxTokens,
+                reasoningOptions,
+              });
+            }
           }
           messages.push({
             role: "user",
             content: [{
               type: "text",
               text: naturalReviewRejectionInstruction(accepted.error),
+            }],
+          });
+          continue;
+        }
+
+        if (naturalReviewValidation.parsed && inspectionSatisfied(inspection, minInspection)) {
+          const error = structuredReviewValidationError(naturalReviewValidation.errors);
+          if (reviewCorrectionAttempts >= maxReviewCorrectionAttempts) {
+            return inconclusiveRejectedStructuredReview(error, {
+              toolUsage,
+              rounds: round,
+              usage: cumulativeUsage,
+              provider,
+              model,
+              maxTokens,
+              reasoningOptions,
+            });
+          }
+          reviewCorrectionAttempts += 1;
+          messages.push({
+            role: "user",
+            content: [{
+              type: "text",
+              text: naturalReviewRejectionInstruction(error),
             }],
           });
           continue;
@@ -283,6 +331,7 @@ export async function runReviewAgent(options = {}) {
       const submitCall = toolCalls.find((call) => call.name === "submit_review");
       if (submitCall) {
         const executedResults = new Map();
+        const inspectionBeforeTools = inspectionProgressKey(inspection);
         for (const call of toolCalls) {
           if (call.name === "submit_review") {
             continue;
@@ -297,6 +346,9 @@ export async function runReviewAgent(options = {}) {
             onEvent,
             provider,
           }));
+        }
+        if (inspectionProgressKey(inspection) !== inspectionBeforeTools) {
+          inspectionRefusals = 0;
         }
 
         const submitted = await handleSubmittedReview(submitCall, inspection, minInspection, {
@@ -334,6 +386,19 @@ export async function runReviewAgent(options = {}) {
         }
         if (countsAsReviewCorrection) {
           reviewCorrectionAttempts += 1;
+        } else if (consumesInspectionRefusal(submitted.error)) {
+          inspectionRefusals += 1;
+          if (inspectionRefusals >= maxInspectionRefusals) {
+            return inconclusiveRepeatedInspectionRefusals(submitted.error, {
+              toolUsage,
+              rounds: round,
+              usage: cumulativeUsage,
+              provider,
+              model,
+              maxTokens,
+              reasoningOptions,
+            });
+          }
         }
 
         const toolResults = [];
@@ -356,6 +421,7 @@ export async function runReviewAgent(options = {}) {
       }
 
       const toolResults = [];
+      const inspectionBeforeTools = inspectionProgressKey(inspection);
       for (const call of toolCalls) {
         toolResults.push(await executeToolCall({
           call,
@@ -370,6 +436,9 @@ export async function runReviewAgent(options = {}) {
       }
 
       if (toolResults.length) {
+        if (inspectionProgressKey(inspection) !== inspectionBeforeTools) {
+          inspectionRefusals = 0;
+        }
         messages.push({ role: "user", content: toolResults });
       }
     }
@@ -519,12 +588,7 @@ async function handleSubmittedReview(call, inspection, minInspection, verificati
   const validation = validateStructuredReview(call.input);
   const normalized = validation.review;
   if (!normalized) {
-    const error = {
-      ok: false,
-      error: "submit_review input did not match the review schema. Retry with the listed fields fixed.",
-      correction_kind: "review-validation",
-      validation_errors: validation.errors,
-    };
+    const error = structuredReviewValidationError(validation.errors);
     return {
       done: false,
       error,
@@ -552,6 +616,21 @@ async function handleSubmittedReview(call, inspection, minInspection, verificati
 
 function consumesReviewCorrection(error) {
   return error?.correction_kind === "review-validation";
+}
+
+function consumesInspectionRefusal(error) {
+  return error?.correction_kind === "inspection";
+}
+
+function structuredReviewValidationError(errors) {
+  return {
+    ok: false,
+    error: "submit_review input did not match the review schema. Retry with the listed fields fixed.",
+    correction_kind: "review-validation",
+    validation_errors: Array.isArray(errors) && errors.length
+      ? errors
+      : ["review must match the structured review schema"],
+  };
 }
 
 async function acceptStructuredReview(review, inspection, minInspection, verification = {}) {
@@ -607,6 +686,28 @@ async function verifyFindingLocations(review, { tools, controller, abort } = {})
     return [];
   }
   const errors = [];
+  let diffInfo;
+  let diffLoaded = false;
+  const getDiffInfo = async () => {
+    if (diffLoaded) {
+      return diffInfo;
+    }
+    diffLoaded = true;
+    try {
+      const result = await tools.execute("get_diff", {}, {
+        controller,
+        signal: abort?.signal,
+      });
+      diffInfo = {
+        text: result?.ok ? String(result.diff ?? "") : "",
+        truncated: Boolean(result?.ok && result?.truncated),
+      };
+    } catch {
+      diffInfo = { text: "", truncated: false };
+    }
+    throwIfCancelled(controller);
+    return diffInfo;
+  };
   for (const finding of review.findings) {
     const file = String(finding.file ?? "").trim();
     const start = Number(finding.line_start);
@@ -621,7 +722,17 @@ async function verifyFindingLocations(review, { tools, controller, abort } = {})
       });
       continue;
     }
-    const requestedEnd = Math.min(end, start + 199);
+    if (end - start + 1 > MAX_FINDING_LOCATION_LINES) {
+      errors.push({
+        title: finding.title || "(untitled)",
+        file,
+        line_start: start,
+        line_end: end,
+        error: `finding range spans more than ${MAX_FINDING_LOCATION_LINES} lines; cite a narrower range`,
+      });
+      continue;
+    }
+    const requestedEnd = end;
     let result;
     try {
       result = await tools.execute("read_file", {
@@ -658,6 +769,27 @@ async function verifyFindingLocations(review, { tools, controller, abort } = {})
         line_end: end,
         error: `finding location could not be verified: read_file returned ${returnedPath || "(no path)"} for ${file}`,
       });
+      continue;
+    }
+    const returnedEnd = Number(result?.end_line ?? requestedEnd);
+    const hasCurrentLineContent = String(result.content ?? "").trim()
+      && Number.isInteger(returnedEnd)
+      && returnedEnd >= start;
+    if (hasCurrentLineContent) {
+      continue;
+    }
+    const diff = await getDiffInfo();
+    if (!diffHasDeletedLineCoverage(diff.text, file, start, end)) {
+      if (diff.truncated) {
+        continue;
+      }
+      errors.push({
+        title: finding.title || "(untitled)",
+        file,
+        line_start: start,
+        line_end: end,
+        error: "finding location could not be verified: no current content and no matching deleted-line diff",
+      });
     }
   }
   return errors;
@@ -668,6 +800,71 @@ function comparableReviewPath(value) {
     .trim()
     .replace(/\\/g, "/")
     .replace(/^\.\/+/, "");
+}
+
+function diffHasDeletedLineCoverage(diffText, file, start, end) {
+  const target = comparableReviewPath(file);
+  let currentFileMatches = false;
+  let pendingOldPath = "";
+  let oldLine = null;
+  let newLine = null;
+  for (const line of String(diffText ?? "").split(/\r?\n/)) {
+    if (line.startsWith("diff --git ")) {
+      const paths = parseDiffGitPathTokens(line.slice("diff --git ".length));
+      const oldPath = normalizeDiffPath(paths[0] ?? "");
+      const newPath = normalizeDiffPath(paths[1] ?? "");
+      currentFileMatches = oldPath === target || newPath === target;
+      pendingOldPath = "";
+      oldLine = null;
+      newLine = null;
+      continue;
+    }
+    if (!Number.isInteger(oldLine) || !Number.isInteger(newLine)) {
+      if (line.startsWith("--- ")) {
+        pendingOldPath = normalizeDiffPath(parseUnifiedDiffHeaderPath(line.slice(4)));
+        continue;
+      }
+      if (line.startsWith("+++ ")) {
+        const newPath = normalizeDiffPath(parseUnifiedDiffHeaderPath(line.slice(4)));
+        currentFileMatches = currentFileMatches
+          || pendingOldPath === target
+          || newPath === target;
+        continue;
+      }
+    }
+    if (!currentFileMatches) {
+      continue;
+    }
+    const hunk = line.match(/^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@/);
+    if (hunk) {
+      oldLine = Number(hunk[1]);
+      newLine = Number(hunk[3]);
+      continue;
+    }
+    if (!Number.isInteger(oldLine) || !Number.isInteger(newLine)) {
+      continue;
+    }
+    if (line.startsWith("-")) {
+      if (oldLine >= start && oldLine <= end) {
+        return true;
+      }
+      oldLine += 1;
+      continue;
+    }
+    if (line.startsWith("+")) {
+      newLine += 1;
+      continue;
+    }
+    if (line.startsWith(" ") || line === "") {
+      oldLine += 1;
+      newLine += 1;
+    }
+  }
+  return false;
+}
+
+function normalizeDiffPath(value) {
+  return comparableReviewPath(stripGitSidePrefix(value));
 }
 
 function inspectionSatisfied(inspection, required) {
@@ -733,6 +930,10 @@ function visibleInspectionState(inspection) {
     explicitFileOrSearchToolCalls: distinctInspectionCount(inspection),
     explicitFileOrSearchTargets: inspection.explicitFileOrSearchTargets ?? [],
   };
+}
+
+function inspectionProgressKey(inspection) {
+  return JSON.stringify(visibleInspectionState(inspection));
 }
 
 function resultHasInspectionContent(name, result) {
@@ -926,6 +1127,7 @@ function inconclusiveUnstructuredFinalReview(finalText) {
 }
 
 function inconclusiveRejectedStructuredReview(error, metadata) {
+  const detail = limitSummary(JSON.stringify(error), 1000);
   const summary = `Provider structured review could not be accepted after correction: ${limitSummary(JSON.stringify(error))}`;
   return {
     verdict: "inconclusive",
@@ -933,7 +1135,32 @@ function inconclusiveRejectedStructuredReview(error, metadata) {
     findings: [],
     assumptions: [],
     verification_gaps: [
-      "Provider returned structured review output that failed Supermodels validation after one correction attempt.",
+      "Provider returned structured review output that failed Supermodels validation after the allowed correction attempts.",
+      detail,
+    ],
+    toolUsage: metadata.toolUsage,
+    rounds: metadata.rounds,
+    usage: metadata.usage,
+    reviewConfig: reviewConfigMetadata({
+      provider: metadata.provider,
+      model: metadata.model,
+      maxTokens: metadata.maxTokens,
+      reasoningOptions: metadata.reasoningOptions,
+      rounds: metadata.rounds,
+      toolUsage: metadata.toolUsage,
+    }),
+  };
+}
+
+function inconclusiveRepeatedInspectionRefusals(error, metadata) {
+  const summary = `Provider structured review could not be accepted after repeated inspection requirements: ${limitSummary(JSON.stringify(error))}`;
+  return {
+    verdict: "inconclusive",
+    summary,
+    findings: [],
+    assumptions: [],
+    verification_gaps: [
+      "Provider repeatedly submitted a final review before completing required repository inspection.",
       limitSummary(JSON.stringify(error)),
     ],
     toolUsage: metadata.toolUsage,
