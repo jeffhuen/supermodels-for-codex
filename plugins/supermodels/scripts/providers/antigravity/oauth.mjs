@@ -321,6 +321,7 @@ function runCommandWithInput(command, options = {}) {
       stderr = append(stderr, chunk);
     });
     child.on("error", rejectOnce);
+    child.stdin.on("error", rejectOnce);
     child.on("close", (code, signal) => {
       if (code === 0) {
         resolveOnce({ stdout, stderr });

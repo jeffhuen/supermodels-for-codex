@@ -426,6 +426,50 @@ test("Antigravity keychain write command keeps token envelope out of argv", () =
   assert(!command.args.some((arg) => arg.includes("refresh-token-secret")));
 });
 
+test("Antigravity keychain refresh rejects early stdin close without uncaught EPIPE", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "supermodels-agy-keychain-epipe-"));
+  const binDir = path.join(dir, "bin");
+  const securityBin = path.join(binDir, "security");
+  const originalPath = process.env.PATH;
+  try {
+    await mkdir(binDir);
+    await writeFile(securityBin, [
+      "#!/usr/bin/env node",
+      "process.stdin.destroy();",
+      "setTimeout(() => process.exit(0), 200);",
+      "",
+    ].join("\n"), "utf8");
+    await chmod(securityBin, 0o755);
+    process.env.PATH = `${binDir}${path.delimiter}${originalPath ?? ""}`;
+
+    const credentials = new AntigravityCredentials({
+      platform: "darwin",
+      keychainReader: async () => ({
+        token: {
+          access_token: "old-access",
+          refresh_token: "old-refresh",
+          expiry: "2000-01-01T00:00:00.000Z",
+        },
+        retained_payload: "x".repeat(12 * 1024 * 1024),
+      }),
+      fetchImpl: async () => new Response(JSON.stringify({
+        access_token: "new-access",
+        refresh_token: "new-refresh",
+        expires_in: 3600,
+      }), { status: 200, headers: { "content-type": "application/json" } }),
+      now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+    });
+
+    await assert.rejects(
+      () => credentials.accessToken(),
+      /EPIPE|write|closed|stdin/i,
+    );
+  } finally {
+    process.env.PATH = originalPath;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("AntigravityCredentials surfaces direct refresh failures with setup guidance", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "supermodels-agy-oauth-refresh-fails-"));
   const file = path.join(dir, "antigravity-oauth-token");
