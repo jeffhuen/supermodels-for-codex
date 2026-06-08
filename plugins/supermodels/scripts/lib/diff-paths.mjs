@@ -47,17 +47,23 @@ function splitUnquotedDiffGitSides(value) {
   if (!value.startsWith("a/")) {
     return null;
   }
-  const separatorIndex = lastUnquotedSeparator(value, " b/");
-  if (separatorIndex === -1) {
+  const candidates = unquotedSeparatorIndexes(value, " b/");
+  if (!candidates.length) {
     return null;
   }
+  const matchingCandidate = candidates.find((separatorIndex) => {
+    const oldPath = value.slice(0, separatorIndex).trim();
+    const newPath = value.slice(separatorIndex + 1).trim();
+    return stripGitSidePrefix(oldPath) === stripGitSidePrefix(newPath);
+  });
+  const separatorIndex = matchingCandidate ?? candidates.at(-1);
   const oldPath = value.slice(0, separatorIndex).trim();
   const newPath = value.slice(separatorIndex + 1).trim();
   return oldPath && newPath ? [oldPath, newPath] : null;
 }
 
-function lastUnquotedSeparator(value, separator) {
-  let matchIndex = -1;
+function unquotedSeparatorIndexes(value, separator) {
+  const indexes = [];
   let quoted = false;
   let escaped = false;
   for (let index = 0; index < value.length; index += 1) {
@@ -66,14 +72,14 @@ function lastUnquotedSeparator(value, separator) {
       quoted = !quoted;
     }
     if (!quoted && value.startsWith(separator, index)) {
-      matchIndex = index;
+      indexes.push(index);
     }
     escaped = char === "\\" && !escaped;
     if (char !== "\\") {
       escaped = false;
     }
   }
-  return matchIndex;
+  return indexes;
 }
 
 function readQuotedToken(value, startIndex) {

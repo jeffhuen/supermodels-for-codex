@@ -13,6 +13,13 @@ test("parseDiffGitPathTokens decodes Git octal bytes without mangling literal su
   );
 });
 
+test("parseDiffGitPathTokens handles unquoted paths containing space b slash", () => {
+  assert.deepEqual(
+    parseDiffGitPathTokens("a/my b/file.txt b/my b/file.txt"),
+    ["a/my b/file.txt", "b/my b/file.txt"],
+  );
+});
+
 test("parseUnifiedDiffHeaderPath decodes named Git escapes in fallback quoted paths", () => {
   assert.equal(
     parseUnifiedDiffHeaderPath('"a/dir\\tname/caf\\303\\251.mjs"'),
