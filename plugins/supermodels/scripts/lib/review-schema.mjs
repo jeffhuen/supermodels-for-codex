@@ -88,36 +88,48 @@ export function structuredReviewInstructions() {
 }
 
 export function normalizeStructuredReview(value) {
+  return validateStructuredReview(value).review;
+}
+
+export function validateStructuredReview(value) {
+  const errors = [];
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
+    return { review: null, errors: ["review must be an object"] };
   }
 
   const verdict = String(value.verdict ?? "").trim();
   if (!VALID_VERDICTS.has(verdict)) {
-    return null;
+    return { review: null, errors: ["verdict must be clean, needs-attention, or inconclusive"] };
   }
 
   if (!Array.isArray(value.findings)) {
-    return null;
+    return { review: null, errors: ["findings must be an array"] };
   }
   const findings = [];
-  for (const finding of value.findings) {
-    const normalized = normalizeStructuredFinding(finding);
-    if (!normalized) {
-      return null;
+  value.findings.forEach((finding, index) => {
+    const { finding: normalized, errors: findingErrors } = normalizeStructuredFinding(finding, `findings[${index}]`);
+    if (findingErrors.length) {
+      errors.push(...findingErrors);
+      return;
     }
     findings.push(normalized);
-  }
+  });
   if (verdict === "needs-attention" && findings.length === 0) {
-    return null;
+    errors.push("needs-attention reviews must include at least one valid finding");
+  }
+  if (errors.length) {
+    return { review: null, errors };
   }
 
   return {
-    verdict,
-    summary: String(value.summary ?? "").trim(),
-    findings,
-    assumptions: normalizeStringArray(value.assumptions),
-    verification_gaps: normalizeStringArray(value.verification_gaps),
+    review: {
+      verdict,
+      summary: String(value.summary ?? "").trim(),
+      findings,
+      assumptions: normalizeStringArray(value.assumptions),
+      verification_gaps: normalizeStringArray(value.verification_gaps),
+    },
+    errors: [],
   };
 }
 
@@ -147,31 +159,61 @@ export function structuredReviewToFindings(review) {
   return normalized?.findings ?? [];
 }
 
-function normalizeStructuredFinding(value) {
+function normalizeStructuredFinding(value, prefix = "finding") {
+  const errors = [];
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
+    return { finding: null, errors: [`${prefix} must be an object`] };
   }
   const severity = normalizeSeverity(value.severity);
   const confidence = normalizeConfidence(value.confidence);
   const title = String(value.title ?? "").trim();
   const evidence = String(value.evidence ?? "").trim();
+  const impact = String(value.impact ?? "").trim();
+  const recommendation = String(value.recommendation ?? "").trim();
   const file = String(value.file ?? "").trim();
   const lineStart = normalizeLine(value.line_start);
   const lineEnd = normalizeLine(value.line_end);
-  if (!title || !evidence || !file || !lineStart || !lineEnd || lineEnd < lineStart) {
-    return null;
+  if (!title) {
+    errors.push(`${prefix}.title must be non-empty`);
+  }
+  if (!evidence) {
+    errors.push(`${prefix}.evidence must be non-empty`);
+  }
+  if (!impact) {
+    errors.push(`${prefix}.impact must be non-empty`);
+  }
+  if (!recommendation) {
+    errors.push(`${prefix}.recommendation must be non-empty`);
+  }
+  if (!file) {
+    errors.push(`${prefix}.file must be non-empty`);
+  }
+  if (!lineStart) {
+    errors.push(`${prefix}.line_start must be a positive integer`);
+  }
+  if (!lineEnd) {
+    errors.push(`${prefix}.line_end must be a positive integer`);
+  }
+  if (lineStart && lineEnd && lineEnd < lineStart) {
+    errors.push(`${prefix}.line_end must be greater than or equal to line_start`);
+  }
+  if (errors.length) {
+    return { finding: null, errors };
   }
   return {
-    severity,
-    title,
-    body: evidence,
-    evidence,
-    impact: String(value.impact ?? "").trim(),
-    recommendation: String(value.recommendation ?? "").trim(),
-    file,
-    line_start: lineStart,
-    line_end: lineEnd,
-    confidence,
+    finding: {
+      severity,
+      title,
+      body: evidence,
+      evidence,
+      impact,
+      recommendation,
+      file,
+      line_start: lineStart,
+      line_end: lineEnd,
+      confidence,
+    },
+    errors: [],
   };
 }
 

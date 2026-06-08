@@ -1,4 +1,8 @@
-import { REVIEW_RESULT_SCHEMA, normalizeStructuredReview, parseStructuredReviewText } from "./review-schema.mjs";
+import {
+  REVIEW_RESULT_SCHEMA,
+  parseStructuredReviewText,
+  validateStructuredReview,
+} from "./review-schema.mjs";
 
 const DEFAULT_REVIEW_POLICY = Object.freeze({
   maxRounds: Number.POSITIVE_INFINITY,
@@ -211,7 +215,8 @@ export async function runReviewAgent(options = {}) {
               }),
             };
           }
-          if (reviewCorrectionAttempts >= maxReviewCorrectionAttempts) {
+          const countsAsReviewCorrection = consumesReviewCorrection(accepted.error);
+          if (countsAsReviewCorrection && reviewCorrectionAttempts >= maxReviewCorrectionAttempts) {
             return inconclusiveRejectedStructuredReview(accepted.error, {
               toolUsage,
               rounds: round,
@@ -222,7 +227,9 @@ export async function runReviewAgent(options = {}) {
               reasoningOptions,
             });
           }
-          reviewCorrectionAttempts += 1;
+          if (countsAsReviewCorrection) {
+            reviewCorrectionAttempts += 1;
+          }
           messages.push({
             role: "user",
             content: [{
@@ -313,7 +320,8 @@ export async function runReviewAgent(options = {}) {
             }),
           };
         }
-        if (reviewCorrectionAttempts >= maxReviewCorrectionAttempts) {
+        const countsAsReviewCorrection = consumesReviewCorrection(submitted.error);
+        if (countsAsReviewCorrection && reviewCorrectionAttempts >= maxReviewCorrectionAttempts) {
           return inconclusiveRejectedStructuredReview(submitted.error, {
             toolUsage,
             rounds: round,
@@ -324,7 +332,9 @@ export async function runReviewAgent(options = {}) {
             reasoningOptions,
           });
         }
-        reviewCorrectionAttempts += 1;
+        if (countsAsReviewCorrection) {
+          reviewCorrectionAttempts += 1;
+        }
 
         const toolResults = [];
         for (const call of toolCalls) {
@@ -506,21 +516,22 @@ function formatUsageSummary(usage) {
 }
 
 async function handleSubmittedReview(call, inspection, minInspection, verification) {
-  const normalized = normalizeStructuredReview(call.input);
+  const validation = validateStructuredReview(call.input);
+  const normalized = validation.review;
   if (!normalized) {
+    const error = {
+      ok: false,
+      error: "submit_review input did not match the review schema. Retry with the listed fields fixed.",
+      correction_kind: "review-validation",
+      validation_errors: validation.errors,
+    };
     return {
       done: false,
-      error: {
-        ok: false,
-        error: "submit_review input did not match the review schema. Retry with all required fields.",
-      },
+      error,
       toolResult: {
         type: "tool_result",
         tool_use_id: call.id,
-        content: JSON.stringify({
-          ok: false,
-          error: "submit_review input did not match the review schema. Retry with all required fields.",
-        }),
+        content: JSON.stringify(error),
       },
     };
   }
@@ -539,6 +550,10 @@ async function handleSubmittedReview(call, inspection, minInspection, verificati
   return accepted;
 }
 
+function consumesReviewCorrection(error) {
+  return error?.correction_kind === "review-validation";
+}
+
 async function acceptStructuredReview(review, inspection, minInspection, verification = {}) {
   const visibleInspection = visibleInspectionState(inspection);
   if (!inspectionSatisfied(inspection, minInspection)) {
@@ -547,6 +562,7 @@ async function acceptStructuredReview(review, inspection, minInspection, verific
       done: false,
       error: {
         ok: false,
+        correction_kind: "inspection",
         error: requiredExplicitCalls > 0
           ? `submit_review refused: inspect the diff and use read_file or search on at least ${requiredExplicitCalls} relevant files/search targets before submitting final findings.`
           : "submit_review refused: inspect the diff and at least one relevant file or search result before submitting final findings.",
@@ -560,6 +576,7 @@ async function acceptStructuredReview(review, inspection, minInspection, verific
       done: false,
       error: {
         ok: false,
+        correction_kind: "review-validation",
         error: "submit_review refused: one or more finding locations could not be verified against repository files.",
         findings: findingLocationErrors,
       },
@@ -570,6 +587,7 @@ async function acceptStructuredReview(review, inspection, minInspection, verific
       done: false,
       error: {
         ok: false,
+        correction_kind: "inspection",
         error: "submit_review refused: clean verdict requires more repository inspection. Use read_file or search on at least two relevant files/search targets before returning clean.",
         inspection: visibleInspection,
         required: {
@@ -622,14 +640,7 @@ async function verifyFindingLocations(review, { tools, controller, abort } = {})
     }
     throwIfCancelled(controller);
     const returnedPath = String(result?.path ?? "").trim();
-    const returnedEnd = Number(result?.end_line ?? requestedEnd);
-    if (
-      !result?.ok
-      || returnedPath !== file
-      || !String(result.content ?? "").trim()
-      || !Number.isInteger(returnedEnd)
-      || returnedEnd < start
-    ) {
+    if (!result?.ok) {
       errors.push({
         title: finding.title || "(untitled)",
         file,
@@ -637,9 +648,26 @@ async function verifyFindingLocations(review, { tools, controller, abort } = {})
         line_end: end,
         error: `finding location could not be verified: ${result?.error || "no readable content at the cited line"}`,
       });
+      continue;
+    }
+    if (comparableReviewPath(returnedPath) !== comparableReviewPath(file)) {
+      errors.push({
+        title: finding.title || "(untitled)",
+        file,
+        line_start: start,
+        line_end: end,
+        error: `finding location could not be verified: read_file returned ${returnedPath || "(no path)"} for ${file}`,
+      });
     }
   }
   return errors;
+}
+
+function comparableReviewPath(value) {
+  return String(value ?? "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\.\/+/, "");
 }
 
 function inspectionSatisfied(inspection, required) {

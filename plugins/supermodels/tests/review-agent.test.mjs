@@ -183,6 +183,259 @@ test("runReviewAgent asks for one correction when finding location is not readab
   assert.match(correctionMessage, /missing-file\.mjs/);
 });
 
+test("runReviewAgent accepts normalized finding paths returned by read_file", async () => {
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", {
+          path: "plugins/supermodels/scripts/lib/review-agent.mjs",
+        });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", {
+          query: "verifyFindingLocations",
+        });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "needs-attention",
+        summary: "Path normalization checked.",
+        findings: [{
+          severity: "medium",
+          title: "Normalized path",
+          evidence: "The path was copied from search output with a leading dot slash.",
+          impact: "Valid findings should not be rejected for path spelling.",
+          recommendation: "Normalize compared paths.",
+          file: "./plugins/supermodels/scripts/lib/review-agent.mjs",
+          line_start: 1,
+          line_end: 1,
+          confidence: "medium",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+  const fakeTools = {
+    schemas: [],
+    async execute(name, input = {}) {
+      if (name === "get_diff") {
+        return { ok: true, diffSummary: "1 file changed", diff: "diff --git a/a b/a" };
+      }
+      if (name === "read_file") {
+        return {
+          ok: true,
+          path: String(input.path ?? "").replace(/^\.\//, ""),
+          start_line: Number(input.start_line ?? 1),
+          end_line: Number(input.end_line ?? input.start_line ?? 1),
+          content: `${Number(input.start_line ?? 1)}: export {};`,
+        };
+      }
+      if (name === "search") {
+        return { ok: true, query: input.query, output: "./plugins/supermodels/scripts/lib/review-agent.mjs:1:export {};" };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    maxRounds: 4,
+  });
+
+  assert.equal(result.verdict, "needs-attention");
+  assert.equal(result.findings[0].file, "./plugins/supermodels/scripts/lib/review-agent.mjs");
+});
+
+test("runReviewAgent does not spend finding correction budget on inspection gate refusals", async () => {
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1 || this.calls === 3) {
+        return responseWithTool(`early_submit_${this.calls}`, "submit_review", cleanReview("Too early."));
+      }
+      if (this.calls === 2) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 4) {
+        return responseWithTool("read_1", "read_file", {
+          path: "plugins/supermodels/scripts/lib/review-agent.mjs",
+        });
+      }
+      if (this.calls === 5) {
+        return responseWithTool("search_1", "search", {
+          query: "runReviewAgent",
+        });
+      }
+      if (this.calls === 6) {
+        return responseWithTool("bad_submit", "submit_review", {
+          verdict: "needs-attention",
+          summary: "Bad location.",
+          findings: [{
+            severity: "medium",
+            title: "Bad location",
+            evidence: "The first real finding submit cites a missing file.",
+            impact: "This should get one correction attempt.",
+            recommendation: "Correct the location.",
+            file: "missing-file.mjs",
+            line_start: 10,
+            line_end: 10,
+            confidence: "medium",
+          }],
+          assumptions: [],
+          verification_gaps: [],
+        });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "needs-attention",
+        summary: "Corrected after early submits.",
+        findings: [{
+          severity: "medium",
+          title: "Corrected",
+          evidence: "The corrected finding cites a readable file.",
+          impact: "Inspection gate refusals did not consume the correction budget.",
+          recommendation: "Keep budgets separate.",
+          file: "plugins/supermodels/scripts/lib/review-agent.mjs",
+          line_start: 1,
+          line_end: 1,
+          confidence: "medium",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: reviewToolsForDiffAndFiles(),
+    maxRounds: 7,
+  });
+
+  assert.equal(result.verdict, "needs-attention");
+  assert.equal(result.summary, "Corrected after early submits.");
+});
+
+test("runReviewAgent surfaces concrete schema validation errors for correction", async () => {
+  const calls = [];
+  const fakeTransport = {
+    async messages(body) {
+      calls.push(body);
+      if (calls.length === 1) {
+        return responseWithTool("bad_submit", "submit_review", {
+          verdict: "needs-attention",
+          summary: "Bad schema.",
+          findings: [{
+            severity: "medium",
+            title: "Bad range",
+            evidence: "The line range is impossible.",
+            impact: "Provider should see the exact issue.",
+            recommendation: "Fix line_end.",
+            file: "plugins/supermodels/scripts/lib/review-agent.mjs",
+            line_start: 20,
+            line_end: 10,
+            confidence: "medium",
+          }],
+          assumptions: [],
+          verification_gaps: [],
+        });
+      }
+      return responseWithTool("submit_1", "submit_review", inconclusiveReview("schema error was corrected"));
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: reviewToolsForDiffAndFiles(),
+    minInspection: { diff: false, fileOrSearch: false, explicitFileOrSearchToolCalls: 0, cleanExplicitFileOrSearchToolCalls: 0 },
+    maxRounds: 2,
+  });
+
+  const correctionMessage = JSON.stringify(calls[1].messages.at(-1).content);
+  assert.equal(result.verdict, "inconclusive");
+  assert.match(correctionMessage, /findings\[0\]\.line_end must be greater than or equal to line_start/i);
+});
+
+test("runReviewAgent treats missing current-line content as advisory when the file is readable", async () => {
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", {
+          path: "plugins/supermodels/scripts/lib/review-agent.mjs",
+        });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", {
+          query: "deleted validation",
+        });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "needs-attention",
+        summary: "Line absence accepted.",
+        findings: [{
+          severity: "medium",
+          title: "Deleted line",
+          evidence: "The finding refers to a deleted or pre-change line.",
+          impact: "Valid deletion findings should not be dropped.",
+          recommendation: "Accept readable files even when the current line has no content.",
+          file: "plugins/supermodels/scripts/lib/review-agent.mjs",
+          line_start: 999999,
+          line_end: 999999,
+          confidence: "medium",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+  const fakeTools = {
+    schemas: [],
+    async execute(name, input = {}) {
+      if (name === "get_diff") {
+        return { ok: true, diffSummary: "1 file changed", diff: "diff --git a/a b/a" };
+      }
+      if (name === "read_file") {
+        const start = Number(input.start_line ?? 1);
+        return {
+          ok: true,
+          path: input.path,
+          start_line: start,
+          end_line: start,
+          content: start > 1000 ? "" : `${start}: export {};`,
+        };
+      }
+      if (name === "search") {
+        return { ok: true, query: input.query, output: "plugins/supermodels/scripts/lib/review-agent.mjs:1:export {};" };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    maxRounds: 4,
+  });
+
+  assert.equal(result.verdict, "needs-attention");
+  assert.equal(result.findings[0].line_start, 999999);
+});
+
 test("runReviewAgent stops after one repeated finding verification failure", async () => {
   const fakeTransport = {
     calls: 0,
@@ -848,17 +1101,18 @@ test("runReviewAgent refuses shallow clean verdicts until multiple files or sear
     },
   };
 
-  const result = await runReviewAgent({
-    provider: "antigravity",
-    transport: fakeTransport,
-    tools: reviewToolsForDiffAndFiles(),
-    minInspection: { diff: false, fileOrSearch: true },
-    forceAfterRounds: 2,
-    maxRounds: 3,
-  });
+  await assert.rejects(
+    () => runReviewAgent({
+      provider: "antigravity",
+      transport: fakeTransport,
+      tools: reviewToolsForDiffAndFiles(),
+      minInspection: { diff: false, fileOrSearch: true },
+      forceAfterRounds: 2,
+      maxRounds: 3,
+    }),
+    /review did not complete/i,
+  );
 
-  assert.equal(result.verdict, "inconclusive");
-  assert.match(result.summary, /could not be accepted/i);
   assert.match(JSON.stringify(calls[2].messages), /at least 2 relevant files/i);
 });
 

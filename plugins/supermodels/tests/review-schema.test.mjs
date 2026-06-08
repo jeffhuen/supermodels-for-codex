@@ -47,6 +47,28 @@ test("normalizeStructuredReview rejects impossible finding line ranges", () => {
   assert.equal(invalid, null);
 });
 
+test("normalizeStructuredReview rejects findings with empty impact or recommendation", () => {
+  const invalid = normalizeStructuredReview({
+    verdict: "needs-attention",
+    summary: "Missing required actionable details.",
+    findings: [{
+      severity: "medium",
+      title: "Missing detail",
+      evidence: "Evidence is present.",
+      impact: "",
+      recommendation: "",
+      file: "plugins/supermodels/scripts/lib/review-schema.mjs",
+      line_start: 1,
+      line_end: 1,
+      confidence: "medium",
+    }],
+    assumptions: [],
+    verification_gaps: [],
+  });
+
+  assert.equal(invalid, null);
+});
+
 test("structuredReviewInstructions include a severity rubric", () => {
   const instructions = structuredReviewInstructions();
 
