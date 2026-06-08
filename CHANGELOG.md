@@ -69,6 +69,7 @@ Initial public release.
 - Antigravity Code Assist request histories now coalesce adjacent same-role turns before sending, matching Gemini-style role alternation expectations for preloaded context and follow-up tool results.
 - Antigravity Code Assist responses now validate finality signals and reject empty stopped responses, malformed function-call stops, unexpected tool-call stops, and repeated no-tool continuation churn as review no-progress instead of silently looping.
 - Antigravity normal reviews now get a post-evidence submit backstop: after the evidence gate is satisfied and four more model-led rounds pass, the loop forces `submit_review` instead of allowing unbounded additional inspection.
+- Structured review acceptance now rejects empty or invalid finding locations/evidence, includes a severity rubric, verifies cited file/line ranges with read-only repository tools, and gives providers one correction turn before returning an inconclusive validation result.
 - Setup output now mirrors actual readiness for providers without setup hooks, avoiding contradictory provider setup/check status.
 - Review failures now include provider-specific readiness reasons when no requested provider can run.
 - Human review output now prints failed job errors instead of an empty synthesized review section.

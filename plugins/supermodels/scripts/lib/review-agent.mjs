@@ -10,6 +10,7 @@ const DEFAULT_REVIEW_POLICY = Object.freeze({
   claudeThinking: Object.freeze({ type: "adaptive", display: "summarized" }),
   claudeEffort: null,
   antigravityThinkingBudget: -1,
+  maxReviewCorrectionAttempts: 1,
   minInspection: Object.freeze({
     diff: true,
     fileOrSearch: true,
@@ -46,6 +47,8 @@ export async function runReviewAgent(options = {}) {
   const forceInspectionTools = options.forceInspectionTools ?? DEFAULT_REVIEW_POLICY.forceInspectionTools;
   const maxNoToolContinuationRounds = options.maxNoToolContinuationRounds
     ?? DEFAULT_REVIEW_POLICY.maxNoToolContinuationRounds;
+  const maxReviewCorrectionAttempts = options.maxReviewCorrectionAttempts
+    ?? DEFAULT_REVIEW_POLICY.maxReviewCorrectionAttempts;
   if (!transport?.messages) {
     throw new Error("runReviewAgent requires a transport with messages(body, options).");
   }
@@ -75,6 +78,7 @@ export async function runReviewAgent(options = {}) {
   let cumulativeUsage = null;
   let structuredConversionRequested = false;
   let noToolContinuationRounds = 0;
+  let reviewCorrectionAttempts = 0;
   const reasoningOptions = providerReasoningOptions(provider, options);
 
   try {
@@ -186,7 +190,11 @@ export async function runReviewAgent(options = {}) {
         const finalText = responseText(response);
         const naturalReview = parseStructuredReviewText(finalText);
         if (naturalReview) {
-          const accepted = acceptStructuredReview(naturalReview, inspection, minInspection);
+          const accepted = await acceptStructuredReview(naturalReview, inspection, minInspection, {
+            tools,
+            controller,
+            abort,
+          });
           if (accepted.done) {
             return {
               ...accepted.review,
@@ -203,6 +211,18 @@ export async function runReviewAgent(options = {}) {
               }),
             };
           }
+          if (reviewCorrectionAttempts >= maxReviewCorrectionAttempts) {
+            return inconclusiveRejectedStructuredReview(accepted.error, {
+              toolUsage,
+              rounds: round,
+              usage: cumulativeUsage,
+              provider,
+              model,
+              maxTokens,
+              reasoningOptions,
+            });
+          }
+          reviewCorrectionAttempts += 1;
           messages.push({
             role: "user",
             content: [{
@@ -272,7 +292,11 @@ export async function runReviewAgent(options = {}) {
           }));
         }
 
-        const submitted = handleSubmittedReview(submitCall, inspection, minInspection);
+        const submitted = await handleSubmittedReview(submitCall, inspection, minInspection, {
+          tools,
+          controller,
+          abort,
+        });
         if (submitted.done) {
           return {
             ...submitted.review,
@@ -289,6 +313,18 @@ export async function runReviewAgent(options = {}) {
             }),
           };
         }
+        if (reviewCorrectionAttempts >= maxReviewCorrectionAttempts) {
+          return inconclusiveRejectedStructuredReview(submitted.error, {
+            toolUsage,
+            rounds: round,
+            usage: cumulativeUsage,
+            provider,
+            model,
+            maxTokens,
+            reasoningOptions,
+          });
+        }
+        reviewCorrectionAttempts += 1;
 
         const toolResults = [];
         for (const call of toolCalls) {
@@ -469,11 +505,15 @@ function formatUsageSummary(usage) {
     : "updated";
 }
 
-function handleSubmittedReview(call, inspection, minInspection) {
+async function handleSubmittedReview(call, inspection, minInspection, verification) {
   const normalized = normalizeStructuredReview(call.input);
   if (!normalized) {
     return {
       done: false,
+      error: {
+        ok: false,
+        error: "submit_review input did not match the review schema. Retry with all required fields.",
+      },
       toolResult: {
         type: "tool_result",
         tool_use_id: call.id,
@@ -484,10 +524,11 @@ function handleSubmittedReview(call, inspection, minInspection) {
       },
     };
   }
-  const accepted = acceptStructuredReview(normalized, inspection, minInspection);
+  const accepted = await acceptStructuredReview(normalized, inspection, minInspection, verification);
   if (!accepted.done) {
     return {
       done: false,
+      error: accepted.error,
       toolResult: {
         type: "tool_result",
         tool_use_id: call.id,
@@ -498,7 +539,7 @@ function handleSubmittedReview(call, inspection, minInspection) {
   return accepted;
 }
 
-function acceptStructuredReview(review, inspection, minInspection) {
+async function acceptStructuredReview(review, inspection, minInspection, verification = {}) {
   const visibleInspection = visibleInspectionState(inspection);
   if (!inspectionSatisfied(inspection, minInspection)) {
     const requiredExplicitCalls = Number(minInspection.explicitFileOrSearchToolCalls ?? 0);
@@ -510,6 +551,17 @@ function acceptStructuredReview(review, inspection, minInspection) {
           ? `submit_review refused: inspect the diff and use read_file or search on at least ${requiredExplicitCalls} relevant files/search targets before submitting final findings.`
           : "submit_review refused: inspect the diff and at least one relevant file or search result before submitting final findings.",
         inspection: visibleInspection,
+      },
+    };
+  }
+  const findingLocationErrors = await verifyFindingLocations(review, verification);
+  if (findingLocationErrors.length) {
+    return {
+      done: false,
+      error: {
+        ok: false,
+        error: "submit_review refused: one or more finding locations could not be verified against repository files.",
+        findings: findingLocationErrors,
       },
     };
   }
@@ -527,6 +579,67 @@ function acceptStructuredReview(review, inspection, minInspection) {
     };
   }
   return { done: true, review };
+}
+
+async function verifyFindingLocations(review, { tools, controller, abort } = {}) {
+  if (!Array.isArray(review.findings) || review.findings.length === 0) {
+    return [];
+  }
+  if (!tools?.execute) {
+    return [];
+  }
+  const errors = [];
+  for (const finding of review.findings) {
+    const file = String(finding.file ?? "").trim();
+    const start = Number(finding.line_start);
+    const end = Number(finding.line_end);
+    if (!file || !Number.isInteger(start) || !Number.isInteger(end) || start <= 0 || end < start) {
+      errors.push({
+        title: finding.title || "(untitled)",
+        file,
+        line_start: finding.line_start ?? null,
+        line_end: finding.line_end ?? null,
+        error: "finding location is missing or invalid",
+      });
+      continue;
+    }
+    const requestedEnd = Math.min(end, start + 199);
+    let result;
+    try {
+      result = await tools.execute("read_file", {
+        path: file,
+        start_line: start,
+        end_line: requestedEnd,
+      }, {
+        controller,
+        signal: abort?.signal,
+      });
+    } catch (error) {
+      result = {
+        ok: false,
+        error: error?.message || String(error),
+      };
+    }
+    throwIfCancelled(controller);
+    const returnedPath = String(result?.path ?? "").trim();
+    const returnedEnd = Number(result?.end_line ?? requestedEnd);
+    if (
+      !result?.ok
+      || returnedPath !== file
+      || !String(result.content ?? "").trim()
+      || !Number.isInteger(returnedEnd)
+      || returnedEnd < start
+    ) {
+      errors.push({
+        title: finding.title || "(untitled)",
+        file,
+        line_start: start,
+        line_end: end,
+        error: `finding location could not be verified: ${result?.error || "no readable content at the cited line"}`,
+      });
+    }
+  }
+  return errors;
 }
 
 function inspectionSatisfied(inspection, required) {
@@ -649,6 +762,7 @@ function initialPrompt({ provider, brief, focus, mode }) {
     "- Treat user-provided prior findings as hypotheses, not facts.",
     "- If evidence is missing, put that in verification_gaps instead of inventing a finding.",
     "- Do not report vague concerns, stylistic preferences, or issues that are already covered by tests unless the tests are insufficient.",
+    "- Severity rubric: critical means security breach, data loss, irreversible corruption, or production outage; high means likely user-visible regression, broken workflow, or serious correctness issue; medium means plausible bug or bounded edge case; low means maintainability, test, or documentation gap.",
     "",
     "Suggested flow:",
     "1. Start from the preloaded review context when present, otherwise call get_review_context.",
@@ -780,6 +894,31 @@ function inconclusiveUnstructuredFinalReview(finalText) {
     verification_gaps: [
       "Provider ended after a structured-conversion prompt without returning parseable structured review JSON.",
     ],
+  };
+}
+
+function inconclusiveRejectedStructuredReview(error, metadata) {
+  const summary = `Provider structured review could not be accepted after correction: ${limitSummary(JSON.stringify(error))}`;
+  return {
+    verdict: "inconclusive",
+    summary,
+    findings: [],
+    assumptions: [],
+    verification_gaps: [
+      "Provider returned structured review output that failed Supermodels validation after one correction attempt.",
+      limitSummary(JSON.stringify(error)),
+    ],
+    toolUsage: metadata.toolUsage,
+    rounds: metadata.rounds,
+    usage: metadata.usage,
+    reviewConfig: reviewConfigMetadata({
+      provider: metadata.provider,
+      model: metadata.model,
+      maxTokens: metadata.maxTokens,
+      reasoningOptions: metadata.reasoningOptions,
+      rounds: metadata.rounds,
+      toolUsage: metadata.toolUsage,
+    }),
   };
 }
 

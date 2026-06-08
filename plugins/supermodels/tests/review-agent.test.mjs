@@ -110,6 +110,129 @@ test("runReviewAgent returns structured review after diff and file inspection", 
   assert.equal(result.toolUsage.search, 1);
 });
 
+test("runReviewAgent asks for one correction when finding location is not readable", async () => {
+  const calls = [];
+  const fakeTransport = {
+    calls: 0,
+    async messages(body) {
+      this.calls += 1;
+      calls.push(body);
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", {
+          path: "plugins/supermodels/scripts/lib/review-agent.mjs",
+        });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", {
+          query: "runReviewAgent",
+        });
+      }
+      if (this.calls === 4) {
+        return responseWithTool("bad_submit", "submit_review", {
+          verdict: "needs-attention",
+          summary: "Bad location.",
+          findings: [{
+            severity: "medium",
+            title: "Bad location",
+            evidence: "The model cited a file that cannot be read.",
+            impact: "The finding is not actionable.",
+            recommendation: "Cite a real file and line.",
+            file: "missing-file.mjs",
+            line_start: 10,
+            line_end: 10,
+            confidence: "medium",
+          }],
+          assumptions: [],
+          verification_gaps: [],
+        });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "needs-attention",
+        summary: "Corrected location.",
+        findings: [{
+          severity: "medium",
+          title: "Corrected location",
+          evidence: "The corrected finding cites a readable file and line.",
+          impact: "The finding is actionable.",
+          recommendation: "Keep the location verifier.",
+          file: "plugins/supermodels/scripts/lib/review-agent.mjs",
+          line_start: 1,
+          line_end: 1,
+          confidence: "medium",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: reviewToolsForDiffAndFiles(),
+    maxRounds: 5,
+  });
+
+  assert.equal(result.verdict, "needs-attention");
+  assert.equal(result.findings[0].file, "plugins/supermodels/scripts/lib/review-agent.mjs");
+  const correctionMessage = JSON.stringify(calls[4].messages.at(-1).content);
+  assert.match(correctionMessage, /finding location could not be verified/i);
+  assert.match(correctionMessage, /missing-file\.mjs/);
+});
+
+test("runReviewAgent stops after one repeated finding verification failure", async () => {
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", {
+          path: "plugins/supermodels/scripts/lib/review-agent.mjs",
+        });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", {
+          query: "runReviewAgent",
+        });
+      }
+      return responseWithTool(`bad_submit_${this.calls}`, "submit_review", {
+        verdict: "needs-attention",
+        summary: "Still bad.",
+        findings: [{
+          severity: "medium",
+          title: "Still bad",
+          evidence: "The model still cites a missing file.",
+          impact: "The finding remains unactionable.",
+          recommendation: "Return a valid location.",
+          file: "missing-file.mjs",
+          line_start: 10,
+          line_end: 10,
+          confidence: "medium",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: reviewToolsForDiffAndFiles(),
+    maxRounds: 6,
+  });
+
+  assert.equal(result.verdict, "inconclusive");
+  assert.match(result.summary, /could not be accepted/i);
+  assert.equal(fakeTransport.calls, 5);
+});
+
 test("runReviewAgent sends Anthropic-compatible tool_result blocks without names", async () => {
   const calls = [];
   const fakeTransport = {
@@ -725,18 +848,17 @@ test("runReviewAgent refuses shallow clean verdicts until multiple files or sear
     },
   };
 
-  await assert.rejects(
-    () => runReviewAgent({
-      provider: "antigravity",
-      transport: fakeTransport,
-      tools: reviewToolsForDiffAndFiles(),
-      minInspection: { diff: false, fileOrSearch: true },
-      forceAfterRounds: 2,
-      maxRounds: 3,
-    }),
-    /review did not complete/i,
-  );
+  const result = await runReviewAgent({
+    provider: "antigravity",
+    transport: fakeTransport,
+    tools: reviewToolsForDiffAndFiles(),
+    minInspection: { diff: false, fileOrSearch: true },
+    forceAfterRounds: 2,
+    maxRounds: 3,
+  });
 
+  assert.equal(result.verdict, "inconclusive");
+  assert.match(result.summary, /could not be accepted/i);
   assert.match(JSON.stringify(calls[2].messages), /at least 2 relevant files/i);
 });
 
@@ -1272,14 +1394,32 @@ function inconclusiveReview(summary) {
 }
 
 function reviewToolsForDiffAndFiles() {
+  const readableFiles = new Set([
+    "a.mjs",
+    "runtime.mjs",
+    "plugins/supermodels/scripts/lib/runtime.mjs",
+    "plugins/supermodels/scripts/lib/review-agent.mjs",
+  ]);
   return {
     schemas: [],
-    async execute(name) {
+    async execute(name, input = {}) {
       if (name === "get_diff") {
         return { ok: true, diffSummary: "1 file changed", diff: "diff --git a/a b/a" };
       }
       if (name === "read_file") {
-        return { ok: true, path: "runtime.mjs", content: "1: export {};" };
+        const filePath = String(input.path ?? "runtime.mjs");
+        if (!readableFiles.has(filePath) && !/^extra-\d+\.mjs$/.test(filePath) && !/^runtime-\d+\.mjs$/.test(filePath)) {
+          return { ok: false, path: filePath, error: "Path resolves outside workspace." };
+        }
+        const start = Number(input.start_line ?? 1);
+        const end = Number(input.end_line ?? start);
+        return {
+          ok: true,
+          path: filePath,
+          start_line: Number.isFinite(start) ? start : 1,
+          end_line: Number.isFinite(end) ? end : start,
+          content: `${Number.isFinite(start) ? start : 1}: export {};`,
+        };
       }
       if (name === "search") {
         return { ok: true, query: "runReviewAgent", output: "review-agent.mjs:1:export async function runReviewAgent" };

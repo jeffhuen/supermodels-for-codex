@@ -78,6 +78,12 @@ export function structuredReviewInstructions() {
     "- verification_gaps: array of checks that still need verification",
     "",
     "Each finding must include severity, title, evidence, impact, recommendation, file, line_start, line_end, and confidence.",
+    "",
+    "Severity rubric:",
+    "- critical: security breach, data loss, irreversible corruption, or production outage.",
+    "- high: likely user-visible regression, broken workflow, or serious correctness issue.",
+    "- medium: plausible bug or edge case with bounded impact.",
+    "- low: maintainability issue, confusing behavior, test gap, or documentation gap.",
   ].join("\n");
 }
 
@@ -91,10 +97,18 @@ export function normalizeStructuredReview(value) {
     return null;
   }
 
-  const findings = Array.isArray(value.findings)
-    ? value.findings.map(normalizeStructuredFinding).filter(Boolean)
-    : null;
-  if (!findings) {
+  if (!Array.isArray(value.findings)) {
+    return null;
+  }
+  const findings = [];
+  for (const finding of value.findings) {
+    const normalized = normalizeStructuredFinding(finding);
+    if (!normalized) {
+      return null;
+    }
+    findings.push(normalized);
+  }
+  if (verdict === "needs-attention" && findings.length === 0) {
     return null;
   }
 
@@ -139,19 +153,24 @@ function normalizeStructuredFinding(value) {
   }
   const severity = normalizeSeverity(value.severity);
   const confidence = normalizeConfidence(value.confidence);
-  if (!VALID_CONFIDENCE.has(confidence)) {
+  const title = String(value.title ?? "").trim();
+  const evidence = String(value.evidence ?? "").trim();
+  const file = String(value.file ?? "").trim();
+  const lineStart = normalizeLine(value.line_start);
+  const lineEnd = normalizeLine(value.line_end);
+  if (!title || !evidence || !file || !lineStart || !lineEnd || lineEnd < lineStart) {
     return null;
   }
   return {
     severity,
-    title: String(value.title ?? "").trim(),
-    body: String(value.evidence ?? value.title ?? "").trim(),
-    evidence: String(value.evidence ?? "").trim(),
+    title,
+    body: evidence,
+    evidence,
     impact: String(value.impact ?? "").trim(),
     recommendation: String(value.recommendation ?? "").trim(),
-    file: String(value.file ?? "").trim(),
-    line_start: normalizeLine(value.line_start),
-    line_end: normalizeLine(value.line_end),
+    file,
+    line_start: lineStart,
+    line_end: lineEnd,
     confidence,
   };
 }
