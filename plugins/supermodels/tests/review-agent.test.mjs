@@ -513,6 +513,32 @@ test("runReviewAgent stops after one failed structured conversion turn", async (
   assert.equal(fakeTransport.calls, 5);
 });
 
+test("runReviewAgent fails no-tool churn as no progress instead of looping indefinitely", async () => {
+  const prompts = [];
+  const fakeTransport = {
+    calls: 0,
+    async messages(body) {
+      this.calls += 1;
+      prompts.push(JSON.stringify(body.messages.at(-1).content));
+      return responseWithText("I am still considering the review.");
+    },
+  };
+
+  await assert.rejects(
+    () => runReviewAgent({
+      provider: "antigravity",
+      transport: fakeTransport,
+      tools: { schemas: [], async execute() {} },
+      maxNoToolContinuationRounds: 2,
+      maxRounds: 10,
+    }),
+    /no repository-inspection progress/i,
+  );
+
+  assert.equal(fakeTransport.calls, 2);
+  assert.match(prompts[1], /Continue the review with repository tools/i);
+});
+
 test("runReviewAgent uses timeout as an aggregate review budget", async () => {
   const seenTimeouts = [];
   const fakeTransport = {

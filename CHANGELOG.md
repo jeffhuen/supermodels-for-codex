@@ -65,6 +65,9 @@ Initial public release.
 - Antigravity OAuth refresh now matches the AGY/TradingAgents credential flow: expired local CLI tokens are refreshed directly through Google's token endpoint and persisted back to the same Keychain or token file.
 - Antigravity direct reviews use Gemini 3.5 Flash High (`gemini-3-flash-preview`) as the supported Code Assist review target; unsupported Pro aliases fail loudly instead of silently downgrading or routing to a stub.
 - Antigravity Code Assist tool-call `thoughtSignature` values are preserved across model/tool turns, matching the TradingAgents transport and avoiding missing-signature request rejection.
+- Antigravity direct reviews now use the Code Assist streaming endpoint, preserve provider function-call ids, include matching function-response ids, and synthesize the first-call thought signature only when Code Assist requires one.
+- Antigravity Code Assist request histories now coalesce adjacent same-role turns before sending, matching Gemini-style role alternation expectations for preloaded context and follow-up tool results.
+- Antigravity Code Assist responses now validate finality signals and reject empty stopped responses, malformed function-call stops, unexpected tool-call stops, and repeated no-tool continuation churn as review no-progress instead of silently looping.
 - Setup output now mirrors actual readiness for providers without setup hooks, avoiding contradictory provider setup/check status.
 - Review failures now include provider-specific readiness reasons when no requested provider can run.
 - Human review output now prints failed job errors instead of an empty synthesized review section.
@@ -82,3 +85,4 @@ Initial public release.
 ### Known Limitations
 
 - Additional providers are intentionally out of scope for `0.1.0`.
+- Direct reviews provide the core Claude Code-style tool-call loop, but not full Claude Code harness parity. Incremental streaming, transcript replay, compaction, richer context provenance, and long-output continuation are tracked as v2 catch-up work in `decisions/0003-claude-code-harness-parity-v2.md`.

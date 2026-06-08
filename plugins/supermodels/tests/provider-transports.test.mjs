@@ -16,6 +16,7 @@ import {
   AntigravityCodeAssistTransport,
   collectAntigravityResponse,
   mapToolChoiceToFunctionConfig,
+  parseCodeAssistSseLines,
   toCodeAssistRequest,
 } from "../scripts/providers/antigravity/code-assist-transport.mjs";
 
@@ -549,11 +550,11 @@ test("toCodeAssistRequest converts tool turns into function call and response pa
 
   assert.equal(request.systemInstruction.parts[0].text, "system prompt");
   assert.deepEqual(request.contents[1].parts, [{
-    functionCall: { name: "get_diff", args: {} },
+    functionCall: { id: "call_1", name: "get_diff", args: {} },
     thoughtSignature: "sig-get-diff",
   }]);
   assert.deepEqual(request.contents[2].parts, [{
-    functionResponse: { name: "get_diff", response: { ok: true } },
+    functionResponse: { id: "call_1", name: "get_diff", response: { ok: true } },
   }]);
   assert.deepEqual(request.tools[0].functionDeclarations[0], {
     name: "get_diff",
@@ -562,6 +563,68 @@ test("toCodeAssistRequest converts tool turns into function call and response pa
   });
   assert.deepEqual(request.toolConfig, mapToolChoiceToFunctionConfig({ type: "tool", name: "submit_review" }));
   assert.equal(request.generationConfig.maxOutputTokens, 4096);
+});
+
+test("toCodeAssistRequest hardens AGY tool history with ids and synthetic signatures", () => {
+  const request = toCodeAssistRequest({
+    messages: [
+      { role: "user", content: [{ type: "text", text: "review this" }] },
+      {
+        role: "assistant",
+        content: [{
+          type: "tool_use",
+          id: "server-call-7",
+          name: "read_file",
+          input: { path: "runtime.mjs" },
+        }],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "server-call-7", content: "{\"ok\":true}" }],
+      },
+    ],
+  });
+
+  assert.deepEqual(request.contents[1].parts, [{
+    functionCall: { id: "server-call-7", name: "read_file", args: { path: "runtime.mjs" } },
+    thoughtSignature: "supermodels-synthetic-thought-signature",
+  }]);
+  assert.deepEqual(request.contents[2].parts, [{
+    functionResponse: { id: "server-call-7", name: "read_file", response: { ok: true } },
+  }]);
+});
+
+test("toCodeAssistRequest coalesces adjacent same-role turns for Gemini history", () => {
+  const request = toCodeAssistRequest({
+    messages: [
+      { role: "user", content: [{ type: "text", text: "initial prompt" }] },
+      { role: "user", content: [{ type: "text", text: "preloaded context" }] },
+      {
+        role: "assistant",
+        content: [{
+          type: "tool_use",
+          id: "call_1",
+          name: "read_file",
+          input: { path: "runtime.mjs" },
+          thoughtSignature: "sig-read",
+        }],
+      },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "{\"ok\":true}" }] },
+      { role: "user", content: [{ type: "text", text: "continue with evidence" }] },
+    ],
+  });
+
+  assert.equal(request.contents.length, 3);
+  assert.equal(request.contents[0].role, "user");
+  assert.deepEqual(request.contents[0].parts, [
+    { text: "initial prompt" },
+    { text: "preloaded context" },
+  ]);
+  assert.equal(request.contents[2].role, "user");
+  assert.deepEqual(request.contents[2].parts, [
+    { functionResponse: { id: "call_1", name: "read_file", response: { ok: true } } },
+    { text: "continue with evidence" },
+  ]);
 });
 
 test("toCodeAssistRequest maps dynamic thinking budget into generation config", () => {
@@ -600,7 +663,7 @@ test("collectAntigravityResponse parses function calls, text, and usage", () => 
         parts: [
           { text: "Inspecting." },
           {
-            functionCall: { name: "read_file", args: { path: "runtime.mjs" } },
+            functionCall: { id: "server-call-1", name: "read_file", args: { path: "runtime.mjs" } },
             thoughtSignature: "sig-read-file",
           },
         ],
@@ -616,14 +679,14 @@ test("collectAntigravityResponse parses function calls, text, and usage", () => 
 
   assert.equal(result.text, "Inspecting.");
   assert.deepEqual(result.tool_calls, [{
-    id: "call_1",
+    id: "server-call-1",
     name: "read_file",
     input: { path: "runtime.mjs" },
     thoughtSignature: "sig-read-file",
   }]);
   assert.deepEqual(result.content[1], {
     type: "tool_use",
-    id: "call_1",
+    id: "server-call-1",
     name: "read_file",
     input: { path: "runtime.mjs" },
     thoughtSignature: "sig-read-file",
@@ -635,7 +698,31 @@ test("collectAntigravityResponse parses function calls, text, and usage", () => 
   });
 });
 
-test("AntigravityCodeAssistTransport wraps requests in the Code Assist envelope", async () => {
+test("collectAntigravityResponse rejects empty stopped responses without tool calls", () => {
+  assert.throws(
+    () => collectAntigravityResponse({
+      candidates: [{
+        content: { parts: [] },
+        finishReason: "STOP",
+      }],
+      usageMetadata: {},
+    }),
+    /empty response text/i,
+  );
+});
+
+test("parseCodeAssistSseLines flushes final payloads without a trailing blank line", () => {
+  assert.deepEqual([...parseCodeAssistSseLines([
+    "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}}",
+  ])], [{
+    candidates: [{
+      content: { parts: [{ text: "ok" }] },
+      finishReason: "STOP",
+    }],
+  }]);
+});
+
+test("AntigravityCodeAssistTransport streams requests in the Code Assist envelope", async () => {
   const requests = [];
   const transport = new AntigravityCodeAssistTransport({
     credentials: { accessToken: async () => "access-token", forceReload: () => {} },
@@ -643,12 +730,14 @@ test("AntigravityCodeAssistTransport wraps requests in the Code Assist envelope"
     projectId: "project-1",
     fetchImpl: async (url, init) => {
       requests.push({ url, body: JSON.parse(init.body), headers: init.headers });
-      return new Response(JSON.stringify({
-        response: {
-          candidates: [{ content: { parts: [{ text: "ok" }] } }],
-          usageMetadata: {},
-        },
-      }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response([
+        "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]} }],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":2,\"totalTokenCount\":12}}}",
+        "",
+        "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"STOP\"}]}}",
+        "",
+        "data: [DONE]",
+        "",
+      ].join("\n"), { status: 200, headers: { "content-type": "text/event-stream" } });
     },
   });
 
@@ -659,13 +748,18 @@ test("AntigravityCodeAssistTransport wraps requests in the Code Assist envelope"
   });
 
   assert.equal(response.text, "ok");
-  assert.match(requests[0].url, /v1internal:generateContent$/);
+  assert.deepEqual(response.usage, {
+    input_tokens: 10,
+    output_tokens: 2,
+    total_tokens: 12,
+  });
+  assert.match(requests[0].url, /v1internal:streamGenerateContent\?alt=sse$/);
   assert.equal(requests[0].body.project, "project-1");
   assert.equal(requests[0].body.request.contents[0].role, "user");
   assert.match(requests[0].headers.Authorization, /^Bearer /);
 });
 
-test("AntigravityCodeAssistTransport forces OAuth refresh before retrying generateContent 401", async () => {
+test("AntigravityCodeAssistTransport forces OAuth refresh before retrying streamGenerateContent 401", async () => {
   const authorizations = [];
   let refreshed = false;
   let calls = 0;
@@ -682,7 +776,7 @@ test("AntigravityCodeAssistTransport forces OAuth refresh before retrying genera
     rateLimiter: noRateLimit,
     projectId: "project-1",
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith("v1internal:generateContent")) {
+      if (String(url).endsWith("v1internal:streamGenerateContent?alt=sse")) {
         calls += 1;
         authorizations.push(init.headers.Authorization);
         if (calls === 1) {
@@ -694,7 +788,7 @@ test("AntigravityCodeAssistTransport forces OAuth refresh before retrying genera
       }
       return new Response(JSON.stringify({
         response: {
-          candidates: [{ content: { parts: [{ text: "ok" }] } }],
+          candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
           usageMetadata: {},
         },
       }), { status: 200, headers: { "content-type": "application/json" } });
@@ -712,7 +806,7 @@ test("AntigravityCodeAssistTransport forces OAuth refresh before retrying genera
   assert.deepEqual(authorizations, ["Bearer old-token", "Bearer new-token"]);
 });
 
-test("AntigravityCodeAssistTransport discovers project id before generateContent", async () => {
+test("AntigravityCodeAssistTransport discovers project id before streamGenerateContent", async () => {
   const requests = [];
   const transport = new AntigravityCodeAssistTransport({
     credentials: { accessToken: async () => "access-token", forceReload: () => {} },
@@ -726,7 +820,7 @@ test("AntigravityCodeAssistTransport discovers project id before generateContent
       }
       return new Response(JSON.stringify({
         response: {
-          candidates: [{ content: { parts: [{ text: "ok" }] } }],
+          candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
           usageMetadata: {},
         },
       }), { status: 200, headers: { "content-type": "application/json" } });
@@ -741,11 +835,11 @@ test("AntigravityCodeAssistTransport discovers project id before generateContent
 
   assert.equal(response.text, "ok");
   assert.match(requests[0].url, /v1internal:loadCodeAssist$/);
-  assert.match(requests[1].url, /v1internal:generateContent$/);
+  assert.match(requests[1].url, /v1internal:streamGenerateContent\?alt=sse$/);
   assert.equal(requests[1].body.project, "discovered-project");
 });
 
-test("AntigravityCodeAssistTransport continues generateContent when project discovery is unavailable", async () => {
+test("AntigravityCodeAssistTransport continues streamGenerateContent when project discovery is unavailable", async () => {
   const requests = [];
   const transport = new AntigravityCodeAssistTransport({
     credentials: { accessToken: async () => "access-token", forceReload: () => {} },
@@ -761,7 +855,7 @@ test("AntigravityCodeAssistTransport continues generateContent when project disc
       }
       return new Response(JSON.stringify({
         response: {
-          candidates: [{ content: { parts: [{ text: "ok" }] } }],
+          candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
           usageMetadata: {},
         },
       }), { status: 200, headers: { "content-type": "application/json" } });
@@ -776,7 +870,7 @@ test("AntigravityCodeAssistTransport continues generateContent when project disc
 
   assert.equal(response.text, "ok");
   assert.match(requests[0].url, /v1internal:loadCodeAssist$/);
-  assert.match(requests[1].url, /v1internal:generateContent$/);
+  assert.match(requests[1].url, /v1internal:streamGenerateContent\?alt=sse$/);
   assert.equal(Object.hasOwn(requests[1].body, "project"), false);
 });
 
@@ -803,7 +897,7 @@ test("AntigravityCodeAssistTransport retries project discovery after unavailable
       }
       return new Response(JSON.stringify({
         response: {
-          candidates: [{ content: { parts: [{ text: "ok" }] } }],
+          candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
           usageMetadata: {},
         },
       }), { status: 200, headers: { "content-type": "application/json" } });
@@ -823,7 +917,7 @@ test("AntigravityCodeAssistTransport retries project discovery after unavailable
 
   assert.equal(discoveryCalls, 2);
   const generateBodies = requests
-    .filter((request) => String(request.url).endsWith("v1internal:generateContent"))
+    .filter((request) => String(request.url).endsWith("v1internal:streamGenerateContent?alt=sse"))
     .map((request) => request.body);
   assert.equal(Object.hasOwn(generateBodies[0], "project"), false);
   assert.equal(generateBodies[1].project, "project-after-retry");
@@ -867,7 +961,7 @@ test("AntigravityCodeAssistTransport returns project-less after bounded onboardi
       }
       return new Response(JSON.stringify({
         response: {
-          candidates: [{ content: { parts: [{ text: "ok" }] } }],
+          candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
           usageMetadata: {},
         },
       }), { status: 200, headers: { "content-type": "application/json" } });
@@ -916,7 +1010,7 @@ test("AntigravityCodeAssistTransport forces OAuth refresh before retrying projec
       }
       return new Response(JSON.stringify({
         response: {
-          candidates: [{ content: { parts: [{ text: "ok" }] } }],
+          candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
           usageMetadata: {},
         },
       }), { status: 200, headers: { "content-type": "application/json" } });
@@ -943,7 +1037,7 @@ test("AntigravityCodeAssistTransport retries retryable 429 responses", async () 
     retryBaseDelayMs: 1,
     retryMinDelayMs: 0,
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith("v1internal:generateContent")) {
+      if (String(url).endsWith("v1internal:streamGenerateContent?alt=sse")) {
         generateCalls += 1;
         if (generateCalls === 1) {
           return new Response(JSON.stringify({
@@ -957,7 +1051,7 @@ test("AntigravityCodeAssistTransport retries retryable 429 responses", async () 
       }
       return new Response(JSON.stringify({
         response: {
-          candidates: [{ content: { parts: [{ text: "ok" }] } }],
+          candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
           usageMetadata: {},
         },
       }), { status: 200, headers: { "content-type": "application/json" } });
@@ -984,7 +1078,7 @@ test("AntigravityCodeAssistTransport honors explicit short reset windows beyond 
     retryMinDelayMs: 0,
     retryMaxElapsedMs: 5_000,
     fetchImpl: async (url) => {
-      if (String(url).endsWith("v1internal:generateContent")) {
+      if (String(url).endsWith("v1internal:streamGenerateContent?alt=sse")) {
         generateCalls += 1;
         if (generateCalls <= 4) {
           return new Response(JSON.stringify({
@@ -998,7 +1092,7 @@ test("AntigravityCodeAssistTransport honors explicit short reset windows beyond 
       }
       return new Response(JSON.stringify({
         response: {
-          candidates: [{ content: { parts: [{ text: "ok" }] } }],
+          candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
           usageMetadata: {},
         },
       }), { status: 200, headers: { "content-type": "application/json" } });
@@ -1040,7 +1134,7 @@ test("AntigravityCodeAssistTransport retries retryable project discovery 429 res
       }
       return new Response(JSON.stringify({
         response: {
-          candidates: [{ content: { parts: [{ text: "ok" }] } }],
+          candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
           usageMetadata: {},
         },
       }), { status: 200, headers: { "content-type": "application/json" } });

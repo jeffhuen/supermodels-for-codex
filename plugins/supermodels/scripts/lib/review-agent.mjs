@@ -4,6 +4,7 @@ const DEFAULT_REVIEW_POLICY = Object.freeze({
   maxRounds: Number.POSITIVE_INFINITY,
   forceAfterRounds: Number.POSITIVE_INFINITY,
   forceAfterSatisfiedRounds: Number.POSITIVE_INFINITY,
+  maxNoToolContinuationRounds: 4,
   claudeMaxTokens: 128_000,
   antigravityMaxTokens: 64_000,
   claudeThinking: Object.freeze({ type: "adaptive", display: "summarized" }),
@@ -42,6 +43,8 @@ export async function runReviewAgent(options = {}) {
     ...(options.minInspection ?? {}),
   };
   const forceInspectionTools = options.forceInspectionTools ?? DEFAULT_REVIEW_POLICY.forceInspectionTools;
+  const maxNoToolContinuationRounds = options.maxNoToolContinuationRounds
+    ?? DEFAULT_REVIEW_POLICY.maxNoToolContinuationRounds;
   if (!transport?.messages) {
     throw new Error("runReviewAgent requires a transport with messages(body, options).");
   }
@@ -70,6 +73,7 @@ export async function runReviewAgent(options = {}) {
   let inspectionSatisfiedAtRound = null;
   let cumulativeUsage = null;
   let structuredConversionRequested = false;
+  let noToolContinuationRounds = 0;
   const reasoningOptions = providerReasoningOptions(provider, options);
 
   try {
@@ -229,6 +233,13 @@ export async function runReviewAgent(options = {}) {
           continue;
         }
 
+        noToolContinuationRounds += 1;
+        if (
+          Number.isFinite(maxNoToolContinuationRounds)
+          && noToolContinuationRounds >= maxNoToolContinuationRounds
+        ) {
+          throw new Error(`${provider} made no repository-inspection progress after ${noToolContinuationRounds} no-tool turns.`);
+        }
         messages.push({
           role: "user",
           content: [{
@@ -238,6 +249,7 @@ export async function runReviewAgent(options = {}) {
         });
         continue;
       }
+      noToolContinuationRounds = 0;
 
       const submitCall = toolCalls.find((call) => call.name === "submit_review");
       if (submitCall) {

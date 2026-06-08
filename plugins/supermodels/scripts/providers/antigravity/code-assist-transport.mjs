@@ -16,6 +16,7 @@ const MAX_RATE_LIMIT_WAIT_MS = 90_000;
 const MAX_RETRY_ELAPSED_MS = 5 * 60 * 1000;
 const ONBOARD_POLL_ATTEMPTS = 24;
 const ONBOARD_POLL_INTERVAL_MS = 5_000;
+const SYNTHETIC_THOUGHT_SIGNATURE = "supermodels-synthetic-thought-signature";
 const CLIENT_METADATA = JSON.stringify({
   ideType: "IDE_UNSPECIFIED",
   platform: "PLATFORM_UNSPECIFIED",
@@ -64,7 +65,7 @@ export class AntigravityCodeAssistTransport {
         ...(project ? { project } : {}),
       };
       await this.rateLimiter.take(signal.signal);
-      const response = await this.fetchImpl(`${this.baseUrl}/v1internal:generateContent`, {
+      const response = await this.fetchImpl(`${this.baseUrl}/v1internal:streamGenerateContent?alt=sse`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${await this.credentials.accessToken()}`,
@@ -72,7 +73,7 @@ export class AntigravityCodeAssistTransport {
           "x-goog-api-client": API_CLIENT,
           "client-metadata": CLIENT_METADATA,
           "content-type": "application/json",
-          accept: "application/json",
+          accept: "text/event-stream",
         },
         body: JSON.stringify(envelope),
         signal: signal.signal,
@@ -96,8 +97,8 @@ export class AntigravityCodeAssistTransport {
         }
         throw new CodeAssistHttpError(response.status, bodyText);
       }
-      const data = await response.json();
-      return collectAntigravityResponse(data.response ?? data);
+      const data = await readCodeAssistResponse(response, options.onEvent);
+      return collectAntigravityResponse(data);
     } finally {
       signal.cleanup();
     }
@@ -262,7 +263,7 @@ function thinkingBudgetFrom(body) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-export function collectAntigravityResponse(body = {}) {
+export function collectAntigravityResponse(body = {}, options = {}) {
   const candidate = (body.candidates ?? [{}])[0] ?? {};
   const parts = candidate.content?.parts ?? [];
   const content = [];
@@ -276,7 +277,10 @@ export function collectAntigravityResponse(body = {}) {
       content.push({ type: "text", text: part.text });
     }
     if (part.functionCall) {
-      const id = `call_${callIndex}`;
+      const id = stringValue(part.functionCall.id)
+        || stringValue(part.functionCall.callId)
+        || stringValue(part.functionCall.call_id)
+        || `call_${callIndex}`;
       callIndex += 1;
       const thoughtSignature = stringValue(part.thoughtSignature) || stringValue(part.thought_signature);
       const call = {
@@ -297,10 +301,18 @@ export function collectAntigravityResponse(body = {}) {
       toolCalls.push(call);
     }
   }
+  const text = content.filter((item) => item.type === "text").map((item) => item.text).join("");
+  if (options.validate !== false) {
+    validateAntigravityResponse({
+      hasToolCall: toolCalls.length > 0,
+      finishReason: candidate.finishReason ?? null,
+      text,
+    });
+  }
   return {
     content,
     tool_calls: toolCalls,
-    text: content.filter((item) => item.type === "text").map((item) => item.text).join(""),
+    text,
     usage: toUsage(body.usageMetadata ?? {}),
     model: "",
     stop_reason: candidate.finishReason ?? null,
@@ -333,6 +345,7 @@ function messagesToContents(messages) {
   for (const message of messages) {
     if (message.role === "assistant") {
       const parts = [];
+      let firstFunctionCallSeen = false;
       for (const block of message.content ?? []) {
         if (block.type === "text" && block.text) {
           const thoughtSignature = stringValue(block.thoughtSignature) || stringValue(block.thought_signature);
@@ -341,9 +354,13 @@ function messagesToContents(messages) {
             ...(thoughtSignature ? { thoughtSignature } : {}),
           });
         } else if (block.type === "tool_use") {
-          const thoughtSignature = stringValue(block.thoughtSignature) || stringValue(block.thought_signature);
+          const explicitThoughtSignature = stringValue(block.thoughtSignature) || stringValue(block.thought_signature);
+          const thoughtSignature = explicitThoughtSignature
+            || (!firstFunctionCallSeen ? SYNTHETIC_THOUGHT_SIGNATURE : "");
+          firstFunctionCallSeen = true;
           parts.push({
             functionCall: {
+              ...(block.id ? { id: block.id } : {}),
               name: block.name,
               args: normalizeObject(block.input),
             },
@@ -360,6 +377,7 @@ function messagesToContents(messages) {
         role: "user",
         parts: toolResults.map((block) => ({
           functionResponse: {
+            ...(block.tool_use_id ? { id: block.tool_use_id } : {}),
             name: block.name || toolNameForResult(messages, block.tool_use_id),
             response: parseToolResponse(block.content),
           },
@@ -374,7 +392,156 @@ function messagesToContents(messages) {
         .map((block) => ({ text: String(block.text ?? "") })),
     });
   }
-  return contents;
+  return hardenGeminiContents(contents);
+}
+
+function hardenGeminiContents(contents) {
+  const out = [];
+  for (const content of contents) {
+    const role = content.role === "model" ? "model" : "user";
+    const parts = (content.parts ?? []).filter(isMeaningfulGeminiPart);
+    if (!parts.length) {
+      continue;
+    }
+    const previous = out.at(-1);
+    if (previous?.role === role) {
+      previous.parts.push(...parts);
+    } else {
+      out.push({ role, parts });
+    }
+  }
+  if (!out.length) {
+    return [{ role: "user", parts: [{ text: "" }] }];
+  }
+  if (out[0].role !== "user") {
+    out.unshift({ role: "user", parts: [{ text: "Continue." }] });
+  }
+  if (out.at(-1).role !== "user") {
+    out.push({ role: "user", parts: [{ text: "Continue." }] });
+  }
+  return out;
+}
+
+function isMeaningfulGeminiPart(part) {
+  if (part.functionCall || part.functionResponse) {
+    return true;
+  }
+  return typeof part.text === "string" && part.text.length > 0;
+}
+
+async function readCodeAssistResponse(response, onEvent) {
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("text/event-stream")) {
+    const data = await response.json();
+    return data.response ?? data;
+  }
+  const chunks = [];
+  const text = await response.text();
+  for (const chunk of parseCodeAssistSseLines(text.split(/\r?\n/))) {
+    chunks.push(chunk);
+    const partial = collectAntigravityResponse(chunk, { validate: false });
+    if (partial.text) {
+      onEvent?.({
+        type: "progress",
+        message: `antigravity streamed ${partial.text.length} chars`,
+        at: new Date().toISOString(),
+      });
+    }
+  }
+  return mergeCodeAssistChunks(chunks);
+}
+
+export function* parseCodeAssistSseLines(lines) {
+  let buffered = [];
+  const flush = function* () {
+    if (!buffered.length) {
+      return;
+    }
+    const payload = buffered.join("\n");
+    buffered = [];
+    if (payload === "[DONE]") {
+      return "done";
+    }
+    try {
+      const data = JSON.parse(payload);
+      yield data.response ?? data;
+    } catch {
+      // Match the Gemini CLI/TradingAgents posture: ignore one malformed SSE
+      // chunk instead of aborting an otherwise useful review stream.
+    }
+  };
+  for (const line of lines) {
+    if (line.startsWith("data: ")) {
+      buffered.push(line.slice(6).trim());
+      continue;
+    }
+    if (line !== "") {
+      continue;
+    }
+    if (!buffered.length) {
+      continue;
+    }
+    const result = yield* flush();
+    if (result === "done") {
+      return;
+    }
+  }
+  yield* flush();
+}
+
+function latestUsageMetadata(total, next) {
+  const entries = Object.entries(next ?? {});
+  if (!entries.length) {
+    return total ?? {};
+  }
+  const out = { ...(total ?? {}) };
+  for (const [key, value] of entries) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      out[key] = value;
+    } else if (value !== undefined) {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+function mergeCodeAssistChunks(chunks) {
+  const mergedParts = [];
+  let finishReason = null;
+  let usageMetadata = {};
+  for (const chunk of chunks) {
+    const candidate = (chunk.candidates ?? [{}])[0] ?? {};
+    finishReason = candidate.finishReason ?? finishReason;
+    usageMetadata = latestUsageMetadata(usageMetadata, chunk.usageMetadata ?? {});
+    for (const part of candidate.content?.parts ?? []) {
+      mergedParts.push(part);
+    }
+  }
+  return {
+    candidates: [{
+      content: { parts: mergedParts },
+      ...(finishReason ? { finishReason } : {}),
+    }],
+    usageMetadata,
+  };
+}
+
+function validateAntigravityResponse({ hasToolCall, finishReason, text }) {
+  if (hasToolCall) {
+    return;
+  }
+  if (!finishReason) {
+    throw new Error("Antigravity response ended without a finish reason.");
+  }
+  if (finishReason === "MALFORMED_FUNCTION_CALL") {
+    throw new Error("Antigravity response ended with malformed function call.");
+  }
+  if (finishReason === "UNEXPECTED_TOOL_CALL") {
+    throw new Error("Antigravity response ended with unexpected tool call.");
+  }
+  if (!String(text ?? "").trim()) {
+    throw new Error("Antigravity response ended with empty response text.");
+  }
 }
 
 function toolNameForResult(messages, toolUseId) {
