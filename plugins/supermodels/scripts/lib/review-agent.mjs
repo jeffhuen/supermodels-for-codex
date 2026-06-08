@@ -161,6 +161,7 @@ export async function runReviewAgent(options = {}) {
       }, {
         signal: abort.signal,
         timeoutMs: remainingReviewTimeoutMs(timeoutMs, reviewStartedAt, provider),
+        onEvent,
       });
       cumulativeUsage = mergeUsage(cumulativeUsage, response.usage);
       if (response.usage) {

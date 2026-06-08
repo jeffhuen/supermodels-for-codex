@@ -436,8 +436,7 @@ async function readCodeAssistResponse(response, onEvent) {
     return data.response ?? data;
   }
   const chunks = [];
-  const text = await response.text();
-  for (const chunk of parseCodeAssistSseLines(text.split(/\r?\n/))) {
+  for await (const chunk of parseCodeAssistSseLineStream(readResponseLines(response))) {
     chunks.push(chunk);
     const partial = collectAntigravityResponse(chunk, { validate: false });
     if (partial.text) {
@@ -453,23 +452,6 @@ async function readCodeAssistResponse(response, onEvent) {
 
 export function* parseCodeAssistSseLines(lines) {
   let buffered = [];
-  const flush = function* () {
-    if (!buffered.length) {
-      return;
-    }
-    const payload = buffered.join("\n");
-    buffered = [];
-    if (payload === "[DONE]") {
-      return "done";
-    }
-    try {
-      const data = JSON.parse(payload);
-      yield data.response ?? data;
-    } catch {
-      // Match the Gemini CLI/TradingAgents posture: ignore one malformed SSE
-      // chunk instead of aborting an otherwise useful review stream.
-    }
-  };
   for (const line of lines) {
     if (line.startsWith("data: ")) {
       buffered.push(line.slice(6).trim());
@@ -481,12 +463,110 @@ export function* parseCodeAssistSseLines(lines) {
     if (!buffered.length) {
       continue;
     }
-    const result = yield* flush();
-    if (result === "done") {
+    const result = parseSsePayload(buffered.join("\n"));
+    buffered = [];
+    if (result.done) {
       return;
     }
+    if (result.value) {
+      yield result.value;
+    }
   }
-  yield* flush();
+  if (buffered.length) {
+    const result = parseSsePayload(buffered.join("\n"));
+    if (!result.done && result.value) {
+      yield result.value;
+    }
+  }
+}
+
+async function* parseCodeAssistSseLineStream(lines) {
+  let buffered = [];
+  for await (const line of lines) {
+    if (line.startsWith("data: ")) {
+      buffered.push(line.slice(6).trim());
+      continue;
+    }
+    if (line !== "") {
+      continue;
+    }
+    if (!buffered.length) {
+      continue;
+    }
+    const result = parseSsePayload(buffered.join("\n"));
+    buffered = [];
+    if (result.done) {
+      return;
+    }
+    if (result.value) {
+      yield result.value;
+    }
+  }
+  if (buffered.length) {
+    const result = parseSsePayload(buffered.join("\n"));
+    if (!result.done && result.value) {
+      yield result.value;
+    }
+  }
+}
+
+async function* readResponseLines(response) {
+  if (!response.body) {
+    const text = await response.text();
+    yield* text.split(/\r?\n/);
+    return;
+  }
+  const decoder = new TextDecoder();
+  let buffered = "";
+  for await (const chunk of responseBodyChunks(response.body)) {
+    buffered += decoder.decode(chunk, { stream: true });
+    const lines = buffered.split(/\r?\n/);
+    buffered = lines.pop() ?? "";
+    for (const line of lines) {
+      yield line;
+    }
+  }
+  buffered += decoder.decode();
+  if (buffered) {
+    yield buffered;
+  }
+}
+
+async function* responseBodyChunks(body) {
+  if (typeof body.getReader === "function") {
+    const reader = body.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          return;
+        }
+        if (value) {
+          yield value;
+        }
+      }
+    } finally {
+      reader.releaseLock?.();
+    }
+    return;
+  }
+  for await (const chunk of body) {
+    yield chunk;
+  }
+}
+
+function parseSsePayload(payload) {
+  if (payload === "[DONE]") {
+    return { done: true };
+  }
+  try {
+    const data = JSON.parse(payload);
+    return { value: data.response ?? data };
+  } catch {
+    // Match the Gemini CLI/TradingAgents posture: ignore one malformed SSE
+    // chunk instead of aborting an otherwise useful review stream.
+    return {};
+  }
 }
 
 function latestUsageMetadata(total, next) {

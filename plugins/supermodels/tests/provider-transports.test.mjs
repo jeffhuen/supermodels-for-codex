@@ -759,6 +759,50 @@ test("AntigravityCodeAssistTransport streams requests in the Code Assist envelop
   assert.match(requests[0].headers.Authorization, /^Bearer /);
 });
 
+test("AntigravityCodeAssistTransport emits progress while SSE response is still open", async () => {
+  let streamController;
+  const encoder = new TextEncoder();
+  const events = [];
+  const transport = new AntigravityCodeAssistTransport({
+    credentials: { accessToken: async () => "access-token", forceReload: () => {} },
+    rateLimiter: noRateLimit,
+    projectId: "project-1",
+    fetchImpl: async () => new Response(new ReadableStream({
+      start(controller) {
+        streamController = controller;
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream" } }),
+  });
+
+  const pending = transport.messages({
+    model: "Gemini 3.5 Flash (High)",
+    messages: [{ role: "user", content: [{ type: "text", text: "review" }] }],
+    tools: [],
+  }, {
+    timeoutMs: 5_000,
+    onEvent: (event) => events.push(event),
+  });
+
+  await waitFor(() => streamController);
+  streamController.enqueue(encoder.encode([
+    "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}",
+    "",
+  ].join("\n") + "\n"));
+
+  await waitFor(() => events.some((event) => /streamed/.test(event.message ?? "")));
+
+  streamController.enqueue(encoder.encode([
+    "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{}}}",
+    "",
+    "data: [DONE]",
+    "",
+  ].join("\n") + "\n"));
+  streamController.close();
+
+  const response = await pending;
+  assert.equal(response.text, "partial");
+});
+
 test("AntigravityCodeAssistTransport forces OAuth refresh before retrying streamGenerateContent 401", async () => {
   const authorizations = [];
   let refreshed = false;
@@ -805,6 +849,17 @@ test("AntigravityCodeAssistTransport forces OAuth refresh before retrying stream
   assert.equal(calls, 2);
   assert.deepEqual(authorizations, ["Bearer old-token", "Bearer new-token"]);
 });
+
+async function waitFor(predicate, timeoutMs = 1_000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt <= timeoutMs) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Timed out waiting for condition.");
+}
 
 test("AntigravityCodeAssistTransport discovers project id before streamGenerateContent", async () => {
   const requests = [];

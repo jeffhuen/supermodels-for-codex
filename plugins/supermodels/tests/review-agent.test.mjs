@@ -414,6 +414,32 @@ test("runReviewAgent aggregates usage across every model turn", async () => {
   );
 });
 
+test("runReviewAgent passes event sink to provider transports", async () => {
+  let seenOnEvent = null;
+  const events = [];
+  const fakeTransport = {
+    async messages(_body, options) {
+      seenOnEvent = options.onEvent;
+      options.onEvent?.({ type: "progress", message: "transport progress" });
+      return responseWithTool("submit_1", "submit_review", inconclusiveReview("event sink checked"));
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "antigravity",
+    transport: fakeTransport,
+    tools: { schemas: [], async execute() {} },
+    minInspection: { diff: false, fileOrSearch: false, explicitFileOrSearchToolCalls: 0, cleanExplicitFileOrSearchToolCalls: 0 },
+    forceAfterRounds: 1,
+    maxRounds: 1,
+    onEvent: (event) => events.push(event),
+  });
+
+  assert.equal(result.verdict, "inconclusive");
+  assert.equal(typeof seenOnEvent, "function");
+  assert(events.some((event) => event.message === "transport progress"));
+});
+
 for (const provider of ["claude", "antigravity"]) {
   test(`runReviewAgent accepts no-tool structured final text for ${provider}`, async () => {
     const fakeTransport = {
