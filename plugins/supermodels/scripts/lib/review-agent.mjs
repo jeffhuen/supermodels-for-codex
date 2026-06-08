@@ -1,4 +1,4 @@
-import { REVIEW_RESULT_SCHEMA, normalizeStructuredReview } from "./review-schema.mjs";
+import { REVIEW_RESULT_SCHEMA, normalizeStructuredReview, parseStructuredReviewText } from "./review-schema.mjs";
 
 const DEFAULT_REVIEW_POLICY = Object.freeze({
   maxRounds: Number.POSITIVE_INFINITY,
@@ -69,6 +69,7 @@ export async function runReviewAgent(options = {}) {
   const reviewStartedAt = Date.now();
   let inspectionSatisfiedAtRound = null;
   let cumulativeUsage = null;
+  let structuredConversionRequested = false;
   const reasoningOptions = providerReasoningOptions(provider, options);
 
   try {
@@ -176,6 +177,58 @@ export async function runReviewAgent(options = {}) {
 
       const toolCalls = response.tool_calls ?? [];
       if (!toolCalls.length) {
+        const finalText = responseText(response);
+        const naturalReview = parseStructuredReviewText(finalText);
+        if (naturalReview) {
+          const accepted = acceptStructuredReview(naturalReview, inspection, minInspection);
+          if (accepted.done) {
+            return {
+              ...accepted.review,
+              toolUsage,
+              rounds: round,
+              usage: cumulativeUsage,
+              reviewConfig: reviewConfigMetadata({
+                provider,
+                model,
+                maxTokens,
+                reasoningOptions,
+                rounds: round,
+                toolUsage,
+              }),
+            };
+          }
+          messages.push({
+            role: "user",
+            content: [{
+              type: "text",
+              text: naturalReviewRejectionInstruction(accepted.error),
+            }],
+          });
+          continue;
+        }
+
+        if (inspectionSatisfied(inspection, minInspection)) {
+          if (structuredConversionRequested) {
+            return {
+              ...inconclusiveUnstructuredFinalReview(finalText),
+              toolUsage,
+              rounds: round,
+              usage: cumulativeUsage,
+              reviewConfig: reviewConfigMetadata({
+                provider,
+                model,
+                maxTokens,
+                reasoningOptions,
+                rounds: round,
+                toolUsage,
+              }),
+            };
+          }
+          structuredConversionRequested = true;
+          messages.push(structuredConversionInstruction(finalText));
+          continue;
+        }
+
         messages.push({
           role: "user",
           content: [{
@@ -394,24 +447,6 @@ function formatUsageSummary(usage) {
 }
 
 function handleSubmittedReview(call, inspection, minInspection) {
-  const visibleInspection = visibleInspectionState(inspection);
-  if (!inspectionSatisfied(inspection, minInspection)) {
-    const requiredExplicitCalls = Number(minInspection.explicitFileOrSearchToolCalls ?? 0);
-    return {
-      done: false,
-      toolResult: {
-        type: "tool_result",
-        tool_use_id: call.id,
-        content: JSON.stringify({
-          ok: false,
-          error: requiredExplicitCalls > 0
-            ? `submit_review refused: inspect the diff and use read_file or search on at least ${requiredExplicitCalls} relevant files/search targets before submitting final findings.`
-            : "submit_review refused: inspect the diff and at least one relevant file or search result before submitting final findings.",
-          inspection: visibleInspection,
-        }),
-      },
-    };
-  }
   const normalized = normalizeStructuredReview(call.input);
   if (!normalized) {
     return {
@@ -426,24 +461,49 @@ function handleSubmittedReview(call, inspection, minInspection) {
       },
     };
   }
-  if (normalized.verdict === "clean" && !cleanInspectionSatisfied(inspection, minInspection)) {
+  const accepted = acceptStructuredReview(normalized, inspection, minInspection);
+  if (!accepted.done) {
     return {
       done: false,
       toolResult: {
         type: "tool_result",
         tool_use_id: call.id,
-        content: JSON.stringify({
-          ok: false,
-          error: "submit_review refused: clean verdict requires more repository inspection. Use read_file or search on at least two relevant files/search targets before returning clean.",
-          inspection: visibleInspection,
-          required: {
-            cleanExplicitFileOrSearchToolCalls: minInspection.cleanExplicitFileOrSearchToolCalls,
-          },
-        }),
+        content: JSON.stringify(accepted.error),
       },
     };
   }
-  return { done: true, review: normalized };
+  return accepted;
+}
+
+function acceptStructuredReview(review, inspection, minInspection) {
+  const visibleInspection = visibleInspectionState(inspection);
+  if (!inspectionSatisfied(inspection, minInspection)) {
+    const requiredExplicitCalls = Number(minInspection.explicitFileOrSearchToolCalls ?? 0);
+    return {
+      done: false,
+      error: {
+        ok: false,
+        error: requiredExplicitCalls > 0
+          ? `submit_review refused: inspect the diff and use read_file or search on at least ${requiredExplicitCalls} relevant files/search targets before submitting final findings.`
+          : "submit_review refused: inspect the diff and at least one relevant file or search result before submitting final findings.",
+        inspection: visibleInspection,
+      },
+    };
+  }
+  if (review.verdict === "clean" && !cleanInspectionSatisfied(inspection, minInspection)) {
+    return {
+      done: false,
+      error: {
+        ok: false,
+        error: "submit_review refused: clean verdict requires more repository inspection. Use read_file or search on at least two relevant files/search targets before returning clean.",
+        inspection: visibleInspection,
+        required: {
+          cleanExplicitFileOrSearchToolCalls: minInspection.cleanExplicitFileOrSearchToolCalls,
+        },
+      },
+    };
+  }
+  return { done: true, review };
 }
 
 function inspectionSatisfied(inspection, required) {
@@ -620,6 +680,33 @@ function finalInstruction() {
   };
 }
 
+function structuredConversionInstruction(finalText) {
+  return {
+    role: "user",
+    content: [{
+      type: "text",
+      text: [
+        "You appear to have finished the review without a tool call.",
+        "Convert your final answer into the required structured review now.",
+        "Prefer calling submit_review. If you cannot call a tool, return only a JSON object matching the review schema.",
+        "Do not perform additional repository inspection unless you need new evidence.",
+        "",
+        "Your final answer to convert:",
+        finalText?.trim() || "(empty)",
+      ].join("\n"),
+    }],
+  };
+}
+
+function naturalReviewRejectionInstruction(error) {
+  return [
+    "Your final structured review could not be accepted yet.",
+    "Address this validation result, then submit the final structured review again.",
+    "",
+    JSON.stringify(error, null, 2),
+  ].join("\n");
+}
+
 function forcedToolInstruction(name) {
   return {
     role: "user",
@@ -640,6 +727,44 @@ function preloadedEvidenceMessage(preloaded) {
 
 function cloneMessages(messages) {
   return JSON.parse(JSON.stringify(messages));
+}
+
+function responseText(response) {
+  const fromText = String(response?.text ?? "").trim();
+  if (fromText) {
+    return fromText;
+  }
+  if (!Array.isArray(response?.content)) {
+    return "";
+  }
+  return response.content
+    .filter((block) => block?.type === "text")
+    .map((block) => String(block.text ?? "").trim())
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function inconclusiveUnstructuredFinalReview(finalText) {
+  const text = String(finalText ?? "").trim();
+  const summary = text
+    ? `Provider ended without structured review output: ${limitSummary(text)}`
+    : "Provider ended without structured review output.";
+  return {
+    verdict: "inconclusive",
+    summary,
+    findings: [],
+    assumptions: [],
+    verification_gaps: [
+      "Provider ended after a structured-conversion prompt without returning parseable structured review JSON.",
+    ],
+  };
+}
+
+function limitSummary(text, maxLength = 300) {
+  const normalized = String(text ?? "").replace(/\s+/g, " ").trim();
+  return normalized.length > maxLength
+    ? `${normalized.slice(0, maxLength - 1)}...`
+    : normalized;
 }
 
 function createAbort(controller) {

@@ -50,6 +50,7 @@ Initial public release.
 - Review provider timeouts are enforced as aggregate wall-clock budgets across the whole review loop, not just as per-request timeouts.
 - The shared review loop rejects final submissions until providers have made enough distinct meaningful file/search inspections, preventing a shallow review from completing only because preloaded context or duplicate tool calls were available.
 - Antigravity direct reviews remain model-led after the evidence gate by default; explicit force settings remain available only for controlled tests or overrides.
+- Direct reviews now accept parseable structured final text after required evidence is satisfied, and only ask for one structured-conversion turn when a provider ends with unstructured no-tool text.
 - Direct review usage is aggregated and emitted across all model turns, so multi-round Claude Code and Antigravity reviews do not look like only the final response consumed tokens.
 - Mixed repository tool calls with an invalid `submit_review` now execute the repository tools before returning submit errors, so providers can satisfy evidence requirements in the same turn.
 - Antigravity direct reviews request Code Assist dynamic thinking with `thinkingBudget: -1` and a 64k response budget.

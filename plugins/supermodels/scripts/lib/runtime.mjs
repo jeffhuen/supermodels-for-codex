@@ -824,7 +824,7 @@ function createProviderEventRecorder({ state, jobId, provider, events, enqueueWr
     enqueueWrite(() => updateProviderRun(state, jobId, provider, {
       events: recent,
       lastEvent: normalized.message,
-      usage: normalized.usage ?? undefined,
+      ...(normalized.usage ? { usage: normalized.usage } : {}),
     }), { critical: false });
   };
 }

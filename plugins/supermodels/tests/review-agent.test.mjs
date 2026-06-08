@@ -414,6 +414,105 @@ test("runReviewAgent aggregates usage across every model turn", async () => {
   );
 });
 
+for (const provider of ["claude", "antigravity"]) {
+  test(`runReviewAgent accepts no-tool structured final text for ${provider}`, async () => {
+    const fakeTransport = {
+      calls: 0,
+      async messages() {
+        this.calls += 1;
+        if (this.calls === 1) {
+          return responseWithTool("diff_1", "get_diff", {});
+        }
+        if (this.calls === 2) {
+          return responseWithTool("read_1", "read_file", { path: "a.mjs" });
+        }
+        if (this.calls === 3) {
+          return responseWithTool("search_1", "search", { query: "runReviewAgent" });
+        }
+        return responseWithText(JSON.stringify(inconclusiveReview(`${provider} final text accepted`)));
+      },
+    };
+
+    const result = await runReviewAgent({
+      provider,
+      transport: fakeTransport,
+      tools: reviewToolsForDiffAndFiles(),
+      maxRounds: 4,
+    });
+
+    assert.equal(result.verdict, "inconclusive");
+    assert.equal(result.summary, `${provider} final text accepted`);
+    assert.equal(result.rounds, 4);
+  });
+}
+
+test("runReviewAgent asks for structured conversion instead of more tools after no-tool final text", async () => {
+  const calls = [];
+  const fakeTransport = {
+    async messages(body) {
+      calls.push(body);
+      if (calls.length === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (calls.length === 2) {
+        return responseWithTool("read_1", "read_file", { path: "a.mjs" });
+      }
+      if (calls.length === 3) {
+        return responseWithTool("search_1", "search", { query: "runReviewAgent" });
+      }
+      if (calls.length === 4) {
+        return responseWithText("I am done. No concrete bugs found after reviewing the relevant files.");
+      }
+      return responseWithText(JSON.stringify(inconclusiveReview("converted final answer")));
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "antigravity",
+    transport: fakeTransport,
+    tools: reviewToolsForDiffAndFiles(),
+    maxRounds: 5,
+  });
+
+  const conversionPrompt = JSON.stringify(calls[4].messages.at(-1).content);
+  assert.equal(result.verdict, "inconclusive");
+  assert.equal(result.summary, "converted final answer");
+  assert.match(conversionPrompt, /convert/i);
+  assert.match(conversionPrompt, /structured/i);
+  assert.doesNotMatch(conversionPrompt, /Continue the review with repository tools/i);
+});
+
+test("runReviewAgent stops after one failed structured conversion turn", async () => {
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", { path: "a.mjs" });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", { query: "runReviewAgent" });
+      }
+      return responseWithText("I am done, but I did not format the result.");
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "antigravity",
+    transport: fakeTransport,
+    tools: reviewToolsForDiffAndFiles(),
+    maxRounds: 5,
+  });
+
+  assert.equal(result.verdict, "inconclusive");
+  assert.equal(result.rounds, 5);
+  assert.match(result.summary, /ended without structured review/i);
+  assert.equal(fakeTransport.calls, 5);
+});
+
 test("runReviewAgent uses timeout as an aggregate review budget", async () => {
   const seenTimeouts = [];
   const fakeTransport = {
@@ -1052,6 +1151,14 @@ function responseWithTool(id, name, input) {
     content: [{ type: "tool_use", id, name, input }],
     tool_calls: [{ id, name, input }],
     text: "",
+  };
+}
+
+function responseWithText(text) {
+  return {
+    content: [{ type: "text", text }],
+    tool_calls: [],
+    text,
   };
 }
 

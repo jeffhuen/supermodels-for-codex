@@ -645,6 +645,77 @@ test("runTask stores provider progress events from adapters", async () => {
   }
 });
 
+test("provider progress without usage does not clear live cumulative usage", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-live-usage-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-live-usage-workspace-"));
+  let observedUsageAfterToolEvent;
+  try {
+    const adapters = {
+      claude: {
+        check: async () => ({
+          provider: "claude",
+          ready: true,
+          installed: true,
+          auth: "ok",
+        }),
+        review: async (_input, options) => {
+          options.onEvent?.({
+            type: "usage",
+            message: "claude review usage input=10 output=2",
+            usage: { input_tokens: 10, output_tokens: 2 },
+            at: "2026-06-05T00:00:00.000Z",
+          });
+          options.onEvent?.({
+            type: "tool_call",
+            message: "claude used read_file",
+            at: "2026-06-05T00:00:01.000Z",
+          });
+          const state = createState({ workspaceRoot, dataRoot });
+          for (let index = 0; index < 50; index += 1) {
+            const [job] = await listJobs(state);
+            const run = job?.providerRuns?.claude;
+            if (run?.lastEvent === "claude used read_file") {
+              observedUsageAfterToolEvent = run.usage;
+              break;
+            }
+            await sleep(10);
+          }
+          return {
+            exitCode: 0,
+            rawText: JSON.stringify(inconclusiveReview("done")),
+            stderr: "",
+            sessionId: "",
+            commandLine: "claude oauth messages",
+            structured: inconclusiveReview("done"),
+            usage: { input_tokens: 10, output_tokens: 2 },
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+          };
+        },
+      },
+    };
+
+    await runReview({
+      adapters,
+      providerSelection: {
+        requested: ["claude"],
+        explicit: true,
+      },
+      mode: "review",
+      options: {
+        "data-root": dataRoot,
+      },
+      focus: "",
+      workspaceRoot,
+    });
+
+    assert.deepEqual(observedUsageAfterToolEvent, { input_tokens: 10, output_tokens: 2 });
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("runReview records orchestrator pid so concurrent status does not fail live jobs", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-live-status-"));
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-live-status-workspace-"));
@@ -1843,3 +1914,17 @@ test("runTask marks foreground jobs failed when an internal state write fails", 
     await rm(workspaceRoot, { recursive: true, force: true });
   }
 });
+
+function inconclusiveReview(summary) {
+  return {
+    verdict: "inconclusive",
+    summary,
+    findings: [],
+    assumptions: [],
+    verification_gaps: [],
+  };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
