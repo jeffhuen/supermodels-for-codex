@@ -114,13 +114,21 @@ function decodeGitQuotedPath(value) {
   for (let index = 0; index < body.length; index += 1) {
     const char = body[index];
     if (char !== "\\") {
-      bytes.push(...Buffer.from(char, "utf8"));
+      const codePoint = body.codePointAt(index);
+      const literal = String.fromCodePoint(codePoint);
+      bytes.push(...Buffer.from(literal, "utf8"));
+      index += literal.length - 1;
       continue;
     }
     const next = body[index + 1];
     if (/[0-7]/.test(next ?? "")) {
       const octal = body.slice(index + 1).match(/^[0-7]{1,3}/)?.[0] ?? "";
-      bytes.push(Number.parseInt(octal, 8));
+      const byte = Number.parseInt(octal, 8);
+      if (byte <= 0xff) {
+        bytes.push(byte);
+      } else {
+        bytes.push(...Buffer.from(`\\${octal}`, "utf8"));
+      }
       index += octal.length;
       continue;
     }

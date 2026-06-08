@@ -110,12 +110,17 @@ test("buildContextPacket parses quoted git diff paths and truncates UTF-8 safely
         scope: "working-tree",
         baseRef: "",
         diffSummary: "1 file changed",
-        diff: "diff --git \"a/src/file name.mjs\" \"b/src/file name.mjs\"\n+export const value = 1;\n",
+        diff: [
+          "diff --git \"a/src/file name.mjs\" \"b/src/file name.mjs\"",
+          "+export const value = 1;",
+          "diff --git \"a/src/caf\\303\\251.mjs\" \"b/src/caf\\303\\251.mjs\"",
+          "+export const cafe = true;",
+        ].join("\n"),
       },
       now: () => new Date("2026-06-07T12:00:00.000Z"),
     });
 
-    assert.deepEqual(packet.evidence.git.changedFiles, ["src/file name.mjs"]);
+    assert.deepEqual(packet.evidence.git.changedFiles, ["src/file name.mjs", "src/café.mjs"]);
     assert.doesNotMatch(packet.evidence.explicitContext, /\uFFFD/);
     assert.match(packet.evidence.explicitContext, /truncated context packet section/);
   } finally {
