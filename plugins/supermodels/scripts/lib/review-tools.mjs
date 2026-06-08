@@ -319,7 +319,7 @@ async function readLineRangeWithinLimit(absolutePath, options) {
   let truncated = false;
   let lastLine = options.start;
 
-  const addLine = (line) => {
+  const addLine = (line, { forceTruncated = false } = {}) => {
     const normalized = line.endsWith("\r") ? line.slice(0, -1) : line;
     if (lineNumber >= options.start && lineNumber <= options.end) {
       const rendered = `${lineNumber}: ${normalized}`;
@@ -340,9 +340,37 @@ async function readLineRangeWithinLimit(absolutePath, options) {
       lines.push(rendered);
       outputBytes += separatorBytes + renderedBytes;
       lastLine = lineNumber;
+      if (forceTruncated) {
+        truncated = true;
+        return "truncated";
+      }
     }
     lineNumber += 1;
     return lineNumber <= options.end ? "continue" : "done";
+  };
+
+  const capPendingLine = () => {
+    if (!pending) {
+      return "continue";
+    }
+    if (lineNumber < options.start) {
+      if (pending.length > chunk.byteLength) {
+        pending = "";
+      }
+      return "continue";
+    }
+    if (lineNumber > options.end) {
+      return "done";
+    }
+    const separatorBytes = lines.length ? 1 : 0;
+    const prefixBytes = Buffer.byteLength(`${lineNumber}: `, "utf8");
+    const remainingLineBytes = Math.max(0, options.maxBytes - outputBytes - separatorBytes - prefixBytes);
+    const pendingBuffer = Buffer.from(pending, "utf8");
+    if (pendingBuffer.byteLength <= remainingLineBytes) {
+      return "continue";
+    }
+    pending = remainingLineBytes > 0 ? decodeUtf8Prefix(pendingBuffer, remainingLineBytes) : "";
+    return addLine(pending, { forceTruncated: true });
   };
 
   try {
@@ -365,6 +393,13 @@ async function readLineRangeWithinLimit(absolutePath, options) {
         if (result === "done") {
           return { content: lines.join("\n"), endLine: lastLine, truncated: false };
         }
+      }
+      const pendingResult = capPendingLine();
+      if (pendingResult === "truncated") {
+        return { content: lines.join("\n"), endLine: lastLine, truncated: true };
+      }
+      if (pendingResult === "done") {
+        return { content: lines.join("\n"), endLine: lastLine, truncated: false };
       }
     }
 

@@ -77,11 +77,11 @@ test("read_file can read later line ranges from large files without prefix-only 
   }
 });
 
-test("read_file returns a bounded prefix for a single oversized line", async () => {
+test("read_file returns a bounded prefix for a large newline-free line", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-tools-long-line-"));
   try {
     await mkdir(path.join(workspace, "src"));
-    await writeFile(path.join(workspace, "src", "minified.js"), `${"x".repeat(1000)}\n`, "utf8");
+    await writeFile(path.join(workspace, "src", "minified.js"), "x".repeat(200_000), "utf8");
     const tools = createReviewTools({ workspaceRoot: workspace, maxFileBytes: 80 });
 
     const result = await tools.execute("read_file", {

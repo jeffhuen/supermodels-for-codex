@@ -238,7 +238,7 @@ async function runLiveWorkerJob({ parsed, request }) {
       state,
       jobId: job.id,
       runPromise,
-      intervalMs: Math.max(1, Number(parsed.options.interval || 5)) * 1000,
+      intervalMs: positiveSecondsOption(parsed, "interval", 5) * 1000,
       heartbeatMs: 60 * 1000,
     });
   } finally {
@@ -328,8 +328,8 @@ async function handleWatch(parsed) {
   if (!jobId) {
     throw new Error("watch requires a job id.");
   }
-  const intervalMs = Math.max(1, Number(parsed.options.interval || 10)) * 1000;
-  const maxWaitMs = Math.max(1, Number(parsed.options["max-wait"] || 600)) * 1000;
+  const intervalMs = positiveSecondsOption(parsed, "interval", 10) * 1000;
+  const maxWaitMs = positiveSecondsOption(parsed, "max-wait", 600) * 1000;
   const startedAt = Date.now();
   let lastText = "";
 
@@ -353,6 +353,18 @@ async function handleWatch(parsed) {
     }
     await sleep(intervalMs);
   }
+}
+
+function positiveSecondsOption(parsed, name, fallback) {
+  const raw = parsed.options[name];
+  if (raw === undefined || raw === "") {
+    return fallback;
+  }
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`--${name} must be a positive number of seconds.`);
+  }
+  return value;
 }
 
 async function watchLiveProgress({ state, jobId, runPromise, intervalMs, heartbeatMs }) {

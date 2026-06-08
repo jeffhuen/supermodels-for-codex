@@ -11,7 +11,10 @@ import {
   collectClaudeMessageEvents,
   parseAnthropicSseLines,
 } from "../scripts/providers/claude/messages-transport.mjs";
-import { AntigravityCredentials } from "../scripts/providers/antigravity/oauth.mjs";
+import {
+  AntigravityCredentials,
+  buildAntigravityKeychainWriteCommand,
+} from "../scripts/providers/antigravity/oauth.mjs";
 import {
   AntigravityCodeAssistTransport,
   collectAntigravityResponse,
@@ -296,6 +299,28 @@ test("ClaudeOAuthMessagesTransport retries transient overloaded stream errors", 
   assert.equal(calls, 2);
 });
 
+test("ClaudeOAuthMessagesTransport rejects content-less successful streams", async () => {
+  const transport = new ClaudeOAuthMessagesTransport({
+    credentials: { accessToken: async () => "access-token", forceRefresh: async () => {} },
+    fetchImpl: async () => new Response([
+      "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":1}}}",
+      "",
+      "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":0}}",
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n"), {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    }),
+  });
+
+  await assert.rejects(
+    () => transport.messages({ model: "claude-test", messages: [] }, { timeoutMs: 5000 }),
+    /empty Claude response/i,
+  );
+});
+
 test("AntigravityCredentials reads fresh CLI token envelope", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "supermodels-agy-oauth-"));
   const file = path.join(dir, "antigravity-oauth-token");
@@ -388,6 +413,17 @@ test("AntigravityCredentials refreshes expired keychain credentials directly", a
   assert.equal(persisted.token.access_token, "new-access");
   assert.equal(persisted.token.refresh_token, "new-refresh");
   assert.equal(Date.parse(persisted.token.expiry), Date.parse("2026-01-01T01:00:00.000Z"));
+});
+
+test("Antigravity keychain write command keeps token envelope out of argv", () => {
+  const secret = "go-keyring-base64:refresh-token-secret";
+  const command = buildAntigravityKeychainWriteCommand(secret);
+
+  assert.equal(command.bin, "security");
+  assert.equal(command.input, `${secret}\n${secret}\n`);
+  assert.equal(command.args.at(-1), "-w");
+  assert(!command.args.includes(secret));
+  assert(!command.args.some((arg) => arg.includes("refresh-token-secret")));
 });
 
 test("AntigravityCredentials surfaces direct refresh failures with setup guidance", async () => {

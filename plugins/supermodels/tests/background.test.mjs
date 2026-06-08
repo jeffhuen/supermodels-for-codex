@@ -229,6 +229,47 @@ test("cancel skips workers whose recorded start identity does not match", { skip
   }
 });
 
+test("watch rejects invalid numeric timing options before polling", async () => {
+  const fixture = await createFixture("supermodels-watch-invalid-timing-");
+  try {
+    const { state, dataRoot, workspaceRoot } = fixture;
+    const job = await createJob(state, {
+      command: "review",
+      mode: "review",
+      requestedProviders: ["claude"],
+      background: true,
+    });
+    await updateJob(state, job.id, (current) => ({
+      ...current,
+      status: "running",
+      stage: "calling-providers",
+    }));
+
+    const scriptPath = path.resolve(import.meta.dirname, "../scripts/supermodels.mjs");
+    const result = spawnSync(process.execPath, [
+      scriptPath,
+      "watch",
+      job.id,
+      "--data-root",
+      dataRoot,
+      "--interval",
+      "abc",
+      "--max-wait",
+      "xyz",
+    ], {
+      cwd: workspaceRoot,
+      encoding: "utf8",
+      timeout: 1000,
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.equal(result.error, undefined);
+    assert.match(result.stderr, /--interval must be a positive number/i);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("status and result expose context packet summary and artifacts", async () => {
   const fixture = await createFixture("supermodels-context-packet-cli-");
   try {

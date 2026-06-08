@@ -226,6 +226,9 @@ export function collectClaudeMessageEvents(events) {
       });
     }
   }
+  if (!content.length && !toolCalls.length) {
+    throw new Error("Empty Claude response: stream ended without content or tool calls.");
+  }
 
   return {
     content,

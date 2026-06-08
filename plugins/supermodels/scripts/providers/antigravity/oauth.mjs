@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -132,16 +132,10 @@ export class AntigravityCredentials {
       await this.keychainWriter(password);
       return;
     }
-    await execFileAsync("security", [
-      "add-generic-password",
-      "-U",
-      "-s",
-      KEYCHAIN_SERVICE,
-      "-a",
-      KEYCHAIN_ACCOUNT,
-      "-w",
-      password,
-    ], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+    await runCommandWithInput(buildAntigravityKeychainWriteCommand(password), {
+      timeout: 10_000,
+      maxBuffer: 1024 * 1024,
+    });
   }
 
   async forceNativeRefresh() {
@@ -256,6 +250,86 @@ function refreshCommandEnv(env) {
     merged.PATH = `${env.PATH}${path.delimiter}${process.env.PATH}`;
   }
   return merged;
+}
+
+export function buildAntigravityKeychainWriteCommand(password) {
+  return {
+    bin: "security",
+    args: [
+      "add-generic-password",
+      "-U",
+      "-s",
+      KEYCHAIN_SERVICE,
+      "-a",
+      KEYCHAIN_ACCOUNT,
+      "-w",
+    ],
+    input: `${password}\n${password}\n`,
+  };
+}
+
+function runCommandWithInput(command, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command.bin, command.args, {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const maxBuffer = options.maxBuffer ?? 1024 * 1024;
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timeout = null;
+
+    const rejectOnce = (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      reject(error);
+    };
+    const resolveOnce = (value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      resolve(value);
+    };
+    if (options.timeout) {
+      timeout = setTimeout(() => {
+        child.kill("SIGTERM");
+        rejectOnce(new Error(`${command.bin} timed out after ${options.timeout}ms`));
+      }, options.timeout);
+    }
+    const append = (target, chunk) => {
+      const next = target + chunk.toString("utf8");
+      if (Buffer.byteLength(next, "utf8") > maxBuffer) {
+        child.kill("SIGTERM");
+        rejectOnce(new Error(`${command.bin} output exceeded maxBuffer`));
+      }
+      return next;
+    };
+
+    child.stdout.on("data", (chunk) => {
+      stdout = append(stdout, chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr = append(stderr, chunk);
+    });
+    child.on("error", rejectOnce);
+    child.on("close", (code, signal) => {
+      if (code === 0) {
+        resolveOnce({ stdout, stderr });
+        return;
+      }
+      rejectOnce(new Error(`${command.bin} exited with ${code ?? signal}: ${stderr || stdout}`));
+    });
+    child.stdin.end(command.input);
+  });
 }
 
 export function defaultAntigravityCredentialsPath(env = process.env) {
