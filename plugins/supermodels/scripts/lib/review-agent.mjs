@@ -18,6 +18,7 @@ const DEFAULT_REVIEW_POLICY = Object.freeze({
   }),
   forceInspectionTools: false,
 });
+const ANTIGRAVITY_NORMAL_REVIEW_POST_EVIDENCE_ROUNDS = 4;
 
 export async function runReviewAgent(options = {}) {
   const {
@@ -37,7 +38,7 @@ export async function runReviewAgent(options = {}) {
   const maxRounds = options.maxRounds ?? DEFAULT_REVIEW_POLICY.maxRounds;
   const forceAfterRounds = options.forceAfterRounds ?? DEFAULT_REVIEW_POLICY.forceAfterRounds;
   const forceAfterSatisfiedRounds = options.forceAfterSatisfiedRounds
-    ?? DEFAULT_REVIEW_POLICY.forceAfterSatisfiedRounds;
+    ?? providerForceAfterSatisfiedRounds(provider, mode);
   const minInspection = {
     ...DEFAULT_REVIEW_POLICY.minInspection,
     ...(options.minInspection ?? {}),
@@ -409,6 +410,15 @@ function providerMaxTokens(provider) {
     return DEFAULT_REVIEW_POLICY.antigravityMaxTokens;
   }
   return DEFAULT_REVIEW_POLICY.antigravityMaxTokens;
+}
+
+function providerForceAfterSatisfiedRounds(provider, mode) {
+  if (provider === "antigravity" && mode === "review") {
+    // Gemini/AGY can keep inspecting after enough evidence. Leave several
+    // model-led rounds after the gate, then ask for the structured verdict.
+    return ANTIGRAVITY_NORMAL_REVIEW_POST_EVIDENCE_ROUNDS;
+  }
+  return DEFAULT_REVIEW_POLICY.forceAfterSatisfiedRounds;
 }
 
 function remainingReviewTimeoutMs(timeoutMs, startedAt, provider) {

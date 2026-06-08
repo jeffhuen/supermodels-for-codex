@@ -311,11 +311,48 @@ test("runReviewAgent lets normal Antigravity reviews submit when the model is do
     transport: fakeTransport,
     tools: reviewToolsForDiffAndFiles(),
     maxRounds: 10,
+    forceAfterSatisfiedRounds: Number.POSITIVE_INFINITY,
   });
 
   assert.equal(result.verdict, "inconclusive");
   assert.equal(result.rounds, 10);
   assert.deepEqual(seenToolChoices, Array.from({ length: 10 }, () => null));
+});
+
+test("runReviewAgent forces Antigravity submission after post-evidence backstop", async () => {
+  const seenToolChoices = [];
+  const fakeTransport = {
+    calls: 0,
+    async messages(body) {
+      this.calls += 1;
+      seenToolChoices.push(body.tool_choice ?? null);
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", { path: "a.mjs" });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", { query: "runReviewAgent" });
+      }
+      if (body.tool_choice?.name === "submit_review") {
+        return responseWithTool("submit_1", "submit_review", inconclusiveReview("post-evidence backstop"));
+      }
+      return responseWithTool(`read_${this.calls}`, "read_file", { path: `extra-${this.calls}.mjs` });
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "antigravity",
+    transport: fakeTransport,
+    tools: reviewToolsForDiffAndFiles(),
+    maxRounds: 10,
+  });
+
+  assert.equal(result.verdict, "inconclusive");
+  assert.equal(result.rounds, 8);
+  assert.deepEqual(seenToolChoices.slice(0, 7), Array.from({ length: 7 }, () => null));
+  assert.deepEqual(seenToolChoices[7], { type: "tool", name: "submit_review" });
 });
 
 test("runReviewAgent keeps adversarial Antigravity reviews model-led by default", async () => {

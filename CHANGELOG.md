@@ -68,6 +68,7 @@ Initial public release.
 - Antigravity direct reviews now use the Code Assist streaming endpoint, preserve provider function-call ids, include matching function-response ids, and synthesize the first-call thought signature only when Code Assist requires one.
 - Antigravity Code Assist request histories now coalesce adjacent same-role turns before sending, matching Gemini-style role alternation expectations for preloaded context and follow-up tool results.
 - Antigravity Code Assist responses now validate finality signals and reject empty stopped responses, malformed function-call stops, unexpected tool-call stops, and repeated no-tool continuation churn as review no-progress instead of silently looping.
+- Antigravity normal reviews now get a post-evidence submit backstop: after the evidence gate is satisfied and four more model-led rounds pass, the loop forces `submit_review` instead of allowing unbounded additional inspection.
 - Setup output now mirrors actual readiness for providers without setup hooks, avoiding contradictory provider setup/check status.
 - Review failures now include provider-specific readiness reasons when no requested provider can run.
 - Human review output now prints failed job errors instead of an empty synthesized review section.
