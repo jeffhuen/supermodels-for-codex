@@ -1,94 +1,45 @@
 # Supermodels for Codex
 
-Supermodels is a Codex plugin that lets Codex call external coding agents for independent code review and task delegation.
+*A panel of frontier models that's really, really, ridiculously good at reviewing code.*
 
-Version 1 supports:
+![status](https://img.shields.io/badge/status-v0.1.0-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![built for](https://img.shields.io/badge/built%20for-Codex-111827)
 
-- Claude Code reviews through Claude Code OAuth-backed Messages transport; task delegation through the installed `claude` CLI.
-- Google Antigravity reviews through AGY/Code Assist OAuth-backed function calling; task delegation through the installed `agy` CLI.
+Supermodels is a [Codex](https://github.com/openai/codex) plugin that lets Codex stop reviewing its own homework. Instead of trusting one model to grade its own diff, you can have it hand the work to **Claude Code** and **Google Antigravity**, collect their independent reviews, and — if you want a fight — make them tear into each other's findings before reporting back.
 
-The plugin acts as a broker. Codex remains the primary agent in the user conversation, while Supermodels owns the review tool loop and provider auth is reused from local Claude Code and AGY installations.
+Here's the thing models are bad at admitting: they're biased toward their own work and have no idea they are. A model that just wrote a function already decided those choices were good — its "self-review" is mostly going to agree with itself, confidently, and call it a day. That bias is invisible from the inside.
 
-## Why
+A *different* model doesn't carry it. Different training, different context window, different opinions about your variable names, and — the important part — zero ego invested in the diff it's looking at. It has no reason to defend code it didn't write, so it actually looks.
 
-Strong models still miss issues. Asking a second or third coding agent to review the same working tree can surface different assumptions, stale context, integration risks, and test gaps.
+That's the whole pitch.
 
-Supermodels is designed for that workflow:
+## What it actually does
 
-- Run provider reviews from inside Codex.
-- Keep provider feedback attributed to Claude Code or Antigravity.
-- Preserve raw provider artifacts for inspection.
-- Reuse local provider auth instead of embedding provider API keys.
-- Support long-running reviews with job state, live progress, status, result, and cancel commands.
+- **Independent review.** Ask every authenticated provider to review your working tree at the same time. They don't see each other's answers, so you get genuinely independent takes — not an echo.
+- **Adversarial review.** Same blind first pass, then each model is handed its peer's review and told to *attack* it: unsupported claims, missed bugs, weak evidence, wrong severities, over-engineered fixes. What survives the cross-examination is usually worth your attention.
+- **Task delegation.** Hand a bounded job ("investigate this failing test", "draft this refactor") to a single provider through its native CLI. Read-only by default; writes only when you explicitly ask.
+- **It uses your existing logins.** No API keys to paste, no new accounts. It reuses the OAuth credentials already sitting in your local Claude Code and `agy` installs.
+- **Everything is attributed and kept.** Each finding is tagged with who said it, and the raw provider output is saved to disk so you can check the receipts instead of trusting a summary.
 
-## Installation
+Codex stays the agent you're actually talking to. Supermodels is the broker sitting behind it, running the review loop and wrangling the other models.
 
-Add this repository as a Codex plugin marketplace. The stable release channel is pinned to `v0.1.0`:
+## A quick look
 
-```bash
-codex plugin marketplace add jeffhuen/supermodels-for-codex --ref v0.1.0
-```
-
-For development builds from `main`:
-
-```bash
-codex plugin marketplace add jeffhuen/supermodels-for-codex --ref main
-```
-
-Install the plugin:
-
-```bash
-codex plugin add supermodels@supermodels
-```
-
-To reinstall from the configured marketplace:
-
-```bash
-codex plugin add supermodels@supermodels
-```
-
-After installing or upgrading, start a fresh Codex session so updated skills and runtime files are loaded.
-
-## Setup
-
-Install and authenticate at least one provider CLI.
-
-Claude Code:
-
-```bash
-claude auth login
-```
-
-Antigravity:
-
-```bash
-agy
-```
-
-Then run the setup skill in Codex:
+Inside a Codex session, the skills look like this:
 
 ```text
-$supermodels:setup
+you ▸ $supermodels:review
+      → asks every ready provider to review the current diff, independently
+      → returns one synthesized report, each point attributed to Claude or Antigravity
+
+you ▸ $supermodels:adversarial-review
+      → same blind first pass, then the models challenge each other
+      → you get the findings that held up under fire
+
+you ▸ $supermodels:task --provider claude "figure out why auth.test.mjs flakes"
+      → delegates a single scoped task and streams progress back
 ```
 
-At least one provider must be ready. If both Claude Code and Antigravity are ready, review commands ask both providers in parallel. If only one is ready, Supermodels uses the available provider.
-
-## Commands
-
-Use the plugin skills from Codex:
-
-| Skill | Purpose |
-| --- | --- |
-| `$supermodels:setup` | Check Node, Git, provider CLI installation, auth state, and plugin data paths. |
-| `$supermodels:providers` | Show Claude Code and Antigravity readiness. |
-| `$supermodels:review` | Run blind independent first-pass working-tree reviews with all ready providers, then synthesize attributed results. |
-| `$supermodels:adversarial-review` | Run blind first-pass reviews, then have providers challenge each other when at least two usable outputs are available. |
-| `$supermodels:task` | Delegate a bounded task to one provider. |
-| `$supermodels:status` | List jobs or inspect a specific job. |
-| `$supermodels:result` | Read a completed job and artifact paths. |
-| `$supermodels:cancel` | Cancel a queued or running Supermodels worker job. |
-
-The runtime can also be called directly from the installed plugin cache or from `plugins/supermodels` during development:
+Or drive the runtime directly during development:
 
 ```bash
 node scripts/supermodels.mjs review --live
@@ -97,122 +48,126 @@ node scripts/supermodels.mjs task --provider claude "Investigate the failing tes
 node scripts/supermodels.mjs status
 ```
 
-`review` and `adversarial-review` intentionally have different depth. Normal review keeps provider feedback independent: Claude Code and Antigravity do not see each other's output. Adversarial review is heavier: after the blind first pass, each usable provider receives its own review plus the peer review and must attack unsupported claims, missed bugs, weak evidence, severity mistakes, and overcomplicated recommendations. If fewer than two providers return usable structured output, Supermodels skips the cross-challenge phase and records that limitation in synthesis.
+## Install
 
-Review and task scope are not limited to the current uncommitted diff. Use `--base <ref>` to review committed changes against a base ref, and use `--context-file <path>` or `--context <text>` to provide explicit non-git context such as a recent planning discussion, implementation summary, release decision, or session transcript. Supermodels compiles that input into a shared context packet with intent, provider selection, and repository evidence, then supplies the same packet to Claude Code and Antigravity. The packet is treated as untrusted background; providers must still ground code findings in repository evidence.
+Add this repo as a Codex plugin marketplace, pinned to the latest release:
 
-After required repository evidence is satisfied, the shared review loop can finish either through the preferred `submit_review` tool call or through parseable structured final text. Unstructured no-tool final answers get one structured-conversion turn instead of being pushed back into more repository reads.
+```bash
+codex plugin marketplace add jeffhuen/supermodels-for-codex --ref v0.1.0
+codex plugin add supermodels@supermodels
+```
 
-## Provider Behavior
+Prefer to live on the edge? Point `--ref` at `main` instead. Either way, **start a fresh Codex session after installing or upgrading** so the new skills and runtime files load.
 
-### Claude Code
+## Setup
 
-Claude Code reviews use Claude Code OAuth credentials with Anthropic's Messages transport and Supermodels-owned read-only repository tools. Supermodels preloads bounded review context before the first model call, including the diff, changed files, and snippets from changed files, then Claude must make distinct meaningful `read_file` or `search` inspections before its final review is accepted. Claude subscription/API rate limits are surfaced as provider `rate-limited` results so other provider output is preserved. Task paths use the installed `claude` CLI with constrained permissions. Write tasks are only allowed when explicitly requested with `--write`, and v1 refuses multi-provider write tasks.
+You need at least one of the two providers installed and logged in. Both is better — that's when reviews actually run in parallel and adversarial mode has something to argue about.
 
-### Antigravity
+```bash
+claude   # Claude Code — sign in if you haven't
+agy      # Antigravity — sign in if you haven't
+```
 
-Antigravity reviews use the AGY/Code Assist OAuth credential store and Gemini-style function calling with the same Supermodels-owned read-only repository tools. Supermodels preloads bounded review context before the first Code Assist call, including the diff, changed files, and snippets from changed files, then AGY must make distinct meaningful `read_file` or `search` inspections before its final review is accepted. After that evidence gate is satisfied, AGY remains model-led and should call `submit_review` or return parseable structured final text when its analysis is complete; the aggregate provider timeout remains the runaway guard. Direct review mode defaults to Gemini 3.5 Flash High (`gemini-3-flash-preview`) to avoid Pro quota spikes; native `agy` model aliases are still used for task delegation. Code Assist calls use the reference transport pacing defaults and can be tuned with `SUPERMODELS_ANTIGRAVITY_RPM` and `SUPERMODELS_ANTIGRAVITY_BURST`. Rejected-token `401` responses force direct OAuth refresh before retrying, and macOS keychain read failures do not silently fall back to stale default token files.
+Then, from inside Codex, run:
 
-Antigravity write tasks use the installed `agy` CLI's native default write behavior. The current `agy` CLI exposes a read-only `--sandbox` mode and a broad `--dangerously-skip-permissions` mode, but not a Claude-style edit allow-list. Use `--write --provider antigravity` only when that native CLI permission model is acceptable.
+```text
+$supermodels:setup
+```
 
-## Job State and Artifacts
+It checks Node, Git, both provider CLIs, your auth state, and where it'll keep its data. If exactly one provider is ready, Supermodels just uses that one and tells you. If both are ready, you get the full panel.
 
-Supermodels stores job state outside the repository under the Codex plugin data directory, normally:
+## Commands
+
+All of these are Codex skills (`$`-prefixed):
+
+| Skill | What it does |
+| --- | --- |
+| `$supermodels:setup` | Health check: Node, Git, provider CLIs, auth, data paths. |
+| `$supermodels:providers` | Show which models are ready right now. |
+| `$supermodels:review` | Independent blind review from every ready provider, synthesized and attributed. |
+| `$supermodels:adversarial-review` | Blind first pass, then the models challenge each other before synthesis. |
+| `$supermodels:task` | Delegate one bounded task to one provider. |
+| `$supermodels:status` | List jobs, or inspect one in detail. |
+| `$supermodels:result` | Read a finished job and its artifact paths. |
+| `$supermodels:cancel` | Stop a queued or running job. |
+
+### Reviewing more than the current diff
+
+By default a review looks at your uncommitted changes, but you're not stuck there:
+
+- `--base <ref>` reviews committed work against a base branch or tag.
+- `--context-file <path>` or `--context "<text>"` feeds in non-git background — a planning thread, an implementation summary, a release decision, last session's transcript. Supermodels folds it into a shared **context packet** that every provider receives.
+
+The context packet is treated as *untrusted background*, not gospel: the models still have to ground any code finding in real repository evidence before it's accepted.
+
+## How it works
+
+A peek for the reviewers who'll read the source anyway:
+
+- **It's a broker, not a babysitter.** Supermodels hands work off, collects it, and synthesizes — it never tries to own Claude's or Antigravity's auth, sessions, or model behavior. Those stay in their own worlds, on the OAuth logins already in your local `claude` and `agy` installs.
+- **The models have to actually look.** Reviews run through a read-only tool loop (`read_file`, `search`) with a bounded context packet for orientation *only*. A model can't submit a review until it's made real inspections of its own — no phoning in an opinion from the summary.
+
+Provider transport details, model defaults, and tuning knobs live in [`decisions/`](./decisions) (the architecture decision records) and the [package README](./plugins/supermodels/README.md).
+
+## Where your stuff lives
+
+Job state and every provider artifact are kept **outside your repo**, under the Codex plugin data directory:
 
 ```text
 ~/.codex/plugins/data/supermodels
 ```
 
-Each run stores:
+Each run saves job metadata and progress, the shared context packet, the prompts, the raw provider output, the normalized results, and provider stderr. When a review says something surprising, you can go read exactly what the model was shown and exactly what it said back.
 
-- Job metadata and provider progress.
-- A shared context packet showing the intent, explicit context, and repository evidence supplied to providers.
-- Prompt/context artifacts when generated.
-- Raw provider output.
-- Normalized provider results.
-- Provider stderr logs.
+## Credentials & privacy
 
-These artifacts are useful for debugging provider behavior and validating final review summaries.
+No provider API keys, account credentials, or OAuth client secrets are embedded in this plugin. Reviews reuse the OAuth credentials already on your machine — Claude tokens refresh through Claude Code's own store; AGY tokens refresh through the native `agy` flow and get read back from its token store.
 
-All review and task execution modes run through a dedicated Supermodels worker process. Foreground and live commands wait on that worker, while background commands return the job id immediately. Review cancellation aborts in-process provider HTTP requests through the shared run controller. Task cancellation is worker-scoped and forwards termination to the provider CLI child process when one is running.
+The provider CLIs still do their own thing with their own auth files, sessions, telemetry, and storage. If that matters to you, read their docs — Supermodels doesn't change or hide any of it.
 
-## Data and Privacy
+## What's rough (the honest part)
 
-Supermodels does not embed provider API keys, provider account credentials, or AGY OAuth client metadata. Reviews reuse local Claude Code and AGY OAuth credentials. Claude tokens refresh through Claude Code's OAuth store; AGY token refresh is delegated to the native `agy` CLI and then reread from the native token store.
+This is `v0.1.0` of a hobby project. It's well-tested and it works on my machine, but you should know the edges:
 
-Provider CLIs may use their own local auth files, sessions, telemetry, and data storage. Review Claude Code and Antigravity settings for provider-specific behavior.
+- **Two providers, on purpose.** Claude Code and Antigravity, capped at two. More agents is a future problem; a clean two-provider loop was the one I wanted to actually ship and maintain.
+- **macOS is the path I live on.** The OAuth/keychain bits are exercised on macOS. Other platforms may have sharp corners I haven't hit yet.
+- **Antigravity write tasks inherit the `agy` CLI's permission model.** Today that's a read-only `--sandbox` or a broad `--dangerously-skip-permissions` — there's no Claude-style edit allow-list. Only pass `--write --provider antigravity` if you're okay with that.
+- **Multi-provider *write* tasks are refused** by design in v1. Writes go to one provider at a time, deliberately.
 
-## Current Scope
-
-Version 1 intentionally supports only:
-
-- Claude Code
-- Google Antigravity
-
-The runtime caps provider orchestration at two providers. Support for additional agents can be added later, but the current implementation prioritizes a maintainable two-provider review workflow.
-
-Supermodels deliberately stays a broker rather than a durable process manager for provider runtimes. Claude Code and Antigravity own their own auth, session storage, and model behavior.
+If you hit something, open an issue — I'd genuinely like to know.
 
 ## Development
 
-Run tests:
-
 ```bash
 cd plugins/supermodels
-npm test
+npm test                 # the full suite (a couple hundred fast unit tests)
 ```
 
-From the repository root:
-
 ```bash
+# from the repo root, if you prefer
 node --test plugins/supermodels/tests/*.test.mjs
 ```
 
-Validate the plugin:
+Validate the plugin manifest:
 
 ```bash
 python3 "$HOME/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py" plugins/supermodels
 ```
 
-For local development builds only, update the plugin cachebuster before reinstalling from a local marketplace:
-
-```bash
-python3 "$HOME/.codex/skills/.system/plugin-creator/scripts/update_plugin_cachebuster.py" plugins/supermodels
-```
-
-Then reinstall from the configured marketplace:
-
-```bash
-codex plugin add supermodels@supermodels
-```
-
-## Versioning
-
-Release versions use normal SemVer. The first public release is:
-
 ```text
-0.1.0
-```
-
-During active local development, the plugin manifest may temporarily use a Codex cachebuster suffix:
-
-```text
-0.1.0+codex.YYYYMMDDHHMMSS
-```
-
-This forces Codex to install a fresh plugin copy while iterating. Remove the cachebuster before tagging a release.
-
-## Repository Layout
-
-```text
-.agents/plugins/marketplace.json       Codex marketplace entry
-plugins/supermodels/.codex-plugin/     Plugin manifest
-plugins/supermodels/skills/            Codex skills
-plugins/supermodels/scripts/           Runtime CLI and provider adapters
-plugins/supermodels/prompts/           Shared review prompts
-plugins/supermodels/tests/             Node test suite
+.agents/plugins/marketplace.json   Codex marketplace entry
+plugins/supermodels/.codex-plugin/ Plugin manifest
+plugins/supermodels/skills/        Codex skills
+plugins/supermodels/scripts/       Runtime CLI + provider adapters
+plugins/supermodels/prompts/       Shared review prompts
+plugins/supermodels/tests/         Node test suite
+decisions/                         Architecture decision records
 ```
 
 ## License
 
-MIT. See [LICENSE](./LICENSE).
+MIT — see [LICENSE](./LICENSE). Use it, fork it, point it at your worst diff.
+
+---
+
+*If Supermodels catches a bug in your code before a human does, consider dropping a ⭐. It's cheaper than a code review and almost as judgmental.*
