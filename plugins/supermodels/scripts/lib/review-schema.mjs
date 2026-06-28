@@ -73,7 +73,7 @@ export function structuredReviewInstructions() {
     "Required top-level fields:",
     "- verdict: clean | needs-attention | inconclusive",
     "- summary: concise review summary",
-    "- findings: array of concrete findings, ordered by severity",
+    "- findings: array of concrete findings, ordered by severity; use [] when there are no concrete findings",
     "- assumptions: array of assumptions you relied on",
     "- verification_gaps: array of checks that still need verification",
     "",
@@ -102,11 +102,12 @@ export function validateStructuredReview(value) {
     return { review: null, errors: ["verdict must be clean, needs-attention, or inconclusive"] };
   }
 
-  if (!Array.isArray(value.findings)) {
+  const rawFindings = normalizeFindingsArray(value.findings, verdict);
+  if (!rawFindings) {
     return { review: null, errors: ["findings must be an array"] };
   }
   const findings = [];
-  value.findings.forEach((finding, index) => {
+  rawFindings.forEach((finding, index) => {
     const { finding: normalized, errors: findingErrors } = normalizeStructuredFinding(finding, `findings[${index}]`);
     if (findingErrors.length) {
       errors.push(...findingErrors);
@@ -231,6 +232,26 @@ function normalizeStringArray(value) {
   return Array.isArray(value)
     ? value.map((item) => String(item ?? "").trim()).filter(Boolean)
     : [];
+}
+
+function normalizeFindingsArray(value, verdict) {
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (verdict === "needs-attention") {
+    return null;
+  }
+  if (value === undefined) {
+    return null;
+  }
+  if (value === null) {
+    return [];
+  }
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text || /^(none|n\/a|not applicable|no(?: material| actionable| concrete)? findings?)$/i.test(text)) {
+    return [];
+  }
+  return null;
 }
 
 function normalizeSeverity(value) {

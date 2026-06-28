@@ -69,6 +69,33 @@ test("normalizeStructuredReview rejects findings with empty impact or recommenda
   assert.equal(invalid, null);
 });
 
+test("normalizeStructuredReview accepts no-findings text for non-finding verdicts", () => {
+  for (const verdict of ["clean", "inconclusive"]) {
+    const review = normalizeStructuredReview({
+      verdict,
+      summary: "No material findings.",
+      findings: "none",
+      assumptions: [],
+      verification_gaps: [],
+    });
+
+    assert.equal(review.verdict, verdict);
+    assert.deepEqual(review.findings, []);
+  }
+});
+
+test("normalizeStructuredReview still rejects needs-attention without an array of findings", () => {
+  const invalid = normalizeStructuredReview({
+    verdict: "needs-attention",
+    summary: "Claims a finding without a structured finding array.",
+    findings: "none",
+    assumptions: [],
+    verification_gaps: [],
+  });
+
+  assert.equal(invalid, null);
+});
+
 test("structuredReviewInstructions include a severity rubric", () => {
   const instructions = structuredReviewInstructions();
 
