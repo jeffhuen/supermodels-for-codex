@@ -734,6 +734,7 @@ test("toCodeAssistRequest preserves schema property names that match stripped me
   assert(params.properties.findings.items.properties.title);
   assert(params.properties.findings.items.properties.severity);
   assert(params.properties.findings.items.required.includes("title"));
+  assert.equal(params.properties.findings.items.anyOf, undefined);
 });
 
 test("collectAntigravityResponse parses function calls, text, and usage", () => {

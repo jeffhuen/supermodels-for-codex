@@ -1,6 +1,6 @@
 ---
 name: cancel
-description: Cancel a Supermodels background job for the current workspace.
+description: Stop a queued or running Supermodels background job for the current workspace. Use when the user wants to abort a review or task that's in progress or waiting — e.g. it's taking too long, was started by mistake, or is no longer needed. To see which jobs are running before cancelling, use status.
 ---
 
 # Supermodels Cancel

@@ -681,6 +681,7 @@ function stripForGemini(schema) {
     "default",
     "examples",
     "title",
+    "anyOf",
   ]);
   const out = {};
   for (const [key, value] of Object.entries(schema)) {

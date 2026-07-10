@@ -1,6 +1,6 @@
 ---
 name: adversarial-review
-description: Ask Claude Code and/or Antigravity for a stricter adversarial review focused on bugs, assumptions, overcomplication, and missing verification.
+description: Get a stricter, adversarial code review through Supermodels: Claude Code and Antigravity each do a blind first pass, then challenge each other's findings — attacking unsupported claims, missed bugs, weak evidence, wrong severities, and over-engineered fixes — so only findings that survive cross-examination are reported. Use when the user wants to pressure-test or red-team a change, is about to ship something risky, distrusts an earlier review, or asks to "tear it apart" or find everything wrong with a diff. Best with both providers ready so they can actually cross-examine. For a plain independent review use review; for a single scoped investigation use task.
 ---
 
 # Supermodels Adversarial Review

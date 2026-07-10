@@ -1,6 +1,6 @@
 ---
 name: task
-description: Delegate a bounded investigation or task to Claude Code or Antigravity through Supermodels.
+description: Delegate one bounded investigation or job to a single provider — Claude Code or Antigravity — through Supermodels, using its native CLI. Read-only by default (investigate, diagnose, explain, draft a plan); it edits files only when the user explicitly passes --write. Use when the user wants to hand a scoped task to another model — e.g. "figure out why auth.test.mjs flakes", "investigate this stack trace", "have Claude draft this refactor", "get a second model to look into X". This is for a single focused task, not a review of changes: to review a diff use review or adversarial-review.
 ---
 
 # Supermodels Task

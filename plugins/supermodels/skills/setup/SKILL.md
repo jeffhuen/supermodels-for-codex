@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Check Supermodels runtime readiness, provider CLI installation, auth state, git, and data directory paths.
+description: Check whether Supermodels is ready to run — Node and Git, both provider CLIs (Claude Code and Antigravity), their auth/login state, and the data directory paths — and report which providers are usable and why any are skipped. Use when setting up Supermodels for the first time, after installing or upgrading it, when a review fails or a provider seems unavailable, or when the user asks "is Supermodels ready" or "why isn't Antigravity working". To just list which providers are ready right now without the full health check, use providers.
 ---
 
 # Supermodels Setup

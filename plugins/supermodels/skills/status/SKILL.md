@@ -1,6 +1,6 @@
 ---
 name: status
-description: Check Supermodels background jobs for the current workspace.
+description: List and inspect Supermodels background jobs for the current workspace — what's queued, running, or finished, with progress. Use when the user asks whether a review or task is done yet, what jobs are in flight, or to check on a run started earlier. To read the full result and saved artifacts of a finished job use result; to stop a job use cancel.
 ---
 
 # Supermodels Status

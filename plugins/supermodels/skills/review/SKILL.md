@@ -1,6 +1,6 @@
 ---
 name: review
-description: Ask ready Supermodels providers, Claude Code and/or Antigravity, for a normal code review of the current working tree.
+description: Get an independent, blind code review of the current changes from a different model — Claude Code and/or Antigravity — through Supermodels, instead of trusting one model (or the same session that wrote the code) to grade its own diff. Every ready provider reviews the working tree in parallel without seeing the others' answers; findings come back attributed and verified against real file/line evidence. Use when the user wants a second opinion, a fresh pair of eyes, a pre-commit sanity check, or to review committed work against a base branch (--base). For a stricter pass where the models attack each other's findings use adversarial-review; for a single scoped investigation rather than a diff review use task.
 ---
 
 # Supermodels Review
