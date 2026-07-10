@@ -110,6 +110,299 @@ test("runReviewAgent returns structured review after diff and file inspection", 
   assert.equal(result.toolUsage.search, 1);
 });
 
+test("runReviewAgent refuses submit_review until high-risk diff hunks are read", async () => {
+  const calls = [];
+  const diff = [
+    "diff --git a/auth/session.mjs b/auth/session.mjs",
+    "--- a/auth/session.mjs",
+    "+++ b/auth/session.mjs",
+    "@@ -10,2 +10,3 @@ function revoke(session) {",
+    "+  delete session.token;",
+    " }",
+  ].join("\n");
+  const fakeTransport = {
+    calls: 0,
+    async messages(body) {
+      this.calls += 1;
+      calls.push(body);
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("search_1", "search", { query: "revoke session" });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("submit_early", "submit_review", {
+          verdict: "needs-attention",
+          summary: "Finding before hunk read.",
+          findings: [{
+            severity: "high",
+            title: "Token deletion needs review",
+            evidence: "The diff deletes a token.",
+            impact: "Session revocation can break auth behavior.",
+            recommendation: "Inspect the hunk before finalizing.",
+            file: "auth/session.mjs",
+            line_start: 10,
+            line_end: 10,
+            confidence: "medium",
+          }],
+          assumptions: [],
+          verification_gaps: [],
+        });
+      }
+      if (this.calls === 4) {
+        return responseWithTool("read_1", "read_file", {
+          path: "auth/session.mjs",
+          start_line: 10,
+          end_line: 12,
+        });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "needs-attention",
+        summary: "Hunk was inspected.",
+        findings: [{
+          severity: "high",
+          title: "Token deletion needs review",
+          evidence: "The hunk was read directly.",
+          impact: "Session revocation can break auth behavior.",
+          recommendation: "Keep the high-risk hunk gate.",
+          file: "auth/session.mjs",
+          line_start: 10,
+          line_end: 10,
+          confidence: "medium",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+  const fakeTools = {
+    schemas: [],
+    async execute(name, input = {}) {
+      if (name === "get_diff") {
+        return { ok: true, diffSummary: "1 file changed", diff };
+      }
+      if (name === "search") {
+        return { ok: true, query: input.query, output: "auth/session.mjs:10:function revoke(session) {" };
+      }
+      if (name === "read_file") {
+        return {
+          ok: true,
+          path: input.path,
+          start_line: Number(input.start_line ?? 1),
+          end_line: Number(input.end_line ?? input.start_line ?? 1),
+          content: "10: function revoke(session) {\n11:   delete session.token;\n12: }",
+        };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    maxRounds: 5,
+    minInspection: {
+      diff: true,
+      fileOrSearch: true,
+      explicitFileOrSearchToolCalls: 1,
+      cleanExplicitFileOrSearchToolCalls: 1,
+    },
+  });
+
+  assert.equal(result.verdict, "needs-attention");
+  assert.equal(result.toolUsage.read_file, 1);
+  assert.match(JSON.stringify(calls[3].messages), /missingHighRiskHunks|coverage_gaps/);
+});
+
+test("runReviewAgent does not block low-risk diffs on hunk coverage", async () => {
+  const diff = [
+    "diff --git a/docs/readme.md b/docs/readme.md",
+    "--- a/docs/readme.md",
+    "+++ b/docs/readme.md",
+    "@@ -1,1 +1,1 @@",
+    "-helo",
+    "+hello",
+  ].join("\n");
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("search_1", "search", { query: "hello" });
+      }
+      return responseWithTool("submit_1", "submit_review", cleanReview("Only low-risk docs changed."));
+    },
+  };
+  const fakeTools = {
+    schemas: [],
+    async execute(name, input = {}) {
+      if (name === "get_diff") {
+        return { ok: true, diffSummary: "1 file changed", diff };
+      }
+      if (name === "search") {
+        return { ok: true, query: input.query, output: "docs/readme.md:1:hello" };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    maxRounds: 3,
+    minInspection: {
+      diff: true,
+      fileOrSearch: true,
+      explicitFileOrSearchToolCalls: 1,
+      cleanExplicitFileOrSearchToolCalls: 1,
+    },
+  });
+
+  assert.equal(result.verdict, "clean");
+  assert.equal(result.toolUsage.read_file, undefined);
+});
+
+test("runReviewAgent applies pre-diff file reads to later high-risk hunk coverage", async () => {
+  const diff = [
+    "diff --git a/auth/session.mjs b/auth/session.mjs",
+    "--- a/auth/session.mjs",
+    "+++ b/auth/session.mjs",
+    "@@ -10,2 +10,3 @@ function revoke(session) {",
+    "+  delete session.token;",
+    " }",
+  ].join("\n");
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("read_1", "read_file", {
+          path: "auth/session.mjs",
+          start_line: 10,
+          end_line: 12,
+        });
+      }
+      if (this.calls === 2) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", { query: "revoke session" });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "needs-attention",
+        summary: "Prior hunk read counted.",
+        findings: [{
+          severity: "high",
+          title: "Token deletion needs review",
+          evidence: "The hunk was read before the diff ledger was built.",
+          impact: "Session revocation can break auth behavior.",
+          recommendation: "Replay read ranges when coverage appears.",
+          file: "auth/session.mjs",
+          line_start: 10,
+          line_end: 10,
+          confidence: "medium",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+  const fakeTools = {
+    schemas: [],
+    async execute(name, input = {}) {
+      if (name === "get_diff") {
+        return { ok: true, diffSummary: "1 file changed", diff };
+      }
+      if (name === "read_file") {
+        return {
+          ok: true,
+          path: input.path,
+          start_line: Number(input.start_line ?? 1),
+          end_line: Number(input.end_line ?? input.start_line ?? 1),
+          content: "10: function revoke(session) {\n11:   delete session.token;\n12: }",
+        };
+      }
+      if (name === "search") {
+        return { ok: true, query: input.query, output: "auth/session.mjs:10:function revoke(session) {" };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    maxRounds: 4,
+  });
+
+  assert.equal(result.verdict, "needs-attention");
+  assert.equal(fakeTransport.calls, 4);
+});
+
+test("runReviewAgent accepts missing-change findings anchored to readable evidence", async () => {
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", {
+          path: "plugins/supermodels/scripts/lib/runtime.mjs",
+          start_line: 1,
+          end_line: 1,
+        });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", {
+          query: "runLegacyThing",
+        });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "needs-attention",
+        summary: "Missing caller update.",
+        findings: [{
+          kind: "missing-change",
+          severity: "high",
+          title: "Caller still uses the removed symbol",
+          evidence: "Search found a caller that still references runLegacyThing.",
+          impact: "The changed path will still invoke the removed contract.",
+          recommendation: "Update the caller to use runNewThing.",
+          anchor_file: "plugins/supermodels/scripts/lib/runtime.mjs",
+          anchor_line: 1,
+          expected_symbol: "runNewThing",
+          searched_for: "runLegacyThing",
+          missing_change_reason: "The diff changed the contract but this caller did not move to the replacement.",
+          confidence: "high",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: reviewToolsForDiffAndFiles(),
+    maxRounds: 5,
+  });
+
+  assert.equal(result.verdict, "needs-attention");
+  assert.equal(result.findings[0].kind, "missing-change");
+  assert.equal(result.findings[0].file, "plugins/supermodels/scripts/lib/runtime.mjs");
+  assert.equal(result.findings[0].line_start, 1);
+  assert.equal(result.findings[0].expected_symbol, "runNewThing");
+});
+
 test("runReviewAgent asks for one correction when finding location is not readable", async () => {
   const calls = [];
   const fakeTransport = {
@@ -775,6 +1068,120 @@ test("runReviewAgent treats truncated diff coverage as indeterminate for deleted
 
   assert.equal(result.verdict, "needs-attention");
   assert.equal(result.findings[0].line_start, 700);
+});
+
+test("runReviewAgent surfaces a verification gap when a truncated diff disables coverage", async () => {
+  const targetPath = "plugins/supermodels/scripts/lib/large-diff.mjs";
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", { path: targetPath, start_line: 1, end_line: 1 });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", { query: "large diff" });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "needs-attention",
+        summary: "Finding on a truncated large diff.",
+        findings: [{
+          severity: "medium",
+          title: "Concrete issue on an inspected line",
+          evidence: "The cited line has current readable content.",
+          impact: "Verifies the coverage-disabled gap is appended without breaking acceptance.",
+          recommendation: "Keep the finding, add the coverage gap.",
+          file: targetPath,
+          line_start: 1,
+          line_end: 1,
+          confidence: "medium",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+  const fakeTools = reviewToolsWithDeletedDiff({
+    targetPath,
+    missingLine: 700,
+    truncated: true,
+    diff: [
+      `diff --git a/${targetPath} b/${targetPath}`,
+      `--- a/${targetPath}`,
+      `+++ b/${targetPath}`,
+      "@@ -1,1 +1,1 @@",
+      "-early line",
+      "+early replacement",
+    ].join("\n"),
+  });
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    maxRounds: 4,
+  });
+
+  assert.equal(result.verdict, "needs-attention");
+  assert.ok(
+    result.verification_gaps.some((gap) => /coverage enforcement was disabled/i.test(gap)),
+    "expected a verification gap explaining that truncation disabled coverage",
+  );
+});
+
+test("runReviewAgent qualifies a clean verdict when a truncated diff disables coverage", async () => {
+  const targetPath = "plugins/supermodels/scripts/lib/large-diff.mjs";
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", { path: targetPath, start_line: 1, end_line: 1 });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", { query: "large diff" });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "clean",
+        summary: "No concrete issues found in the inspected slice.",
+        findings: [],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+  const fakeTools = reviewToolsWithDeletedDiff({
+    targetPath,
+    missingLine: 700,
+    truncated: true,
+    diff: [
+      `diff --git a/${targetPath} b/${targetPath}`,
+      `--- a/${targetPath}`,
+      `+++ b/${targetPath}`,
+      "@@ -1,1 +1,1 @@",
+      "-early line",
+      "+early replacement",
+    ].join("\n"),
+  });
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    maxRounds: 4,
+  });
+
+  assert.equal(result.verdict, "clean");
+  assert.ok(
+    result.verification_gaps.some((gap) => /^Supermodels:/.test(gap) && /coverage enforcement was disabled/i.test(gap)),
+    "a clean verdict on a truncated diff must be qualified with an attributed coverage gap",
+  );
 });
 
 test("runReviewAgent rejects missing current-line content without deleted-line diff evidence", async () => {

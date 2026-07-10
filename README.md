@@ -2,7 +2,7 @@
 
 *A panel of frontier models that's really, really, ridiculously good at reviewing code.*
 
-![status](https://img.shields.io/badge/status-v0.1.0-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![built for](https://img.shields.io/badge/built%20for-Codex-111827)
+![status](https://img.shields.io/badge/status-v0.1.1-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![built for](https://img.shields.io/badge/built%20for-Codex-111827)
 
 Supermodels is a [Codex](https://github.com/openai/codex) plugin that lets Codex stop reviewing its own homework. Instead of trusting one model to grade its own diff, you can have it hand the work to **Claude Code** and **Google Antigravity**, collect their independent reviews, and — if you want a fight — make them tear into each other's findings before reporting back.
 
@@ -19,6 +19,7 @@ That's the whole pitch.
 - **Task delegation.** Hand a bounded job ("investigate this failing test", "draft this refactor") to a single provider through its native CLI. Read-only by default; writes only when you explicitly ask.
 - **It uses your existing logins.** No API keys to paste, no new accounts. It reuses the OAuth credentials already sitting in your local Claude Code and `agy` installs.
 - **Everything is attributed and kept.** Each finding is tagged with who said it, and the raw provider output is saved to disk so you can check the receipts instead of trusting a summary.
+- **Findings stay anchored.** Supermodels verifies cited file/line ranges, requires high-risk changed hunks to be read before final submission, and has a structured way to report "this caller should have changed but didn't" without inventing a line for absent code.
 
 Codex stays the agent you're actually talking to. Supermodels is the broker sitting behind it, running the review loop and wrangling the other models.
 
@@ -53,7 +54,7 @@ node scripts/supermodels.mjs status
 Add this repo as a Codex plugin marketplace, pinned to the latest release:
 
 ```bash
-codex plugin marketplace add jeffhuen/supermodels-for-codex --ref v0.1.0
+codex plugin marketplace add jeffhuen/supermodels-for-codex --ref v0.1.1
 codex plugin add supermodels@supermodels
 ```
 
@@ -127,7 +128,7 @@ The provider CLIs still do their own thing with their own auth files, sessions, 
 
 ## What's rough (the honest part)
 
-This is `v0.1.0` of a hobby project. It's well-tested and it works on my machine, but you should know the edges:
+This is `v0.1.1` of a hobby project. It's well-tested and it works on my machine, but you should know the edges:
 
 - **Two providers, on purpose.** Claude Code and Antigravity, capped at two. More agents is a future problem; a clean two-provider loop was the one I wanted to actually ship and maintain.
 - **macOS is the path I live on.** The OAuth/keychain bits are exercised on macOS. Other platforms may have sharp corners I haven't hit yet.

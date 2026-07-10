@@ -31,6 +31,10 @@ const DEFAULT_REVIEW_POLICY = Object.freeze({
 });
 const ANTIGRAVITY_NORMAL_REVIEW_POST_EVIDENCE_ROUNDS = 4;
 const MAX_FINDING_LOCATION_LINES = 200;
+const MAX_COVERAGE_GAPS = 12;
+const COVERAGE_TRUNCATED_GAP = "Supermodels: high-risk hunk coverage enforcement was disabled because the review-tool diff was truncated; some changed hunks may not have been inspected. Re-run with a narrower --base scope or smaller diff to restore coverage checks.";
+const HIGH_RISK_PATH_RE = /(^|\/)(auth|oauth|session|sessions|token|tokens|credential|credentials|secret|secrets|password|permission|permissions|policy|policies|security|csrf|migration|migrations|schema|db|database|billing|payment|payments|worker|queue|lock|locks|signal|signals|cancel|cancellation)(\/|\.|-|_|$)/i;
+const HIGH_RISK_DIFF_RE = /\b(auth|oauth|session|token|secret|password|permission|policy|csrf|sql|migration|schema|drop|delete|destroy|truncate|unlink|lock|mutex|race|concurrent|parallel|signal|cancel|timeout|retry|process\.env|keychain)\b/i;
 
 export async function runReviewAgent(options = {}) {
   const {
@@ -81,6 +85,8 @@ export async function runReviewAgent(options = {}) {
     explicitFileOrSearchToolCalls: 0,
     explicitFileOrSearchTargets: [],
     explicitFileOrSearchTargetSet: new Set(),
+    readRanges: [],
+    coverage: createCoverageState(),
   };
   const schemas = [
     ...(tools.schemas ?? []),
@@ -649,6 +655,19 @@ async function acceptStructuredReview(review, inspection, minInspection, verific
       },
     };
   }
+  const coverageGaps = coverageGapsForInspection(inspection);
+  if (coverageGaps.length) {
+    return {
+      done: false,
+      error: {
+        ok: false,
+        correction_kind: "inspection",
+        error: "submit_review refused: inspect each high-risk changed hunk with read_file before submitting final findings.",
+        inspection: visibleInspection,
+        coverage_gaps: coverageGaps,
+      },
+    };
+  }
   const findingLocationErrors = await verifyFindingLocations(review, verification);
   if (findingLocationErrors.length) {
     return {
@@ -675,7 +694,19 @@ async function acceptStructuredReview(review, inspection, minInspection, verific
       },
     };
   }
-  return { done: true, review };
+  return { done: true, review: withCoverageVerificationGaps(review, inspection) };
+}
+
+function withCoverageVerificationGaps(review, inspection) {
+  const coverage = inspection?.coverage;
+  if (!coverage?.diffTruncated || coverage?.enabled) {
+    return review;
+  }
+  const gaps = Array.isArray(review.verification_gaps) ? review.verification_gaps : [];
+  if (gaps.includes(COVERAGE_TRUNCATED_GAP)) {
+    return review;
+  }
+  return { ...review, verification_gaps: [...gaps, COVERAGE_TRUNCATED_GAP] };
 }
 
 async function verifyFindingLocations(review, { tools, controller, abort } = {}) {
@@ -867,6 +898,184 @@ function normalizeDiffPath(value) {
   return comparableReviewPath(stripGitSidePrefix(value));
 }
 
+function createCoverageState() {
+  return {
+    enabled: false,
+    diffTruncated: false,
+    highRiskHunks: [],
+    coveredHunkIds: new Set(),
+  };
+}
+
+function updateCoverageFromDiff(inspection, result) {
+  const diff = String(result?.diff ?? "");
+  if (!result?.ok || !diff.trim()) {
+    return;
+  }
+  const previousCovered = inspection.coverage?.coveredHunkIds ?? new Set();
+  const coverage = coverageLedgerFromDiff(diff, {
+    truncated: Boolean(result.truncated),
+    previousCovered,
+  });
+  inspection.coverage = coverage;
+  for (const range of inspection.readRanges ?? []) {
+    markCoverageRange(coverage, range);
+  }
+  result.coverage_ledger = visibleCoverageState(coverage);
+}
+
+function markCoverageFromRead(inspection, result, input = {}) {
+  const file = comparableReviewPath(result.path ?? input.path);
+  const start = Number(result.start_line ?? input.start_line ?? 1);
+  const end = Number(result.end_line ?? input.end_line ?? start);
+  if (!file || !Number.isFinite(start) || !Number.isFinite(end)) {
+    return;
+  }
+  const range = { file, start, end };
+  inspection.readRanges ??= [];
+  inspection.readRanges.push(range);
+  const coverage = inspection.coverage;
+  if (!coverage?.enabled || !coverage.highRiskHunks.length) {
+    return;
+  }
+  markCoverageRange(coverage, range);
+  result.coverage_ledger = visibleCoverageState(coverage);
+}
+
+function markCoverageRange(coverage, range) {
+  if (!coverage?.enabled || !coverage.highRiskHunks.length) {
+    return;
+  }
+  for (const hunk of coverage.highRiskHunks) {
+    if (hunk.file === range.file && rangesOverlap(range.start, range.end, hunk.line_start, hunk.line_end)) {
+      coverage.coveredHunkIds.add(hunk.id);
+    }
+  }
+}
+
+function coverageGapsForInspection(inspection) {
+  const coverage = inspection.coverage;
+  if (!coverage?.enabled) {
+    return [];
+  }
+  return coverage.highRiskHunks
+    .filter((hunk) => !coverage.coveredHunkIds.has(hunk.id))
+    .slice(0, MAX_COVERAGE_GAPS)
+    .map(({ id: _id, ...hunk }) => hunk);
+}
+
+function visibleCoverageState(coverage) {
+  if (!coverage?.enabled) {
+    return {
+      enabled: false,
+      diffTruncated: Boolean(coverage?.diffTruncated),
+    };
+  }
+  const gaps = coverageGapsForInspection({ coverage });
+  return {
+    enabled: true,
+    highRiskHunks: coverage.highRiskHunks.length,
+    coveredHighRiskHunks: coverage.coveredHunkIds.size,
+    missingHighRiskHunks: gaps,
+  };
+}
+
+function coverageLedgerFromDiff(diffText, { truncated = false, previousCovered = new Set() } = {}) {
+  const coverage = createCoverageState();
+  coverage.diffTruncated = truncated;
+  if (truncated) {
+    return coverage;
+  }
+  coverage.enabled = true;
+  let currentFile = "";
+  let currentHunk = null;
+  let hunkIndex = 0;
+
+  const pushHunk = () => {
+    if (!currentHunk) {
+      return;
+    }
+    const risk = highRiskHunkReason(currentHunk.file, currentHunk.changedText);
+    if (risk && currentHunk.newCount > 0) {
+      const lineStart = currentHunk.newStart;
+      const lineEnd = currentHunk.newStart + currentHunk.newCount - 1;
+      const id = `${currentHunk.file}:${lineStart}-${lineEnd}:${hunkIndex}`;
+      hunkIndex += 1;
+      coverage.highRiskHunks.push({
+        id,
+        file: currentHunk.file,
+        line_start: lineStart,
+        line_end: lineEnd,
+        reason: risk,
+      });
+      if (previousCovered.has(id)) {
+        coverage.coveredHunkIds.add(id);
+      }
+    }
+    currentHunk = null;
+  };
+
+  for (const line of String(diffText ?? "").split(/\r?\n/)) {
+    if (line.startsWith("diff --git ")) {
+      pushHunk();
+      const paths = parseDiffGitPathTokens(line.slice("diff --git ".length));
+      currentFile = normalizeDiffPath(paths[1] ?? paths[0] ?? "");
+      continue;
+    }
+    if (line.startsWith("--- ")) {
+      const oldPath = diffHeaderPath(line.slice(4));
+      if (!currentFile) {
+        currentFile = oldPath;
+      }
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      const newPath = diffHeaderPath(line.slice(4));
+      if (newPath) {
+        currentFile = newPath;
+      }
+      continue;
+    }
+    const hunk = line.match(/^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@/);
+    if (hunk) {
+      pushHunk();
+      currentHunk = {
+        file: currentFile,
+        newStart: Number(hunk[3]),
+        newCount: hunk[4] === undefined ? 1 : Number(hunk[4]),
+        changedText: "",
+      };
+      continue;
+    }
+    if (!currentHunk) {
+      continue;
+    }
+    if ((line.startsWith("+") && !line.startsWith("+++")) || (line.startsWith("-") && !line.startsWith("---"))) {
+      currentHunk.changedText += `${line.slice(1)}\n`;
+    }
+  }
+  pushHunk();
+  return coverage;
+}
+
+function diffHeaderPath(value) {
+  const file = normalizeDiffPath(parseUnifiedDiffHeaderPath(value));
+  return file === "/dev/null" || file === "dev/null" ? "" : file;
+}
+
+function highRiskHunkReason(file, changedText) {
+  // ponytail: heuristic risk ledger; add LSP/graph impact only when this proves too blunt.
+  if (HIGH_RISK_PATH_RE.test(file)) {
+    return "high-risk path";
+  }
+  const match = String(changedText ?? "").match(HIGH_RISK_DIFF_RE);
+  return match ? `changed text matches '${match[0]}'` : "";
+}
+
+function rangesOverlap(startA, endA, startB, endB) {
+  return startA <= endB && startB <= endA;
+}
+
 function inspectionSatisfied(inspection, required) {
   const requiredExplicitCalls = Number(required.explicitFileOrSearchToolCalls ?? 0);
   return (!required.diff || inspection.diff)
@@ -893,10 +1102,12 @@ function updateInspection(inspection, name, result, input = {}) {
   }
   if (name === "get_review_context") {
     inspection.diff ||= Boolean(result.diff || result.diffSummary);
+    updateCoverageFromDiff(inspection, result);
     return;
   }
   if (name === "get_diff") {
     inspection.diff = true;
+    updateCoverageFromDiff(inspection, result);
   }
   if (["read_file", "search"].includes(name)) {
     const target = inspectionTargetKey(name, result, input);
@@ -908,6 +1119,9 @@ function updateInspection(inspection, name, result, input = {}) {
       inspection.explicitFileOrSearchTargetSet.add(target);
       inspection.explicitFileOrSearchTargets.push(target);
       inspection.explicitFileOrSearchToolCalls = inspection.explicitFileOrSearchTargets.length;
+    }
+    if (name === "read_file") {
+      markCoverageFromRead(inspection, result, input);
     }
   }
 }
@@ -929,6 +1143,7 @@ function visibleInspectionState(inspection) {
     fileOrSearch: Boolean(inspection.fileOrSearch),
     explicitFileOrSearchToolCalls: distinctInspectionCount(inspection),
     explicitFileOrSearchTargets: inspection.explicitFileOrSearchTargets ?? [],
+    coverage: visibleCoverageState(inspection.coverage),
   };
 }
 
@@ -983,11 +1198,13 @@ function initialPrompt({ provider, brief, focus, mode }) {
     `Perform a serious ${modeLabel} of the current workspace as ${provider}.`,
     "",
     "You have read-only repository tools. Use them. Do not submit a final review until you have inspected the diff and used read_file or search on at least two relevant files/search targets.",
+    "If get_diff or get_review_context returns a coverage_ledger with missingHighRiskHunks, use read_file on each listed file/line range before submitting.",
     "If you intend to return verdict clean, you must first use read_file or search on at least two relevant files/search targets. A shallow clean verdict will be rejected.",
     "",
     "Review rules:",
     "- Prefer concrete bugs, regressions, security issues, lifecycle races, and missing verification.",
     "- Cite file paths and line numbers from inspected files.",
+    "- For a bug caused by a missing change elsewhere, use a missing-change finding anchored to inspected evidence instead of inventing a line for absent code.",
     "- Treat user-provided prior findings as hypotheses, not facts.",
     "- If evidence is missing, put that in verification_gaps instead of inventing a finding.",
     "- Do not report vague concerns, stylistic preferences, or issues that are already covered by tests unless the tests are insufficient.",
@@ -996,8 +1213,9 @@ function initialPrompt({ provider, brief, focus, mode }) {
     "Suggested flow:",
     "1. Start from the preloaded review context when present, otherwise call get_review_context.",
     "2. Search/read the most relevant files and tests if the preloaded snippets are insufficient.",
-    "3. Cross-check findings against tests or adjacent code.",
-    "4. Call submit_review with the final structured review.",
+    "3. Read every high-risk hunk named by coverage_ledger.",
+    "4. Cross-check findings against tests or adjacent code.",
+    "5. Call submit_review with the final structured review.",
   ];
   if (!briefText || (focusText && !briefText.includes(focusText))) {
     lines.push(
@@ -1041,7 +1259,7 @@ function finalInstruction() {
     role: "user",
     content: [{
       type: "text",
-      text: "Submit the final structured review with the evidence you have. If you found no concrete bugs but have not used read_file or search on at least two relevant files/search targets, return verdict inconclusive and explain the remaining verification gaps instead of clean.",
+      text: "Submit the final structured review with the evidence you have. If coverage_ledger still has missingHighRiskHunks, read those hunks before submitting. If you found no concrete bugs but have not used read_file or search on at least two relevant files/search targets, return verdict inconclusive and explain the remaining verification gaps instead of clean.",
     }],
   };
 }

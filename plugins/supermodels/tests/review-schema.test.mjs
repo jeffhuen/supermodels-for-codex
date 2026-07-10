@@ -96,6 +96,35 @@ test("normalizeStructuredReview still rejects needs-attention without an array o
   assert.equal(invalid, null);
 });
 
+test("normalizeStructuredReview accepts missing-change findings anchored to inspected evidence", () => {
+  const review = normalizeStructuredReview({
+    verdict: "needs-attention",
+    summary: "Caller was not updated.",
+    findings: [{
+      kind: "missing-change",
+      severity: "high",
+      title: "Caller still invokes the removed contract",
+      evidence: "Search for runLegacyThing found the old caller.",
+      impact: "The workflow still calls the removed path.",
+      recommendation: "Update the caller to invoke runNewThing.",
+      anchor_file: "plugins/supermodels/scripts/lib/runtime.mjs",
+      anchor_line: 42,
+      expected_symbol: "runNewThing",
+      searched_for: "runLegacyThing",
+      missing_change_reason: "The changed API removed runLegacyThing but this caller was not updated.",
+      confidence: "high",
+    }],
+    assumptions: [],
+    verification_gaps: [],
+  });
+
+  assert.equal(review.findings[0].kind, "missing-change");
+  assert.equal(review.findings[0].file, "plugins/supermodels/scripts/lib/runtime.mjs");
+  assert.equal(review.findings[0].line_start, 42);
+  assert.equal(review.findings[0].line_end, 42);
+  assert.equal(review.findings[0].expected_symbol, "runNewThing");
+});
+
 test("structuredReviewInstructions include a severity rubric", () => {
   const instructions = structuredReviewInstructions();
 
@@ -103,4 +132,5 @@ test("structuredReviewInstructions include a severity rubric", () => {
   assert.match(instructions, /high: likely user-visible/i);
   assert.match(instructions, /medium: plausible/i);
   assert.match(instructions, /low: maintainability/i);
+  assert.match(instructions, /missing-change/i);
 });

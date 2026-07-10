@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.1
+
+### Added
+
+- Review acceptance now builds a portable high-risk diff hunk coverage ledger from `get_diff` / `get_review_context` and refuses final submissions until each high-risk readable hunk is inspected with `read_file`.
+- Structured review findings now support `kind: "missing-change"` for absence bugs, anchored to an inspected file/line plus the expected symbol, searched evidence, and missing-change rationale.
+- When a truncated diff disables the coverage ledger, review acceptance now appends an attributed (`Supermodels:`) `verification_gaps` entry so the disabled coverage is disclosed instead of reading as full coverage.
+
+### Changed
+
+- Human review synthesis renders missing-change finding details, and provider prompts explicitly tell reviewers to inspect coverage-ledger gaps and anchor absence findings to real evidence.
+
 ## v0.1.0
 
 Initial public release.

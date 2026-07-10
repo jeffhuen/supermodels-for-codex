@@ -891,6 +891,11 @@ function appendProviderResult(lines, result) {
       lines.push(`- [${finding.severity}]${confidence} ${finding.title || finding.body}${location ? ` (${location})` : ""}`);
       pushFindingDetail(lines, "Evidence", finding.evidence || finding.body);
       pushFindingDetail(lines, "Impact", finding.impact);
+      if (finding.kind === "missing-change") {
+        pushFindingDetail(lines, "Missing change", finding.missing_change_reason);
+        pushFindingDetail(lines, "Expected symbol", finding.expected_symbol);
+        pushFindingDetail(lines, "Searched for", finding.searched_for);
+      }
       pushFindingDetail(lines, "Recommendation", finding.recommendation);
     }
   } else {

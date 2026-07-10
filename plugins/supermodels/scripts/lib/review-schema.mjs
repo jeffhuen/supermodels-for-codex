@@ -21,9 +21,18 @@ export const REVIEW_RESULT_SCHEMA = Object.freeze({
           evidence: { type: "string" },
           impact: { type: "string" },
           recommendation: { type: "string" },
+          kind: {
+            type: "string",
+            enum: ["code", "missing-change"],
+          },
           file: { type: "string" },
           line_start: { type: "integer" },
           line_end: { type: "integer" },
+          anchor_file: { type: "string" },
+          anchor_line: { type: "integer" },
+          expected_symbol: { type: "string" },
+          searched_for: { type: "string" },
+          missing_change_reason: { type: "string" },
           confidence: {
             type: "string",
             enum: ["high", "medium", "low"],
@@ -35,10 +44,26 @@ export const REVIEW_RESULT_SCHEMA = Object.freeze({
           "evidence",
           "impact",
           "recommendation",
-          "file",
-          "line_start",
-          "line_end",
           "confidence",
+        ],
+        anyOf: [
+          {
+            required: [
+              "file",
+              "line_start",
+              "line_end",
+            ],
+          },
+          {
+            required: [
+              "kind",
+              "anchor_file",
+              "anchor_line",
+              "expected_symbol",
+              "searched_for",
+              "missing_change_reason",
+            ],
+          },
         ],
       },
     },
@@ -77,7 +102,8 @@ export function structuredReviewInstructions() {
     "- assumptions: array of assumptions you relied on",
     "- verification_gaps: array of checks that still need verification",
     "",
-    "Each finding must include severity, title, evidence, impact, recommendation, file, line_start, line_end, and confidence.",
+    "Each code finding must include severity, title, evidence, impact, recommendation, file, line_start, line_end, and confidence.",
+    "For a missing-change finding, set kind to missing-change and include anchor_file, anchor_line, expected_symbol, searched_for, missing_change_reason, and confidence; anchor_file:anchor_line must point to inspected repository evidence.",
     "",
     "Severity rubric:",
     "- critical: security breach, data loss, irreversible corruption, or production outage.",
@@ -181,9 +207,16 @@ function normalizeStructuredFinding(value, prefix = "finding") {
   const evidence = String(value.evidence ?? "").trim();
   const impact = String(value.impact ?? "").trim();
   const recommendation = String(value.recommendation ?? "").trim();
-  const file = String(value.file ?? "").trim();
-  const lineStart = normalizeLine(value.line_start);
-  const lineEnd = normalizeLine(value.line_end);
+  const kind = normalizeFindingKind(value.kind);
+  const missingChange = kind === "missing-change";
+  const anchorFile = String(value.anchor_file ?? "").trim();
+  const anchorLine = normalizeLine(value.anchor_line);
+  const file = missingChange ? anchorFile : String(value.file ?? "").trim();
+  const lineStart = missingChange ? anchorLine : normalizeLine(value.line_start);
+  const lineEnd = missingChange ? anchorLine : normalizeLine(value.line_end);
+  const expectedSymbol = String(value.expected_symbol ?? "").trim();
+  const searchedFor = String(value.searched_for ?? "").trim();
+  const missingChangeReason = String(value.missing_change_reason ?? "").trim();
   if (!title) {
     errors.push(`${prefix}.title must be non-empty`);
   }
@@ -197,22 +230,32 @@ function normalizeStructuredFinding(value, prefix = "finding") {
     errors.push(`${prefix}.recommendation must be non-empty`);
   }
   if (!file) {
-    errors.push(`${prefix}.file must be non-empty`);
+    errors.push(`${prefix}.${missingChange ? "anchor_file" : "file"} must be non-empty`);
   }
   if (!lineStart) {
-    errors.push(`${prefix}.line_start must be a positive integer`);
+    errors.push(`${prefix}.${missingChange ? "anchor_line" : "line_start"} must be a positive integer`);
   }
-  if (!lineEnd) {
+  if (!missingChange && !lineEnd) {
     errors.push(`${prefix}.line_end must be a positive integer`);
   }
   if (lineStart && lineEnd && lineEnd < lineStart) {
     errors.push(`${prefix}.line_end must be greater than or equal to line_start`);
+  }
+  if (missingChange && !expectedSymbol) {
+    errors.push(`${prefix}.expected_symbol must be non-empty`);
+  }
+  if (missingChange && !searchedFor) {
+    errors.push(`${prefix}.searched_for must be non-empty`);
+  }
+  if (missingChange && !missingChangeReason) {
+    errors.push(`${prefix}.missing_change_reason must be non-empty`);
   }
   if (errors.length) {
     return { finding: null, errors };
   }
   return {
     finding: {
+      kind,
       severity,
       title,
       body: evidence,
@@ -222,6 +265,15 @@ function normalizeStructuredFinding(value, prefix = "finding") {
       file,
       line_start: lineStart,
       line_end: lineEnd,
+      ...(missingChange
+        ? {
+          anchor_file: anchorFile,
+          anchor_line: anchorLine,
+          expected_symbol: expectedSymbol,
+          searched_for: searchedFor,
+          missing_change_reason: missingChangeReason,
+        }
+        : {}),
       confidence,
     },
     errors: [],
@@ -268,6 +320,12 @@ function normalizeSeverity(value) {
 function normalizeConfidence(value) {
   const confidence = String(value ?? "").toLowerCase().trim();
   return VALID_CONFIDENCE.has(confidence) ? confidence : "medium";
+}
+
+function normalizeFindingKind(value) {
+  return String(value ?? "").toLowerCase().trim() === "missing-change"
+    ? "missing-change"
+    : "code";
 }
 
 function normalizeLine(value) {
