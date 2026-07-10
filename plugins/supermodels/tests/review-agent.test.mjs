@@ -1491,6 +1491,95 @@ test("runReviewAgent forces submit_review only after required inspection is sati
   assert.deepEqual(seenToolChoices[2], { type: "tool", name: "submit_review" });
 });
 
+test("runReviewAgent does not force submit_review before high-risk coverage is satisfied", async () => {
+  const seenToolChoices = [];
+  const diff = [
+    "diff --git a/auth/session.mjs b/auth/session.mjs",
+    "--- a/auth/session.mjs",
+    "+++ b/auth/session.mjs",
+    "@@ -10,2 +10,3 @@ function revoke(session) {",
+    "+  delete session.token;",
+    " }",
+  ].join("\n");
+  const fakeTransport = {
+    calls: 0,
+    async messages(body) {
+      this.calls += 1;
+      seenToolChoices.push(body.tool_choice ?? null);
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("search_1", "search", { query: "revoke session" });
+      }
+      if (this.calls === 3) {
+        assert.equal(body.tool_choice, undefined);
+        return responseWithTool("read_1", "read_file", {
+          path: "auth/session.mjs",
+          start_line: 10,
+          end_line: 12,
+        });
+      }
+      assert.deepEqual(body.tool_choice, { type: "tool", name: "submit_review" });
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "needs-attention",
+        summary: "Coverage was satisfied before forced submit.",
+        findings: [{
+          severity: "medium",
+          title: "Token deletion needs review",
+          evidence: "The hunk was read directly before final submission.",
+          impact: "Session revocation behavior can change.",
+          recommendation: "Keep the coverage gate ahead of forced submit.",
+          file: "auth/session.mjs",
+          line_start: 10,
+          line_end: 10,
+          confidence: "medium",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+  const fakeTools = {
+    schemas: [],
+    async execute(name, input = {}) {
+      if (name === "get_diff") {
+        return { ok: true, diffSummary: "1 file changed", diff };
+      }
+      if (name === "search") {
+        return { ok: true, query: input.query, output: "auth/session.mjs:10:function revoke(session) {" };
+      }
+      if (name === "read_file") {
+        return {
+          ok: true,
+          path: input.path,
+          start_line: Number(input.start_line ?? 1),
+          end_line: Number(input.end_line ?? input.start_line ?? 1),
+          content: "10: function revoke(session) {\n11:   delete session.token;\n12: }",
+        };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "antigravity",
+    transport: fakeTransport,
+    tools: fakeTools,
+    minInspection: { explicitFileOrSearchToolCalls: 1 },
+    forceAfterRounds: 3,
+    maxRounds: 4,
+  });
+
+  assert.equal(result.verdict, "needs-attention");
+  assert.deepEqual(seenToolChoices, [
+    null,
+    null,
+    null,
+    { type: "tool", name: "submit_review" },
+  ]);
+});
+
 test("runReviewAgent leaves a retry round after malformed forced submit_review", async () => {
   const seenToolChoices = [];
   const fakeTransport = {

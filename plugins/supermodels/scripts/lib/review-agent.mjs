@@ -143,7 +143,9 @@ export async function runReviewAgent(options = {}) {
       if (satisfied && inspectionSatisfiedAtRound === null) {
         inspectionSatisfiedAtRound = round;
       }
+      const hasCoverageGaps = coverageGapsForInspection(inspection).length > 0;
       const shouldForceSubmit = satisfied
+        && !hasCoverageGaps
         && (
           round >= forceAfterRounds
           || (

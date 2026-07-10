@@ -12,6 +12,10 @@
 
 - Human review synthesis renders missing-change finding details, and provider prompts explicitly tell reviewers to inspect coverage-ledger gaps and anchor absence findings to real evidence.
 
+### Fixed
+
+- Forced `submit_review` no longer engages while the coverage ledger still has unread high-risk hunks. Because a forced `tool_choice` cannot call `read_file` (the only thing that clears a gap), the previous behavior could trap Antigravity normal reviews in repeated inspection refusals and end as a false `inconclusive`.
+
 ## v0.1.0
 
 Initial public release.
