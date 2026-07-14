@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   buildClaudeCommand,
@@ -15,6 +17,14 @@ import {
   parseAntigravitySessionMetadata,
   resolveAntigravityModelAlias,
 } from "../scripts/providers/antigravity/adapter.mjs";
+import {
+  grokAcpPermissionDecision,
+  runGrokAcpTask,
+} from "../scripts/providers/grok/acp-client.mjs";
+
+const FAKE_ACP = fileURLToPath(new URL("./fixtures/fake-grok-acp.mjs", import.meta.url));
+const nodeSpawnFakeAgent = (mode) => (bin, args, opts) =>
+  spawn(process.execPath, [FAKE_ACP], { ...opts, env: { ...opts.env, FAKE_ACP_MODE: mode } });
 
 test("parseClaudeOutput extracts stream-json text and session id", () => {
   const output = [
@@ -888,6 +898,58 @@ test("runAntigravityPrompt keeps task delegation on native CLI and writes prompt
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
+});
+
+test("grokAcpPermissionDecision picks reject for read-only and allow for write", () => {
+  const params = {
+    options: [
+      { optionId: "allow-edits-session", kind: "allow_always" },
+      { optionId: "allow-once", kind: "allow_once" },
+      { optionId: "reject-once", kind: "reject_once" },
+    ],
+  };
+  assert.equal(grokAcpPermissionDecision(params, { write: false }), "reject-once");
+  assert.equal(grokAcpPermissionDecision(params, { write: true }), "allow-edits-session");
+});
+
+test("runGrokAcpTask streams a read-only task and returns the result shape", async () => {
+  const events = [];
+  const result = await runGrokAcpTask({ mode: "task", prompt: "look around" }, {
+    cwd: process.cwd(),
+    spawnImpl: nodeSpawnFakeAgent("read"),
+    onEvent: (event) => events.push(event),
+    timeoutMs: 10_000,
+  });
+  assert.equal(result.provider, "grok");
+  assert.equal(result.rawText, "read done");
+  assert.equal(result.sessionId, "fake-session-1");
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.timedOut, false);
+  assert.equal(result.usage.total_tokens, 15);
+  assert.ok(events.some((event) => event.type === "tool_call" && /read_file/.test(event.message)));
+});
+
+test("runGrokAcpTask denies writes on read-only tasks and reports the cancelled stop", async () => {
+  const result = await runGrokAcpTask({ mode: "task", prompt: "write something" }, {
+    cwd: process.cwd(),
+    spawnImpl: nodeSpawnFakeAgent("write"),
+    timeoutMs: 10_000,
+  });
+  assert.equal(result.stopReason, "cancelled");
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.rawText, "");
+});
+
+test("runGrokAcpTask approves writes on write tasks", async () => {
+  const result = await runGrokAcpTask({ mode: "task", prompt: "write something" }, {
+    cwd: process.cwd(),
+    write: true,
+    spawnImpl: nodeSpawnFakeAgent("write"),
+    timeoutMs: 10_000,
+  });
+  assert.equal(result.stopReason, "end_turn");
+  assert.equal(result.rawText, "wrote file");
+  assert.equal(result.usage.total_tokens, 25);
 });
 
 function fakeDirectReviewFactory(provider) {
