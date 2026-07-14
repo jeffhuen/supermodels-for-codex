@@ -22,6 +22,11 @@ import {
   parseCodeAssistSseLines,
   toCodeAssistRequest,
 } from "../scripts/providers/antigravity/code-assist-transport.mjs";
+import {
+  GrokCredentials,
+  defaultGrokAuthPath,
+  readGrokClientVersion,
+} from "../scripts/providers/grok/oauth.mjs";
 
 const noRateLimit = { take: async () => {} };
 
@@ -1285,4 +1290,94 @@ test("AntigravityCodeAssistTransport retries retryable project discovery 429 res
 
   assert.equal(response.text, "ok");
   assert.equal(discoveryCalls, 2);
+});
+
+test("GrokCredentials returns a fresh token without refreshing", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "supermodels-grok-oauth-"));
+  const file = path.join(dir, "auth.json");
+  try {
+    await writeFile(file, JSON.stringify({
+      "https://auth.x.ai::client-1": {
+        key: "live-token",
+        auth_mode: "oidc",
+        refresh_token: "refresh-1",
+        expires_at: new Date(2_000_000).toISOString(),
+        oidc_issuer: "https://auth.x.ai",
+        oidc_client_id: "client-1",
+        user_id: "user-1",
+        email: "jeff@example.com",
+      },
+    }), "utf8");
+    const credentials = new GrokCredentials({
+      authPath: file,
+      now: () => 1_000_000,
+      fetchImpl: async () => { throw new Error("must not refresh"); },
+    });
+    assert.equal(await credentials.accessToken(), "live-token");
+    assert.deepEqual(await credentials.identity(), { userId: "user-1", email: "jeff@example.com" });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("GrokCredentials refreshes expiring tokens via the OIDC token endpoint and persists", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "supermodels-grok-oauth-"));
+  const file = path.join(dir, "auth.json");
+  try {
+    await writeFile(file, JSON.stringify({
+      unrelated: { note: "kept" },
+      "https://auth.x.ai::client-1": {
+        key: "stale-token",
+        auth_mode: "oidc",
+        refresh_token: "refresh-1",
+        expires_at: new Date(1_000_000 + 60_000).toISOString(), // inside 5-min safety margin
+        oidc_issuer: "https://auth.x.ai",
+        oidc_client_id: "client-1",
+        email: "jeff@example.com",
+      },
+    }), "utf8");
+    const requests = [];
+    const credentials = new GrokCredentials({
+      authPath: file,
+      now: () => 1_000_000,
+      fetchImpl: async (url, init) => {
+        requests.push({ url, body: init.body, contentType: init.headers["content-type"] });
+        return new Response(JSON.stringify({
+          access_token: "new-token",
+          refresh_token: "new-refresh",
+          expires_in: 21_600,
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+    });
+    assert.equal(await credentials.accessToken(), "new-token");
+    assert.equal(requests[0].url, "https://auth.x.ai/oauth2/token");
+    assert.equal(requests[0].contentType, "application/x-www-form-urlencoded");
+    const params = new URLSearchParams(requests[0].body);
+    assert.equal(params.get("grant_type"), "refresh_token");
+    assert.equal(params.get("refresh_token"), "refresh-1");
+    assert.equal(params.get("client_id"), "client-1");
+    const persisted = JSON.parse(await readFile(file, "utf8"));
+    assert.equal(persisted["https://auth.x.ai::client-1"].key, "new-token");
+    assert.equal(persisted["https://auth.x.ai::client-1"].refresh_token, "new-refresh");
+    assert.equal(persisted.unrelated.note, "kept");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("GrokCredentials fails with an actionable error when auth.json is missing", async () => {
+  const credentials = new GrokCredentials({ authPath: "/nonexistent/grok-auth.json" });
+  await assert.rejects(() => credentials.accessToken(), /grok login/);
+});
+
+test("readGrokClientVersion reads version.json", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "supermodels-grok-version-"));
+  try {
+    const file = path.join(dir, "version.json");
+    await writeFile(file, JSON.stringify({ version: "0.2.101", stable_version: "0.2.101" }), "utf8");
+    assert.equal(await readGrokClientVersion({ versionPath: file }), "0.2.101");
+    assert.equal(await readGrokClientVersion({ versionPath: path.join(dir, "missing.json") }), "");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
