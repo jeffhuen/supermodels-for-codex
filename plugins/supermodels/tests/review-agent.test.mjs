@@ -2671,6 +2671,57 @@ test("runReviewAgent does not treat unreadable preloaded snippets as file inspec
   );
 });
 
+test("runReviewAgent grok provider sets reasoning effort, max tokens, and persona", async () => {
+  const bodies = [];
+  const transport = {
+    messages: async (body) => {
+      bodies.push(body);
+      return {
+        content: [{
+          type: "tool_use",
+          id: "t1",
+          name: "submit_review",
+          input: {
+            verdict: "inconclusive",
+            summary: "grok review test",
+            findings: [],
+            assumptions: [],
+            verification_gaps: [],
+          },
+        }],
+        tool_calls: [{
+          id: "t1",
+          name: "submit_review",
+          input: {
+            verdict: "inconclusive",
+            summary: "grok review test",
+            findings: [],
+            assumptions: [],
+            verification_gaps: [],
+          },
+        }],
+        text: "",
+      };
+    },
+  };
+  await runReviewAgent({
+    provider: "grok",
+    transport,
+    tools: {
+      schemas: [],
+      async execute() {
+        return { ok: true };
+      },
+    },
+    model: "grok-4.5",
+    minInspection: { diff: false, fileOrSearch: false, explicitFileOrSearchToolCalls: 0, cleanExplicitFileOrSearchToolCalls: 0 },
+    preloadTools: [],
+  });
+  assert.equal(bodies[0].max_tokens, 64_000);
+  assert.equal(bodies[0].reasoning_effort, "high");
+  assert.match(bodies[0].system[0].text, /Grok Build reviewing for Codex/);
+});
+
 function responseWithTool(id, name, input) {
   return {
     content: [{ type: "tool_use", id, name, input }],

@@ -16,6 +16,8 @@ const DEFAULT_REVIEW_POLICY = Object.freeze({
   maxNoToolContinuationRounds: 4,
   claudeMaxTokens: 128_000,
   antigravityMaxTokens: 64_000,
+  grokMaxTokens: 64_000,
+  grokEffort: "high",
   claudeThinking: Object.freeze({ type: "adaptive", display: "summarized" }),
   claudeEffort: null,
   antigravityThinkingBudget: -1,
@@ -500,6 +502,11 @@ function providerReasoningOptions(provider, options = {}) {
     const parsed = Number(budget);
     return Number.isFinite(parsed) ? { thinkingBudget: parsed } : {};
   }
+  if (provider === "grok") {
+    const requested = options.effort ?? DEFAULT_REVIEW_POLICY.grokEffort;
+    const effort = requested === "cli-default" ? null : requested;
+    return effort ? { reasoning_effort: effort } : {};
+  }
   return {};
 }
 
@@ -518,6 +525,9 @@ function reviewConfigMetadata({ provider, model, maxTokens, reasoningOptions, ro
   if (provider === "antigravity") {
     config.thinkingBudget = reasoningOptions.thinkingBudget ?? null;
   }
+  if (provider === "grok") {
+    config.effort = reasoningOptions.reasoning_effort ?? "";
+  }
   return config;
 }
 
@@ -531,6 +541,9 @@ function providerMaxTokens(provider) {
   }
   if (provider === "antigravity") {
     return DEFAULT_REVIEW_POLICY.antigravityMaxTokens;
+  }
+  if (provider === "grok") {
+    return DEFAULT_REVIEW_POLICY.grokMaxTokens;
   }
   return DEFAULT_REVIEW_POLICY.antigravityMaxTokens;
 }
@@ -1248,6 +1261,12 @@ function providerSystemInstructions(provider) {
     return [{
       type: "text",
       text: "You are Antigravity reviewing for Codex. Use broad systems judgment, but ground every claim in inspected repository evidence.",
+    }];
+  }
+  if (provider === "grok") {
+    return [{
+      type: "text",
+      text: "You are Grok Build reviewing for Codex. Be direct and adversarial toward the diff, but ground every claim in inspected repository evidence.",
     }];
   }
   return [{
