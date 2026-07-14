@@ -181,7 +181,7 @@ export async function runGrokAcpTask(input, options = {}) {
     ...process.env,
     GROK_SANDBOX: options.sandbox ?? (options.write ? "workspace" : "read-only"),
   };
-  const commandLineStr = commandLine({ bin: "grok", args });
+  const commandLineStr = commandLine({ bin, args });
 
   const child = spawnImpl(bin, args, { cwd: options.cwd, env });
 
@@ -215,22 +215,27 @@ export async function runGrokAcpTask(input, options = {}) {
 
     const connection = new JsonRpcConnection(child);
 
-    child.stderr?.setEncoding("utf8");
-    child.stderr?.on("data", (chunk) => {
-      stderrBuf = (stderrBuf + chunk).slice(-STDERR_LIMIT);
-    });
-
-    const emit = (event) => {
-      events.push(event);
-      options.onEvent?.(event);
-    };
-
     const appendStderr = (error) => {
       const message = error?.message ?? String(error ?? "");
       if (!message) {
         return;
       }
       stderrBuf = `${stderrBuf}${stderrBuf ? "\n" : ""}${message}`.slice(-STDERR_LIMIT);
+    };
+
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk) => {
+      stderrBuf = (stderrBuf + chunk).slice(-STDERR_LIMIT);
+    });
+    // Async EPIPE (child dies mid-write, e.g. while a permission response is
+    // in flight) surfaces as an 'error' event on stdin, not a synchronous
+    // throw from _write(). Without a listener this is an uncaught exception
+    // that crashes the host. Buffer it like any other diagnostic; never throw.
+    child.stdin?.on("error", (error) => appendStderr(error));
+
+    const emit = (event) => {
+      events.push(event);
+      options.onEvent?.(event);
     };
 
     connection.onNotification("session/update", (params) => {

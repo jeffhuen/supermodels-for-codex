@@ -952,6 +952,18 @@ test("runGrokAcpTask approves writes on write tasks", async () => {
   assert.equal(result.usage.total_tokens, 25);
 });
 
+test("runGrokAcpTask survives an agent that dies mid-permission-exchange", async () => {
+  const result = await runGrokAcpTask({ mode: "task", prompt: "crash please" }, {
+    cwd: process.cwd(),
+    spawnImpl: nodeSpawnFakeAgent("crash"),
+    timeoutMs: 10_000,
+  });
+  assert.equal(result.provider, "grok");
+  assert.equal(result.timedOut, false);
+  assert.notEqual(result.exitCode, 0);
+  assert.equal(result.stopReason, "");
+});
+
 function fakeDirectReviewFactory(provider) {
   return {
     reviewTransport: {

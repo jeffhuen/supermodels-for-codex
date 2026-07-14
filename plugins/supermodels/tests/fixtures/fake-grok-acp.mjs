@@ -2,6 +2,9 @@
 // Minimal scripted ACP agent for tests. Modes via FAKE_ACP_MODE:
 //   read (default): one read tool_call, then a message, end_turn
 //   write: requests permission for a write; approved -> completes; rejected -> failed + cancelled
+//   crash: emits a tool_call, sends session/request_permission, then exits
+//     immediately without reading the client's response (simulates the agent
+//     dying mid-permission-exchange, e.g. crash or EPIPE regression coverage)
 import readline from "node:readline";
 
 const mode = process.env.FAKE_ACP_MODE ?? "read";
@@ -21,6 +24,27 @@ rl.on("line", (line) => {
     send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: "fake-session-1" } });
   } else if (msg.method === "session/prompt") {
     const sessionId = msg.params.sessionId;
+    if (mode === "crash") {
+      update(sessionId, {
+        sessionUpdate: "tool_call", toolCallId: "tc-2", title: "Write `out.txt`",
+        rawInput: { target_file: "out.txt" },
+      });
+      send({
+        jsonrpc: "2.0", id: nextId += 1, method: "session/request_permission",
+        params: {
+          toolCall: { toolCallId: "tc-2", title: "Write `out.txt`" },
+          options: [
+            { optionId: "allow-edits-session", name: "Yes, always", kind: "allow_always" },
+            { optionId: "allow-once", name: "Yes", kind: "allow_once" },
+            { optionId: "reject-once", name: "No", kind: "reject_once" },
+          ],
+        },
+      });
+      // Die before the client's permission response can be read, so its
+      // write lands on a dead/closing pipe (async EPIPE regression coverage).
+      process.exit(1);
+      return;
+    }
     update(sessionId, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "thinking" } });
     update(sessionId, {
       sessionUpdate: "tool_call", toolCallId: "tc-1", title: "read_file",
