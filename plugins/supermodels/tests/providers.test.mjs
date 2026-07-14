@@ -21,6 +21,11 @@ import {
   grokAcpPermissionDecision,
   runGrokAcpTask,
 } from "../scripts/providers/grok/acp-client.mjs";
+import {
+  buildGrokHeadlessCommand,
+  createGrokAdapter,
+  parseGrokHeadlessOutput,
+} from "../scripts/providers/grok/adapter.mjs";
 
 const FAKE_ACP = fileURLToPath(new URL("./fixtures/fake-grok-acp.mjs", import.meta.url));
 const nodeSpawnFakeAgent = (mode) => (bin, args, opts) =>
@@ -962,6 +967,103 @@ test("runGrokAcpTask survives an agent that dies mid-permission-exchange", async
   assert.equal(result.timedOut, false);
   assert.notEqual(result.exitCode, 0);
   assert.equal(result.stopReason, "");
+});
+
+// Mirrors the existing "Claude check" tests in this file (see the
+// PATH: tempDir pattern around the writeFakeClaudeStatus tests): a fake
+// executable in tempDir takes PATH precedence over any real install.
+test("grok check is ready with a fake binary, version file, and valid credentials", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-grok-check-"));
+  try {
+    const fakeGrok = path.join(tempDir, "grok");
+    await writeFile(fakeGrok, "#!/bin/sh\necho grok 0.2.101 [stable]\n", { mode: 0o755 });
+    const authPath = path.join(tempDir, "auth.json");
+    await writeFile(authPath, JSON.stringify({
+      "https://auth.x.ai::client-1": {
+        key: "token", refresh_token: "refresh",
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        oidc_issuer: "https://auth.x.ai", oidc_client_id: "client-1",
+      },
+    }), "utf8");
+    const versionPath = path.join(tempDir, "version.json");
+    await writeFile(versionPath, JSON.stringify({ version: "0.2.101" }), "utf8");
+
+    const adapter = createGrokAdapter({
+      credentialsOptions: { authPath },
+      versionOptions: { versionPath },
+    });
+    const check = await adapter.check({ env: { PATH: tempDir } });
+    assert.equal(check.provider, "grok");
+    assert.equal(check.label, "Grok Build");
+    assert.equal(check.ready, true);
+    assert.equal(check.installed, true);
+    assert.equal(check.version, "0.2.101");
+    assert.equal(check.auth, "oauth");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("grok check fails with grok login guidance when credentials are unusable", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-grok-check-auth-"));
+  try {
+    const fakeGrok = path.join(tempDir, "grok");
+    await writeFile(fakeGrok, "#!/bin/sh\necho grok 0.2.101 [stable]\n", { mode: 0o755 });
+    const adapter = createGrokAdapter({
+      credentialsOptions: { authPath: path.join(tempDir, "missing-auth.json") },
+      versionOptions: { versionPath: path.join(tempDir, "version.json") },
+    });
+    const check = await adapter.check({ env: { PATH: tempDir } });
+    assert.equal(check.ready, false);
+    assert.equal(check.installed, true);
+    assert.equal(check.auth, "missing");
+    assert.match(check.error, /grok login/);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("buildGrokHeadlessCommand composes sandbox, model, and exclusive-mode flags", () => {
+  const command = buildGrokHeadlessCommand({
+    prompt: "do it", model: "grok-4.5", effort: "high", bestOfN: 3, jsonSchema: { type: "object" },
+  });
+  assert.equal(command.bin, "grok");
+  assert.deepEqual(command.args, [
+    "-p", "do it", "--output-format", "streaming-json",
+    "-m", "grok-4.5", "--reasoning-effort", "high",
+    "--sandbox", "read-only", "--best-of-n", "3",
+    "--json-schema", '{"type":"object"}',
+  ]);
+  const writeCommand = buildGrokHeadlessCommand({
+    prompt: "fix", write: true, model: "cli-default", effort: "cli-default", worktree: "feat-x",
+  });
+  assert.ok(writeCommand.args.includes("workspace"));
+  assert.ok(writeCommand.args.includes("--check"));
+  assert.ok(writeCommand.args.includes("--worktree"));
+  assert.ok(writeCommand.args.includes("feat-x"));
+});
+
+test("parseGrokHeadlessOutput collects text, usage, and session from NDJSON", () => {
+  const stdout = [
+    '{"type":"thought","data":"hmm"}',
+    '{"type":"text","data":"hello "}',
+    '{"type":"text","data":"world"}',
+    '{"type":"end","stopReason":"EndTurn","sessionId":"s-1","usage":{"input_tokens":9,"output_tokens":2}}',
+  ].join("\n");
+  const parsed = parseGrokHeadlessOutput(stdout);
+  assert.equal(parsed.text, "hello world");
+  assert.equal(parsed.sessionId, "s-1");
+  assert.equal(parsed.usage.input_tokens, 9);
+  assert.equal(parsed.stopReason, "EndTurn");
+});
+
+test("createGrokAdapter capabilities include writeTask and nativeInterrupt", () => {
+  const adapter = createGrokAdapter();
+  assert.equal(adapter.id, "grok");
+  const capabilities = adapter.capabilities();
+  assert.equal(capabilities.review, true);
+  assert.equal(capabilities.writeTask, true);
+  assert.equal(capabilities.nativeInterrupt, true);
 });
 
 function fakeDirectReviewFactory(provider) {
