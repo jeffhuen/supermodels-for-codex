@@ -1461,3 +1461,91 @@ test("parseResponsesSseLines returns the response.completed payload", () => {
   assert.deepEqual(parseResponsesSseLines(lines), finalResponse);
   assert.equal(parseResponsesSseLines(['data: {"type":"response.output_text.delta"}']), null);
 });
+
+function grokTransportFixture({ responses }) {
+  const calls = [];
+  const credentials = {
+    accessToken: async () => "token-1",
+    forceRefresh: async () => "token-2",
+    forceReload: () => {},
+    identity: async () => ({ userId: "user-1", email: "jeff@example.com" }),
+  };
+  const transport = new GrokOAuthResponsesTransport({
+    credentials,
+    clientVersion: "0.2.101",
+    url: "https://proxy.test/v1/responses",
+    retryBaseDelayMs: 1,
+    fetchImpl: async (url, init) => {
+      calls.push({ url, headers: init.headers, body: JSON.parse(init.body) });
+      const next = responses.shift();
+      return new Response(next.body, { status: next.status, headers: next.headers ?? {} });
+    },
+  });
+  return { transport, calls };
+}
+
+const OK_RESPONSE = JSON.stringify({
+  model: "grok-4.5",
+  output: [{ type: "message", content: [{ type: "output_text", text: "done" }] }],
+  usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+});
+
+test("GrokOAuthResponsesTransport sends verified proxy headers and translates the response", async () => {
+  const { transport, calls } = grokTransportFixture({ responses: [{ status: 200, body: OK_RESPONSE }] });
+  const result = await transport.messages({
+    model: "grok-4.5", max_tokens: 100, reasoning_effort: "high",
+    system: [{ type: "text", text: "p" }],
+    messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    tools: [],
+  });
+  assert.equal(result.text, "done");
+  assert.equal(result.stop_reason, "end_turn");
+  const headers = calls[0].headers;
+  assert.equal(headers.authorization, "Bearer token-1");
+  assert.equal(headers["x-xai-token-auth"], "xai-grok-cli");
+  assert.equal(headers["x-grok-client-version"], "0.2.101");
+  assert.equal(headers["x-grok-client-identifier"], "grok-shell");
+  assert.equal(headers["x-grok-client-mode"], "headless");
+  assert.equal(headers["x-userid"], "user-1");
+  assert.equal(headers["x-email"], "jeff@example.com");
+  assert.match(headers["user-agent"], /^grok-shell\/0\.2\.101 /);
+  assert.equal(calls[0].body.stream, true);
+});
+
+test("GrokOAuthResponsesTransport parses SSE bodies via response.completed", async () => {
+  const sse = [
+    'data: {"type":"response.output_text.delta","delta":"d"}',
+    `data: ${JSON.stringify({ type: "response.completed", response: JSON.parse(OK_RESPONSE) })}`,
+  ].join("\n");
+  const { transport } = grokTransportFixture({
+    responses: [{ status: 200, body: sse, headers: { "content-type": "text/event-stream" } }],
+  });
+  const result = await transport.messages({ model: "grok-4.5", max_tokens: 10, messages: [] });
+  assert.equal(result.text, "done");
+});
+
+test("GrokOAuthResponsesTransport refreshes once on 401 then retries", async () => {
+  const { transport, calls } = grokTransportFixture({
+    responses: [{ status: 401, body: "{}" }, { status: 200, body: OK_RESPONSE }],
+  });
+  const result = await transport.messages({ model: "grok-4.5", max_tokens: 10, messages: [] });
+  assert.equal(result.text, "done");
+  assert.equal(calls[1].headers.authorization, "Bearer token-2");
+});
+
+test("GrokOAuthResponsesTransport surfaces 426 as an actionable non-retryable error", async () => {
+  const { transport, calls } = grokTransportFixture({
+    responses: [{ status: 426, body: '{"error":"Your Grok CLI version (none) is outdated."}' }],
+  });
+  await assert.rejects(() => transport.messages({ model: "grok-4.5", max_tokens: 10, messages: [] }), /grok update/);
+  assert.equal(calls.length, 1);
+});
+
+test("GrokOAuthResponsesTransport retries retryable statuses with backoff", async () => {
+  const { transport, calls } = grokTransportFixture({
+    responses: [{ status: 503, body: "busy" }, { status: 200, body: OK_RESPONSE }],
+  });
+  const result = await transport.messages({ model: "grok-4.5", max_tokens: 10, messages: [] });
+  assert.equal(result.text, "done");
+  assert.equal(calls.length, 2);
+});
