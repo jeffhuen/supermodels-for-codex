@@ -27,6 +27,12 @@ import {
   defaultGrokAuthPath,
   readGrokClientVersion,
 } from "../scripts/providers/grok/oauth.mjs";
+import {
+  GrokOAuthResponsesTransport,
+  collectGrokResponse,
+  parseResponsesSseLines,
+  toGrokResponsesRequest,
+} from "../scripts/providers/grok/responses-transport.mjs";
 
 const noRateLimit = { take: async () => {} };
 
@@ -1380,4 +1386,78 @@ test("readGrokClientVersion reads version.json", async () => {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("toGrokResponsesRequest translates Anthropic body to Responses shape", () => {
+  const request = toGrokResponsesRequest({
+    model: "grok-4.5",
+    max_tokens: 64_000,
+    reasoning_effort: "high",
+    system: [{ type: "text", text: "Persona." }, { type: "text", text: "Rules." }],
+    tools: [{ name: "read_file", description: "Read a file.", input_schema: { type: "object", properties: {} } }],
+    tool_choice: { type: "tool", name: "submit_review" },
+    messages: [
+      { role: "user", content: [{ type: "text", text: "Review this." }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Reading." },
+          { type: "tool_use", id: "call-1", name: "read_file", input: { path: "a.mjs" } },
+        ],
+      },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "call-1", content: "{\"ok\":true}" }] },
+    ],
+  });
+  assert.equal(request.model, "grok-4.5");
+  assert.equal(request.max_output_tokens, 64_000);
+  assert.deepEqual(request.reasoning, { effort: "high" });
+  assert.equal(request.reasoning_effort, undefined);
+  assert.equal(request.instructions, "Persona.\n\nRules.");
+  assert.deepEqual(request.tool_choice, { type: "function", name: "submit_review" });
+  assert.deepEqual(request.tools, [{
+    type: "function", name: "read_file", description: "Read a file.",
+    parameters: { type: "object", properties: {} },
+  }]);
+  assert.deepEqual(request.input, [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "Review this." }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "Reading." }] },
+    { type: "function_call", call_id: "call-1", name: "read_file", arguments: "{\"path\":\"a.mjs\"}" },
+    { type: "function_call_output", call_id: "call-1", output: "{\"ok\":true}" },
+  ]);
+});
+
+test("collectGrokResponse maps output items to the Messages shape", () => {
+  const result = collectGrokResponse({
+    model: "grok-4.5",
+    output: [
+      { type: "reasoning", summary: [] },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Looking." }] },
+      { type: "function_call", call_id: "call-9", name: "read_file", arguments: "{\"path\":\"b.mjs\"}" },
+    ],
+    usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+  });
+  assert.deepEqual(result.tool_calls, [{ id: "call-9", name: "read_file", input: { path: "b.mjs" } }]);
+  assert.equal(result.text, "Looking.");
+  assert.equal(result.stop_reason, "tool_use");
+  assert.equal(result.usage.total_tokens, 15);
+  assert.deepEqual(result.content, [
+    { type: "text", text: "Looking." },
+    { type: "tool_use", id: "call-9", name: "read_file", input: { path: "b.mjs" } },
+  ]);
+});
+
+test("collectGrokResponse throws on empty output", () => {
+  assert.throws(() => collectGrokResponse({ output: [] }), /Empty Grok response/);
+});
+
+test("parseResponsesSseLines returns the response.completed payload", () => {
+  const finalResponse = { output: [{ type: "message", content: [{ type: "output_text", text: "hi" }] }] };
+  const lines = [
+    'data: {"type":"response.output_text.delta","delta":"h"}',
+    "not-sse-noise",
+    `data: ${JSON.stringify({ type: "response.completed", response: finalResponse })}`,
+    "data: [DONE]",
+  ];
+  assert.deepEqual(parseResponsesSseLines(lines), finalResponse);
+  assert.equal(parseResponsesSseLines(['data: {"type":"response.output_text.delta"}']), null);
 });
