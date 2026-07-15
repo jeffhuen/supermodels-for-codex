@@ -115,7 +115,7 @@ Under the hood it's less "message passer," more "verification harness." Things i
 - **It fails honest.** Diff too big to fully load? It says so, disables the coverage check, and flags the gap instead of quietly implying it read everything.
 - **It stays a broker, not a babysitter.** It never owns Claude's, Antigravity's, or Grok's auth or sessions; those stay on the OAuth logins already in your local `claude`, `agy`, and `grok` installs.
 
-Provider transport details, model defaults, and tuning knobs live in [`decisions/`](./decisions) (the architecture decision records) and the [package README](./plugins/supermodels/README.md).
+Provider transport details, model defaults, and tuning knobs live in the [package README](./plugins/supermodels/README.md).
 
 ## Where your stuff lives
 
@@ -170,7 +170,6 @@ plugins/supermodels/skills/        Codex skills
 plugins/supermodels/scripts/       Runtime CLI + provider adapters
 plugins/supermodels/prompts/       Shared review prompts
 plugins/supermodels/tests/         Node test suite
-decisions/                         Architecture decision records
 ```
 
 ## License
