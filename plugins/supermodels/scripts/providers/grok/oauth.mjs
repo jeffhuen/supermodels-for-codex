@@ -44,7 +44,12 @@ export class GrokCredentials {
     } catch (error) {
       throw new Error(`Grok auth is missing or unreadable at ${this.authPath}. Run \`grok login\`. (${error?.message ?? error})`);
     }
-    const envelope = JSON.parse(raw);
+    let envelope;
+    try {
+      envelope = JSON.parse(raw);
+    } catch (error) {
+      throw new Error(`Grok auth.json at ${this.authPath} is corrupt and could not be parsed. Run \`grok login\`. (${error?.message ?? error})`);
+    }
     if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) {
       throw new Error("Grok auth.json is not a JSON object. Run `grok login`.");
     }

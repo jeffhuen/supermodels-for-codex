@@ -1376,6 +1376,18 @@ test("GrokCredentials fails with an actionable error when auth.json is missing",
   await assert.rejects(() => credentials.accessToken(), /grok login/);
 });
 
+test("GrokCredentials fails with an actionable error when auth.json is corrupt", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "supermodels-grok-oauth-corrupt-"));
+  const file = path.join(dir, "auth.json");
+  try {
+    await writeFile(file, "{ not valid json", "utf8");
+    const credentials = new GrokCredentials({ authPath: file });
+    await assert.rejects(() => credentials.accessToken(), /grok login/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("readGrokClientVersion reads version.json", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "supermodels-grok-version-"));
   try {

@@ -14,12 +14,16 @@ const READ_ONLY_REDIRECT_PROMPT = [
   "Complete the task using only your built-in file read and search tools, then report your findings.",
 ].join(" ");
 
-// write: allow_always > allow_once > first option. read-only: reject_once > first option.
+// write: allow_once > allow_always > null (fail closed). read-only: first
+// reject-kind option (reject_once/reject_always/...) > null (fail closed).
+// A null decision is never defaulted to options[0] — the caller must respond
+// with a cancelled outcome so an unrecognized or missing option set can never
+// be silently approved (write) or silently allowed through (read-only).
 export function grokAcpPermissionDecision(params, policy = {}) {
   const options = Array.isArray(params?.options) ? params.options : [];
   const pick = policy.write
-    ? options.find((o) => o.kind === "allow_always") ?? options.find((o) => o.kind === "allow_once") ?? options[0]
-    : options.find((o) => o.kind === "reject_once") ?? options[0];
+    ? options.find((o) => o.kind === "allow_once") ?? options.find((o) => o.kind === "allow_always") ?? null
+    : options.find((o) => String(o?.kind ?? "").startsWith("reject")) ?? null;
   return pick?.optionId ?? "";
 }
 
@@ -300,6 +304,18 @@ export async function runGrokAcpTask(input, options = {}) {
 
     connection.onRequest("session/request_permission", (params) => {
       const optionId = grokAcpPermissionDecision(params, { write: Boolean(options.write) });
+      if (!optionId) {
+        // Fail closed: no acceptable option (reject-kind for read-only,
+        // allow_once/allow_always for write) was offered. Never fall back to
+        // options[0] — cancel the permission request instead.
+        permissionDenials += 1;
+        emit({
+          type: "progress",
+          message: "grok permission denied (no acceptable option; failing closed)",
+          at: new Date().toISOString(),
+        });
+        return { outcome: { outcome: "cancelled" } };
+      }
       const rejected = (params?.options ?? []).some((option) =>
         option?.optionId === optionId && String(option?.kind ?? "").startsWith("reject"));
       if (rejected) {
@@ -400,7 +416,10 @@ export async function runGrokAcpTask(input, options = {}) {
         let usage = buildUsage(promptOutcome.result?._meta);
         // A denial on a read-only task ends the turn as "cancelled"; give the
         // agent one redirect toward its permitted tools before giving up.
-        if (stopReason === "cancelled" && permissionDenials > 0 && !options.write) {
+        // Never redirect once our own cancellation (controller-cancel or
+        // timeout) has fired — that also stops the turn as "cancelled", and
+        // starting a new session/prompt would race the kill timer.
+        if (stopReason === "cancelled" && permissionDenials > 0 && !options.write && !cancelTriggered) {
           emit({
             type: "progress",
             message: "grok redirected after read-only policy denial",

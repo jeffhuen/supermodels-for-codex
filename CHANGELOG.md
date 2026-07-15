@@ -7,7 +7,7 @@
 - Grok Build (xAI) as a third review and task provider, using your existing `grok login` subscription credentials — no API keys.
 - Grok reviews run the full verification harness (read-only tool loop, inspection gating, citation verification, high-risk coverage ledger) over a direct OAuth transport to xAI's documented CLI chat proxy, with automatic OIDC token refresh and honest `grok login` / `grok update` errors.
 - Grok task delegation runs over ACP (`grok agent stdio`) with full tool-call streaming and supermodels-enforced permissions: read-only tasks deny writes at the broker, write tasks approve only sanctioned edits, with an OS-level sandbox backstop.
-- Grok-exclusive one-shot task modes: `--best-of-n <N>` and self-verifying `--check` runs via headless `grok -p` (`--check` is experimental — current Grok CLI releases can cancel the run and truncate output, so it is only passed through on explicit request).
+- Grok-exclusive one-shot task modes: `--best-of-n <N>` and self-verifying `--check` runs via headless `grok --prompt-file` (`--check` is experimental — current Grok CLI releases can cancel the run and truncate output, so it is only passed through on explicit request).
 - Reviews and adversarial reviews now run up to three providers; each adversarial first pass is cross-examined by two independent peers.
 
 ### Changed

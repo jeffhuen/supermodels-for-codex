@@ -9,6 +9,14 @@
 //     (the real `grok agent stdio` does not exit on EOF)
 //   redirect: first prompt requests permission for a shell Execute (denied on
 //     read-only tasks -> cancelled); a follow-up prompt answers normally
+//   unknown-kind: requests permission with a single unrecognized option kind;
+//     reports "permission-cancelled" if the client fails closed (cancelled
+//     outcome, no optionId) or "permission-unexpectedly-selected" otherwise
+//   reject-always: requests permission with only a reject_always option;
+//     reports "reject-always-honored" if the client selects it
+//   escape: sends an agent->client fs/read_text_file request for a relative
+//     path that escapes the workspace root; reports "fs-denied" if the
+//     client returns a JSON-RPC error or "fs-leaked" if it returns content
 import readline from "node:readline";
 
 const mode = process.env.FAKE_ACP_MODE ?? "read";
@@ -22,6 +30,7 @@ const update = (sessionId, update_) =>
   send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: update_ } });
 let nextId = 1000;
 const pendingPermission = new Map();
+const pendingFsRead = new Map();
 
 rl.on("line", (line) => {
   let msg;
@@ -78,6 +87,47 @@ rl.on("line", (line) => {
       }
       return;
     }
+    if (mode === "unknown-kind") {
+      const permissionId = nextId += 1;
+      pendingPermission.set(permissionId, sessionId);
+      pendingPermission.set(`${permissionId}:promptId`, msg.id);
+      pendingPermission.set(`${permissionId}:mode`, "unknown-kind");
+      send({
+        jsonrpc: "2.0", id: permissionId, method: "session/request_permission",
+        params: {
+          toolCall: { toolCallId: "tc-3", title: "Do something unusual" },
+          options: [
+            { optionId: "custom-1", name: "Custom", kind: "custom_manual_review" },
+          ],
+        },
+      });
+      return;
+    }
+    if (mode === "reject-always") {
+      const permissionId = nextId += 1;
+      pendingPermission.set(permissionId, sessionId);
+      pendingPermission.set(`${permissionId}:promptId`, msg.id);
+      pendingPermission.set(`${permissionId}:mode`, "reject-always");
+      send({
+        jsonrpc: "2.0", id: permissionId, method: "session/request_permission",
+        params: {
+          toolCall: { toolCallId: "tc-4", title: "Do something risky" },
+          options: [
+            { optionId: "reject-forever", name: "No, never", kind: "reject_always" },
+          ],
+        },
+      });
+      return;
+    }
+    if (mode === "escape") {
+      const requestId = nextId += 1;
+      pendingFsRead.set(requestId, msg.id);
+      send({
+        jsonrpc: "2.0", id: requestId, method: "fs/read_text_file",
+        params: { sessionId, path: "../../outside.txt" },
+      });
+      return;
+    }
     update(sessionId, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "thinking" } });
     update(sessionId, {
       sessionUpdate: "tool_call", toolCallId: "tc-1", title: "read_file",
@@ -106,9 +156,40 @@ rl.on("line", (line) => {
         result: { stopReason: "end_turn", _meta: { inputTokens: 12, outputTokens: 3, totalTokens: 15 } },
       });
     }
+  } else if (pendingFsRead.has(msg.id)) {
+    const promptId = pendingFsRead.get(msg.id);
+    const report = msg.error ? "fs-denied" : "fs-leaked";
+    update("fake-session-1", { sessionUpdate: "agent_message_chunk", content: { type: "text", text: report } });
+    send({
+      jsonrpc: "2.0", id: promptId,
+      result: { stopReason: "end_turn", _meta: { inputTokens: 5, outputTokens: 2, totalTokens: 7 } },
+    });
   } else if (pendingPermission.has(msg.id)) {
     const sessionId = pendingPermission.get(msg.id);
     const promptId = pendingPermission.get(`${msg.id}:promptId`);
+    const permMode = pendingPermission.get(`${msg.id}:mode`);
+    if (permMode === "unknown-kind") {
+      const outcome = msg.result?.outcome ?? {};
+      const report = outcome.outcome === "cancelled" && !outcome.optionId
+        ? "permission-cancelled"
+        : "permission-unexpectedly-selected";
+      update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: report } });
+      send({
+        jsonrpc: "2.0", id: promptId,
+        result: { stopReason: "end_turn", _meta: { inputTokens: 5, outputTokens: 2, totalTokens: 7 } },
+      });
+      return;
+    }
+    if (permMode === "reject-always") {
+      const optionId = msg.result?.outcome?.optionId ?? "";
+      const report = optionId === "reject-forever" ? "reject-always-honored" : "reject-always-not-honored";
+      update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: report } });
+      send({
+        jsonrpc: "2.0", id: promptId,
+        result: { stopReason: "end_turn", _meta: { inputTokens: 5, outputTokens: 2, totalTokens: 7 } },
+      });
+      return;
+    }
     const optionId = msg.result?.outcome?.optionId ?? "";
     if (optionId.startsWith("allow")) {
       update(sessionId, { sessionUpdate: "tool_call_update", toolCallId: "tc-2", status: "completed" });

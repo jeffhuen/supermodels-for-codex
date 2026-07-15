@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { chmod, mkdir, unlink, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -85,7 +87,10 @@ export async function check(options = {}, factoryOptions = {}) {
 }
 
 export function buildGrokHeadlessCommand(options = {}) {
-  const args = ["-p", options.prompt ?? "", "--output-format", "streaming-json", "--no-memory"];
+  if (!options.promptFile) {
+    throw new Error("Grok headless mode requires a prompt file path.");
+  }
+  const args = ["--prompt-file", options.promptFile, "--output-format", "streaming-json", "--no-memory"];
   const model = resolveGrokModelAlias(options.model ?? DEFAULT_MODEL);
   const effort = options.effort ?? DEFAULT_EFFORT;
   if (model && model !== "cli-default") {
@@ -190,46 +195,67 @@ async function runGrokTask(input, options = {}) {
 
 async function runGrokHeadlessTask(input, options, model, effort) {
   const startedAt = new Date().toISOString();
-  const command = buildGrokHeadlessCommand({
-    bin: options.bin,
-    prompt: input.prompt,
-    model,
-    effort,
-    write: Boolean(options.write),
-    bestOfN: options.bestOfN,
-    check: options.check,
-    jsonSchema: options.jsonSchema,
-    worktree: options.worktree,
-  });
-  const streamParser = createGrokStreamEventParser(options.onEvent);
-  const result = await runCommand(command, {
-    cwd: options.cwd,
-    timeoutMs: options.timeoutMs ?? 20 * 60 * 1000,
-    controller: options.controller,
-    signalKillMs: options.signalKillMs,
-    onStart: options.onStart,
-    onStdout: (chunk) => streamParser.push(chunk),
-  });
-  streamParser.end();
-  const parsed = parseGrokHeadlessOutput(result.stdout);
+  const promptFile = await writeGrokPromptFile(input.prompt, options);
+  try {
+    const command = buildGrokHeadlessCommand({
+      bin: options.bin,
+      promptFile,
+      model,
+      effort,
+      write: Boolean(options.write),
+      bestOfN: options.bestOfN,
+      check: options.check,
+      jsonSchema: options.jsonSchema,
+      worktree: options.worktree,
+    });
+    const streamParser = createGrokStreamEventParser(options.onEvent);
+    const result = await runCommand(command, {
+      cwd: options.cwd,
+      timeoutMs: options.timeoutMs ?? 20 * 60 * 1000,
+      controller: options.controller,
+      signalKillMs: options.signalKillMs,
+      onStart: options.onStart,
+      onStdout: (chunk) => streamParser.push(chunk),
+    });
+    streamParser.end();
+    const parsed = parseGrokHeadlessOutput(result.stdout);
 
-  return {
-    provider: "grok",
-    exitCode: result.exitCode ?? null,
-    signal: result.signal ?? null,
-    timedOut: result.timedOut ?? false,
-    rawText: parsed.text || result.stdout,
-    stderr: result.stderr,
-    sessionId: parsed.sessionId,
-    pid: result.pid ?? null,
-    commandLine: commandLine(command),
-    structured: parsed.structured,
-    usage: parsed.usage,
-    events: parsed.events,
-    startedAt,
-    completedAt: new Date().toISOString(),
-    stopReason: parsed.stopReason,
-  };
+    return {
+      provider: "grok",
+      exitCode: result.exitCode ?? null,
+      signal: result.signal ?? null,
+      timedOut: result.timedOut ?? false,
+      rawText: parsed.text || result.stdout,
+      stderr: result.stderr,
+      sessionId: parsed.sessionId,
+      pid: result.pid ?? null,
+      commandLine: commandLine(command),
+      structured: parsed.structured,
+      usage: parsed.usage,
+      events: parsed.events,
+      startedAt,
+      completedAt: new Date().toISOString(),
+      stopReason: parsed.stopReason,
+    };
+  } finally {
+    // Best-effort cleanup on completion or error: the prompt can carry
+    // private context, so it must not linger on disk once the run is done.
+    await unlink(promptFile).catch(() => {});
+  }
+}
+
+// Mirrors the antigravity adapter's writePromptFile: a 0700 directory and a
+// 0600 file so the rendered prompt (which can include private context) never
+// transits argv/ps and is readable only by the invoking user.
+async function writeGrokPromptFile(prompt, options = {}) {
+  const promptDir = options.promptDir
+    ? path.resolve(options.promptDir)
+    : path.join(os.tmpdir(), "supermodels-prompts");
+  await mkdir(promptDir, { recursive: true, mode: 0o700 });
+  await chmod(promptDir, 0o700).catch(() => {});
+  const promptPath = path.join(promptDir, "provider-grok.prompt.md");
+  await writeFile(promptPath, String(prompt ?? ""), { mode: 0o600 });
+  return promptPath;
 }
 
 async function runGrokReview(input, options = {}, factoryOptions = {}) {

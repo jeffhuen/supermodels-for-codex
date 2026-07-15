@@ -905,7 +905,7 @@ test("runAntigravityPrompt keeps task delegation on native CLI and writes prompt
   }
 });
 
-test("grokAcpPermissionDecision picks reject for read-only and allow for write", () => {
+test("grokAcpPermissionDecision picks reject for read-only and allow-once first for write", () => {
   const params = {
     options: [
       { optionId: "allow-edits-session", kind: "allow_always" },
@@ -914,7 +914,34 @@ test("grokAcpPermissionDecision picks reject for read-only and allow for write",
     ],
   };
   assert.equal(grokAcpPermissionDecision(params, { write: false }), "reject-once");
+  assert.equal(grokAcpPermissionDecision(params, { write: true }), "allow-once");
+});
+
+test("grokAcpPermissionDecision falls back to allow_always when allow_once is absent", () => {
+  const params = {
+    options: [
+      { optionId: "allow-edits-session", kind: "allow_always" },
+      { optionId: "reject-once", kind: "reject_once" },
+    ],
+  };
   assert.equal(grokAcpPermissionDecision(params, { write: true }), "allow-edits-session");
+});
+
+test("grokAcpPermissionDecision returns null (empty) when no acceptable option exists", () => {
+  const params = { options: [{ optionId: "mystery", kind: "custom_manual_review" }] };
+  assert.equal(grokAcpPermissionDecision(params, { write: false }), "");
+  assert.equal(grokAcpPermissionDecision(params, { write: true }), "");
+  assert.equal(grokAcpPermissionDecision({ options: [] }, { write: false }), "");
+});
+
+test("grokAcpPermissionDecision honors reject_always for read-only tasks", () => {
+  const params = {
+    options: [
+      { optionId: "allow-once", kind: "allow_once" },
+      { optionId: "reject-forever", kind: "reject_always" },
+    ],
+  };
+  assert.equal(grokAcpPermissionDecision(params, { write: false }), "reject-forever");
 });
 
 test("runGrokAcpTask streams a read-only task and returns the result shape", async () => {
@@ -1013,6 +1040,62 @@ test("runGrokAcpTask survives an agent that dies mid-permission-exchange", async
   assert.equal(result.stopReason, "");
 });
 
+test("runGrokAcpTask fails closed (cancelled outcome) when only unrecognized permission option kinds are offered", async () => {
+  const result = await runGrokAcpTask({ mode: "task", prompt: "look around" }, {
+    cwd: process.cwd(),
+    spawnImpl: nodeSpawnFakeAgent("unknown-kind"),
+    timeoutMs: 10_000,
+  });
+  assert.match(result.rawText, /permission-cancelled/);
+});
+
+test("runGrokAcpTask honors reject_always on read-only tasks", async () => {
+  const result = await runGrokAcpTask({ mode: "task", prompt: "look around" }, {
+    cwd: process.cwd(),
+    spawnImpl: nodeSpawnFakeAgent("reject-always"),
+    timeoutMs: 10_000,
+  });
+  assert.match(result.rawText, /reject-always-honored/);
+});
+
+test("runGrokAcpTask does not redirect when our own cancellation races a permission-denial stop", async () => {
+  let cancelNow = null;
+  const controller = {
+    cancelled: false,
+    onCancel(fn) {
+      cancelNow = fn;
+      return () => { cancelNow = null; };
+    },
+  };
+  const events = [];
+  const result = await runGrokAcpTask({ mode: "task", prompt: "write something" }, {
+    cwd: process.cwd(),
+    controller,
+    spawnImpl: nodeSpawnFakeAgent("write"),
+    onEvent: (event) => {
+      events.push(event);
+      // Fire our own cancellation the instant the permission decision is
+      // emitted (before the fixture's denial reply comes back), simulating a
+      // controller-cancel/timeout racing a read-only permission denial.
+      if (event.type === "progress" && /grok permission/.test(event.message) && cancelNow) {
+        cancelNow();
+      }
+    },
+    timeoutMs: 10_000,
+  });
+  assert.equal(result.stopReason, "cancelled");
+  assert.ok(!events.some((event) => /redirected/.test(event.message)));
+});
+
+test("runGrokAcpTask rejects a relative fs/read_text_file escape outside the workspace", async () => {
+  const result = await runGrokAcpTask({ mode: "task", prompt: "look around" }, {
+    cwd: process.cwd(),
+    spawnImpl: nodeSpawnFakeAgent("escape"),
+    timeoutMs: 10_000,
+  });
+  assert.match(result.rawText, /fs-denied/);
+});
+
 // Mirrors the existing "Claude check" tests in this file (see the
 // PATH: tempDir pattern around the writeFakeClaudeStatus tests): a fake
 // executable in tempDir takes PATH precedence over any real install.
@@ -1108,17 +1191,17 @@ test("a bare --worktree task routes to the headless runner, not ACP", async () =
 
 test("buildGrokHeadlessCommand composes sandbox, model, and exclusive-mode flags", () => {
   const command = buildGrokHeadlessCommand({
-    prompt: "do it", model: "grok-4.5", effort: "high", bestOfN: 3, jsonSchema: { type: "object" },
+    promptFile: "/tmp/supermodels-prompts/provider-grok.prompt.md", model: "grok-4.5", effort: "high", bestOfN: 3, jsonSchema: { type: "object" },
   });
   assert.equal(command.bin, "grok");
   assert.deepEqual(command.args, [
-    "-p", "do it", "--output-format", "streaming-json", "--no-memory",
+    "--prompt-file", "/tmp/supermodels-prompts/provider-grok.prompt.md", "--output-format", "streaming-json", "--no-memory",
     "-m", "grok-4.5", "--reasoning-effort", "high",
     "--sandbox", "read-only", "--best-of-n", "3",
     "--json-schema", '{"type":"object"}',
   ]);
   const writeCommand = buildGrokHeadlessCommand({
-    prompt: "fix", write: true, model: "cli-default", effort: "cli-default", worktree: "feat-x",
+    promptFile: "/tmp/supermodels-prompts/provider-grok.prompt.md", write: true, model: "cli-default", effort: "cli-default", worktree: "feat-x",
   });
   assert.ok(writeCommand.args.includes("workspace"));
   // --check is never appended automatically (grok 0.2.x headless --check can
@@ -1127,8 +1210,72 @@ test("buildGrokHeadlessCommand composes sandbox, model, and exclusive-mode flags
   assert.ok(writeCommand.args.includes("--worktree"));
   assert.ok(writeCommand.args.includes("feat-x"));
   assert.ok(writeCommand.args.includes("--no-memory"));
-  const checkCommand = buildGrokHeadlessCommand({ prompt: "verify", check: true, write: true });
+  const checkCommand = buildGrokHeadlessCommand({
+    promptFile: "/tmp/supermodels-prompts/provider-grok.prompt.md", check: true, write: true,
+  });
   assert.ok(checkCommand.args.includes("--check"));
+});
+
+test("buildGrokHeadlessCommand rejects a missing prompt file path", () => {
+  assert.throws(
+    () => buildGrokHeadlessCommand({ model: "grok-4.5" }),
+    /prompt file/i,
+  );
+});
+
+test("buildGrokHeadlessCommand never takes the rendered prompt text as an option", () => {
+  const command = buildGrokHeadlessCommand({
+    promptFile: "/tmp/supermodels-prompts/provider-grok.prompt.md",
+  });
+  assert.equal(command.stdin, false);
+  assert(!("prompt" in command));
+  assert(!command.args.includes("-p"));
+  assert(command.args.includes("--prompt-file"));
+});
+
+test("runGrokTask headless path writes the prompt to a 0600 temp file and never puts it in argv or commandLine", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-grok-headless-prompt-file-"));
+  try {
+    const recordPath = path.join(tempDir, "record.json");
+    const fakeGrok = path.join(tempDir, "grok");
+    await writeFile(fakeGrok, [
+      "#!/usr/bin/env node",
+      "import { writeFileSync, readFileSync, statSync } from 'node:fs';",
+      "const argv = process.argv.slice(2);",
+      "const idx = argv.indexOf('--prompt-file');",
+      "const promptFile = idx >= 0 ? argv[idx + 1] : '';",
+      "const promptText = promptFile ? readFileSync(promptFile, 'utf8') : '';",
+      "const mode = promptFile ? (statSync(promptFile).mode & 0o777) : 0;",
+      `writeFileSync(${JSON.stringify(recordPath)}, JSON.stringify({ argv, promptFile, promptText, mode }));`,
+      "console.log(JSON.stringify({ type: 'text', data: 'headless prompt-file output' }));",
+      "console.log(JSON.stringify({ type: 'end', stopReason: 'EndTurn', sessionId: 'headless-session', usage: { input_tokens: 1, output_tokens: 1 } }));",
+      "",
+    ].join("\n"));
+    await chmod(fakeGrok, 0o755);
+
+    const adapter = createGrokAdapter();
+    const result = await adapter.task({ mode: "task", prompt: "SENTINEL_SUPERMODELS_GROK_PROMPT" }, {
+      cwd: tempDir,
+      bin: fakeGrok,
+      promptDir: tempDir,
+      worktree: true,
+      timeoutMs: 10_000,
+    });
+
+    const record = JSON.parse(await readFile(recordPath, "utf8"));
+    assert.ok(record.promptFile);
+    assert.equal(record.promptText, "SENTINEL_SUPERMODELS_GROK_PROMPT");
+    assert.equal(record.mode, 0o600);
+    assert(!record.argv.includes("SENTINEL_SUPERMODELS_GROK_PROMPT"));
+    assert(!record.argv.includes("-p"));
+    assert(record.argv.includes("--prompt-file"));
+    assert.match(result.commandLine, /--prompt-file/);
+    assert(!result.commandLine.includes("SENTINEL_SUPERMODELS_GROK_PROMPT"));
+    // The temp prompt file is cleaned up once the run completes.
+    await assert.rejects(() => stat(record.promptFile), /ENOENT/);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("parseGrokHeadlessOutput collects text, usage, and session from NDJSON", () => {
