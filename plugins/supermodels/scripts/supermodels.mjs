@@ -264,6 +264,7 @@ async function handleTask(parsed) {
   if (parsed.options.write && providerSelection.requested.length > 1) {
     throw new Error("Refusing multi-provider --write task. Pick a single provider: --provider claude, --provider antigravity, or --provider grok.");
   }
+  assertGrokOnlyTaskOptions(parsed.options, providerSelection);
   const request = buildTaskRequest({
     options: parsed.options,
     providerSelection,
@@ -285,6 +286,29 @@ async function handleTask(parsed) {
 
   const output = await runForegroundWorkerJob({ parsed, request });
   writeOutput(parsed, output, renderHumanResult(output));
+}
+
+// These task options only make sense on Grok's headless one-shot runner
+// (see providers/grok/adapter.mjs's runGrokHeadlessTask); other adapters
+// have no way to honor them.
+const GROK_ONLY_TASK_OPTIONS = [
+  ["best-of-n", "--best-of-n"],
+  ["check", "--check"],
+  ["json-schema", "--json-schema"],
+  ["worktree", "--worktree"],
+];
+
+function assertGrokOnlyTaskOptions(options, providerSelection) {
+  const isGrokOnly = providerSelection.requested.length === 1 && providerSelection.requested[0] === "grok";
+  if (isGrokOnly) {
+    return;
+  }
+  for (const [key, flag] of GROK_ONLY_TASK_OPTIONS) {
+    if (options[key] === undefined || options[key] === false) {
+      continue;
+    }
+    throw new Error(`Refusing ${flag}: Grok-only task option. Pick a single provider: --provider grok.`);
+  }
 }
 
 async function handleWorker(parsed) {

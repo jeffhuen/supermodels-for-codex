@@ -89,3 +89,48 @@ test("resolveProviderIds fails clearly when defaultAll is disabled without a pro
     /at least one provider/i,
   );
 });
+
+test("parseRuntimeArgs parses grok-exclusive task options", () => {
+  const parsed = parseRuntimeArgs([
+    "task",
+    "--provider", "grok",
+    "--best-of-n", "3",
+    "--check",
+    "--json-schema", '{"type":"object"}',
+    "--worktree",
+    "do the thing",
+  ]);
+
+  assert.equal(parsed.options["best-of-n"], 3);
+  assert.equal(parsed.options.check, true);
+  assert.deepEqual(parsed.options["json-schema"], { type: "object" });
+  assert.equal(parsed.options.worktree, true);
+  assert.deepEqual(parsed.positionals, ["do the thing"]);
+});
+
+test("parseRuntimeArgs rejects a non-positive-integer --best-of-n", () => {
+  assert.throws(
+    () => parseRuntimeArgs(["task", "--best-of-n", "abc", "task"]),
+    /--best-of-n must be a positive integer/i,
+  );
+  assert.throws(
+    () => parseRuntimeArgs(["task", "--best-of-n", "0", "task"]),
+    /--best-of-n must be a positive integer/i,
+  );
+  assert.throws(
+    () => parseRuntimeArgs(["task", "--best-of-n", "1.5", "task"]),
+    /--best-of-n must be a positive integer/i,
+  );
+});
+
+test("parseRuntimeArgs rejects invalid --json-schema JSON", () => {
+  assert.throws(
+    () => parseRuntimeArgs(["task", "--json-schema", "{not json", "task"]),
+    /--json-schema must be valid json/i,
+  );
+});
+
+test("parseRuntimeArgs leaves --worktree as a boolean flag", () => {
+  const parsed = parseRuntimeArgs(["task", "--worktree=false", "task"]);
+  assert.equal(parsed.options.worktree, false);
+});

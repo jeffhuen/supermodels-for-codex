@@ -146,19 +146,23 @@ export function parseRuntimeArgs(argv) {
     booleanOptions: [
       "all",
       "background",
+      "check",
       "help",
       "json",
       "live",
+      "worktree",
       "write",
     ],
     valueOptions: [
       "base",
+      "best-of-n",
       "context",
       "context-file",
       "data-root",
       "effort",
       "interval",
       "job-id",
+      "json-schema",
       "max-wait",
       "model",
       "provider",
@@ -179,9 +183,35 @@ export function parseRuntimeArgs(argv) {
 
   return {
     command,
-    options: parsed.options,
+    options: normalizeGrokTaskOptions(parsed.options),
     positionals: parsed.positionals,
   };
+}
+
+// --best-of-n and --json-schema are Grok-exclusive task options (see
+// providers/grok/adapter.mjs). Normalize them to real types here, right
+// after parsing, so every downstream consumer (request building, job
+// storage, the worker's adapter.task() call) sees a validated number /
+// parsed object instead of a raw CLI string.
+function normalizeGrokTaskOptions(options) {
+  const next = { ...options };
+  if (next["best-of-n"] !== undefined) {
+    const raw = next["best-of-n"];
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error(`--best-of-n must be a positive integer, got '${raw}'.`);
+    }
+    next["best-of-n"] = value;
+  }
+  if (next["json-schema"] !== undefined) {
+    const raw = next["json-schema"];
+    try {
+      next["json-schema"] = JSON.parse(raw);
+    } catch (error) {
+      throw new Error(`--json-schema must be valid JSON: ${error.message}`);
+    }
+  }
+  return next;
 }
 
 export function resolveProviderIds(options = {}, config = {}) {

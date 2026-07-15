@@ -59,6 +59,58 @@ test("worker failures mark the persisted job failed", async () => {
   }
 });
 
+test("task refuses --best-of-n unless the provider is grok-only", async () => {
+  const fixture = await createFixture("supermodels-grok-gating-best-of-n-");
+  try {
+    const { dataRoot, workspaceRoot } = fixture;
+    const scriptPath = path.resolve(import.meta.dirname, "../scripts/supermodels.mjs");
+    const result = spawnSync(process.execPath, [
+      scriptPath,
+      "task",
+      "--provider",
+      "claude",
+      "--best-of-n",
+      "3",
+      "--data-root",
+      dataRoot,
+      "say hi",
+    ], {
+      cwd: workspaceRoot,
+      encoding: "utf8",
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Refusing --best-of-n.*Grok-only task option/i);
+    assert.match(result.stderr, /--provider grok/i);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("task refuses --check, --json-schema, and --worktree for multi-provider requests", async () => {
+  const fixture = await createFixture("supermodels-grok-gating-multi-");
+  try {
+    const { dataRoot, workspaceRoot } = fixture;
+    const scriptPath = path.resolve(import.meta.dirname, "../scripts/supermodels.mjs");
+    const result = spawnSync(process.execPath, [
+      scriptPath,
+      "task",
+      "--check",
+      "--data-root",
+      dataRoot,
+      "say hi",
+    ], {
+      cwd: workspaceRoot,
+      encoding: "utf8",
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Refusing --check.*Grok-only task option/i);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("cancel escalates to SIGKILL when a worker ignores SIGTERM", { skip: process.platform === "win32" }, async () => {
   const fixture = await createFixture("supermodels-cancel-worker-");
   const child = spawn(process.execPath, [

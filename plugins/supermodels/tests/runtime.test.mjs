@@ -658,6 +658,60 @@ test("runTask stores provider progress events from adapters", async () => {
   }
 });
 
+test("runTask forwards grok-exclusive task options to adapter.task()", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-grok-options-"));
+  try {
+    let capturedOptions;
+    const adapters = {
+      grok: {
+        check: async () => ({
+          provider: "grok",
+          ready: true,
+          installed: true,
+          auth: "oauth",
+          path: "/tmp/grok",
+        }),
+        task: async (_input, options) => {
+          capturedOptions = options;
+          return {
+            exitCode: 0,
+            rawText: "done",
+            stderr: "",
+            sessionId: "",
+            commandLine: "grok -p",
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+          };
+        },
+      },
+    };
+
+    await runTask({
+      adapters,
+      providerSelection: {
+        requested: ["grok"],
+        explicit: true,
+      },
+      options: {
+        "data-root": dataRoot,
+        "best-of-n": 3,
+        check: true,
+        "json-schema": { type: "object" },
+        worktree: true,
+      },
+      task: "inspect only",
+      workspaceRoot: "/tmp/workspace",
+    });
+
+    assert.equal(capturedOptions.bestOfN, 3);
+    assert.equal(capturedOptions.check, true);
+    assert.deepEqual(capturedOptions.jsonSchema, { type: "object" });
+    assert.equal(capturedOptions.worktree, true);
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
 test("provider progress without usage does not clear live cumulative usage", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-live-usage-"));
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-live-usage-workspace-"));
