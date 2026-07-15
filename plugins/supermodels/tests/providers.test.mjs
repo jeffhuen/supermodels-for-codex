@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -19,6 +19,7 @@ import {
 } from "../scripts/providers/antigravity/adapter.mjs";
 import {
   grokAcpPermissionDecision,
+  readWorkspaceTextFile,
   runGrokAcpTask,
 } from "../scripts/providers/grok/acp-client.mjs";
 import {
@@ -1380,3 +1381,50 @@ async function writeFakeClaudeStatus(fakeClaude) {
   ].join("\n"));
   await chmod(fakeClaude, 0o755);
 }
+
+test("readWorkspaceTextFile serves an in-workspace file", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "supermodels-grok-fs-"));
+  try {
+    await writeFile(path.join(dir, "in.txt"), "inside", "utf8");
+    const result = await readWorkspaceTextFile(dir, "in.txt");
+    assert.equal(result.content, "inside");
+    assert.equal(result.truncated, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("readWorkspaceTextFile denies a symlink that escapes the workspace", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "supermodels-grok-fsroot-"));
+  const outside = await mkdtemp(path.join(tmpdir(), "supermodels-grok-fsout-"));
+  try {
+    await writeFile(path.join(outside, "secret.txt"), "TOP_SECRET", "utf8");
+    await symlink(path.join(outside, "secret.txt"), path.join(root, "link.txt"));
+    await assert.rejects(() => readWorkspaceTextFile(root, "link.txt"), /outside workspace/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("readWorkspaceTextFile rejects a non-regular file", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "supermodels-grok-fsdir-"));
+  try {
+    await mkdir(path.join(dir, "subdir"));
+    await assert.rejects(() => readWorkspaceTextFile(dir, "subdir"), /not a regular file/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("readWorkspaceTextFile bounds the read to maxBytes", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "supermodels-grok-fsbig-"));
+  try {
+    await writeFile(path.join(dir, "big.txt"), "x".repeat(5000), "utf8");
+    const result = await readWorkspaceTextFile(dir, "big.txt", { maxBytes: 1000 });
+    assert.equal(result.content.length, 1000);
+    assert.equal(result.truncated, true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

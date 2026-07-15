@@ -1,13 +1,15 @@
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { open, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { commandLine } from "../../lib/process.mjs";
+import { decodeUtf8Prefix } from "../../lib/text.mjs";
 
 const STDERR_LIMIT = 16 * 1024;
 const THOUGHT_EMIT_THRESHOLD = 2000;
 const CANCEL_GRACE_MS = 2000;
 const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
+const READ_FILE_LIMIT_BYTES = 1024 * 1024;
 const READ_ONLY_REDIRECT_PROMPT = [
   "Supermodels policy notice: your previous action was denied because this task is read-only.",
   "Do not run shell commands or modify files.",
@@ -140,6 +142,32 @@ function jsonRpcError(code, message) {
 
 function isWithinCwd(root, candidate) {
   return candidate === root || candidate.startsWith(root + path.sep);
+}
+
+// Serve a workspace file to the agent's client-side fs capability safely:
+// canonicalize both root and target so an in-workspace symlink can't escape
+// containment, reject anything that isn't a regular file (no FIFOs/devices/
+// dirs), and bound the read so a huge file can't exhaust worker memory.
+export async function readWorkspaceTextFile(root, requestedPath, options = {}) {
+  const maxBytes = options.maxBytes ?? READ_FILE_LIMIT_BYTES;
+  const canonicalRoot = await realpath(root);
+  const resolved = path.resolve(canonicalRoot, String(requestedPath ?? ""));
+  const canonical = await realpath(resolved);
+  if (!isWithinCwd(canonicalRoot, canonical)) {
+    throw new Error("path outside workspace");
+  }
+  const info = await stat(canonical);
+  if (!info.isFile()) {
+    throw new Error("not a regular file");
+  }
+  const handle = await open(canonical, "r");
+  try {
+    const buffer = Buffer.alloc(Math.min(info.size, maxBytes));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    return { content: decodeUtf8Prefix(buffer, bytesRead), truncated: info.size > maxBytes };
+  } finally {
+    await handle.close();
+  }
 }
 
 function buildUsage(meta) {
@@ -290,12 +318,8 @@ export async function runGrokAcpTask(input, options = {}) {
     });
 
     connection.onRequest("fs/read_text_file", async (params) => {
-      const resolved = path.resolve(resolvedCwd, String(params?.path ?? ""));
-      if (!isWithinCwd(resolvedCwd, resolved)) {
-        throw jsonRpcError(-32000, "path outside workspace");
-      }
       try {
-        const content = await readFile(resolved, "utf8");
+        const { content } = await readWorkspaceTextFile(resolvedCwd, params?.path);
         return { content };
       } catch (error) {
         throw jsonRpcError(-32000, error?.message ?? String(error));
