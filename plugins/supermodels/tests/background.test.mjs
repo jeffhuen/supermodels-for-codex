@@ -14,10 +14,10 @@ test("worker failures mark the persisted job failed", async () => {
     const job = await createJob(state, {
       command: "review",
       mode: "review",
-      requestedProviders: ["grok"],
+      requestedProviders: ["not-a-real-provider"],
       providerSelection: {
         explicit: true,
-        requested: ["grok"],
+        requested: ["not-a-real-provider"],
       },
       options: {
         "data-root": dataRoot,
@@ -48,12 +48,12 @@ test("worker failures mark the persisted job failed", async () => {
     });
 
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /Provider 'grok' is not ready/i);
+    assert.match(result.stderr, /Provider 'not-a-real-provider' is not ready/i);
 
     const reloaded = await readJob(state, job.id);
     assert.equal(reloaded.status, "failed");
     assert.equal(reloaded.stage, "failed");
-    assert.match(reloaded.error, /Provider 'grok' is not ready/i);
+    assert.match(reloaded.error, /Provider 'not-a-real-provider' is not ready/i);
   } finally {
     await fixture.cleanup();
   }

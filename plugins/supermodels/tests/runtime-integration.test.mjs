@@ -92,6 +92,46 @@ test("runReview adversarial mode cross-challenges usable first-pass provider out
   }
 });
 
+test("runReview adversarial mode targets both peers when three providers cross-challenge", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-adversarial-three-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-workspace-"));
+  try {
+    const calls = [];
+    const adapters = {
+      claude: fakeAdapter("claude", "High: claude finding", "focus on data loss", calls),
+      antigravity: fakeAdapter("antigravity", "Medium: agy finding", "focus on data loss", calls),
+      grok: fakeAdapter("grok", "Low: grok finding", "focus on data loss", calls),
+    };
+
+    const output = await runReview({
+      adapters,
+      providerSelection: {
+        explicit: false,
+        requested: ["claude", "antigravity", "grok"],
+      },
+      mode: "adversarial-review",
+      options: {
+        "data-root": dataRoot,
+      },
+      focus: "focus on data loss",
+      contextBrief: "session context: challenge workflow was just committed",
+      workspaceRoot,
+    });
+
+    assert.deepEqual(output.selected, ["claude", "antigravity", "grok"]);
+    assert.equal(output.challengeResults.length, 3);
+    for (const challenger of ["claude", "antigravity", "grok"]) {
+      const peers = ["claude", "antigravity", "grok"].filter((provider) => provider !== challenger);
+      const runId = `${challenger}-challenge-${peers.join("-")}`;
+      assert.equal(output.job.providerRuns[runId].challengeTargets.length, 2);
+      assert.deepEqual(output.job.providerRuns[runId].challengeTargets.slice().sort(), peers.slice().sort());
+    }
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("runReview persists and supplies a context packet to providers", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-review-packet-"));
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-workspace-"));

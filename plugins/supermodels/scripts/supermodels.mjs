@@ -28,6 +28,7 @@ import { createJob, createState, readJob, updateJob } from "./lib/state.mjs";
 import { decodeUtf8Prefix } from "./lib/text.mjs";
 import { createAntigravityAdapter } from "./providers/antigravity/adapter.mjs";
 import { createClaudeAdapter } from "./providers/claude/adapter.mjs";
+import { createGrokAdapter } from "./providers/grok/adapter.mjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const MAX_REVIEW_CONTEXT_BYTES = 200_000;
@@ -35,6 +36,7 @@ const MAX_REVIEW_CONTEXT_BYTES = 200_000;
 const adapters = {
   claude: createClaudeAdapter(),
   antigravity: createAntigravityAdapter(),
+  grok: createGrokAdapter(),
 };
 
 async function main(argv = process.argv.slice(2)) {

@@ -70,7 +70,7 @@ export function selectProviders(input) {
   }
 
   return {
-    selected: selected.slice(0, 2),
+    selected: selected.slice(0, 3),
     skipped,
   };
 }

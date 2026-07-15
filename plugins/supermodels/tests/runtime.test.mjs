@@ -119,6 +119,19 @@ test("selectProviders includes readiness reasons when no providers are ready", (
   );
 });
 
+test("selectProviders selects up to three ready providers", () => {
+  const plan = selectProviders({
+    requested: ["claude", "antigravity", "grok"],
+    checks: {
+      claude: { ready: true },
+      antigravity: { ready: true },
+      grok: { ready: true },
+    },
+  });
+  assert.deepEqual(plan.selected, ["claude", "antigravity", "grok"]);
+  assert.deepEqual(plan.skipped, []);
+});
+
 test("renderHumanResult includes failed job errors", () => {
   const text = renderHumanResult({
     job: {
