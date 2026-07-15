@@ -379,8 +379,11 @@ export async function runGrokAcpTask(input, options = {}) {
       if (promptOutcome.kind === "ok") {
         const stopReason = promptOutcome.result?.stopReason ?? "";
         const usage = buildUsage(promptOutcome.result?._meta);
-        const { exitCode, signal } = await finalizeChild(child, childClosed);
-        return buildResult({ stopReason, usage, exitCode, signal });
+        // Reap the child, but a client-initiated teardown after a successful
+        // prompt is not a task failure — the real agent ignores stdin EOF and
+        // has to be killed, which must not read as a failed run.
+        await finalizeChild(child, childClosed);
+        return buildResult({ stopReason, usage, exitCode: 0, signal: null });
       }
       return await earlyResult(promptOutcome);
     };

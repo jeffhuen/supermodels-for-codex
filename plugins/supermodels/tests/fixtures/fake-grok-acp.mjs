@@ -5,9 +5,14 @@
 //   crash: emits a tool_call, sends session/request_permission, then exits
 //     immediately without reading the client's response (simulates the agent
 //     dying mid-permission-exchange, e.g. crash or EPIPE regression coverage)
+//   linger: like read, but ignores stdin EOF and stays alive until killed
+//     (the real `grok agent stdio` does not exit on EOF)
 import readline from "node:readline";
 
 const mode = process.env.FAKE_ACP_MODE ?? "read";
+if (mode === "linger") {
+  setInterval(() => {}, 1_000);
+}
 const rl = readline.createInterface({ input: process.stdin });
 const send = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
 const update = (sessionId, update_) =>

@@ -957,6 +957,19 @@ test("runGrokAcpTask approves writes on write tasks", async () => {
   assert.equal(result.usage.total_tokens, 25);
 });
 
+test("runGrokAcpTask reports success even when the agent ignores stdin EOF and must be killed", async () => {
+  const result = await runGrokAcpTask({ mode: "task", prompt: "look around" }, {
+    cwd: process.cwd(),
+    spawnImpl: nodeSpawnFakeAgent("linger"),
+    timeoutMs: 10_000,
+  });
+  assert.equal(result.rawText, "read done");
+  assert.equal(result.stopReason, "end_turn");
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.signal, null);
+  assert.equal(result.timedOut, false);
+});
+
 test("runGrokAcpTask places model and effort flags before the stdio subcommand", async () => {
   let capturedArgs = null;
   const result = await runGrokAcpTask({ mode: "task", prompt: "look around" }, {
