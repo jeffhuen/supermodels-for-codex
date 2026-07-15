@@ -1,6 +1,6 @@
 ---
 name: adversarial-review
-description: Get a stricter, adversarial code review through Supermodels: Claude Code and Antigravity each do a blind first pass, then challenge each other's findings — attacking unsupported claims, missed bugs, weak evidence, wrong severities, and over-engineered fixes — so only findings that survive cross-examination are reported. Use when the user wants to pressure-test or red-team a change, is about to ship something risky, distrusts an earlier review, or asks to "tear it apart" or find everything wrong with a diff. Best with both providers ready so they can actually cross-examine. For a plain independent review use review; for a single scoped investigation use task.
+description: Get a stricter, adversarial code review through Supermodels — Claude Code, Antigravity, and Grok Build each do a blind first pass, then challenge each other's findings — attacking unsupported claims, missed bugs, weak evidence, wrong severities, and over-engineered fixes — so only findings that survive cross-examination are reported. Use when the user wants to pressure-test or red-team a change, is about to ship something risky, distrusts an earlier review, or asks to "tear it apart" or find everything wrong with a diff. Best with at least two providers ready so they can actually cross-examine. For a plain independent review use review; for a single scoped investigation use task.
 ---
 
 # Supermodels Adversarial Review
@@ -21,9 +21,11 @@ Keep user-facing progress updates terse and concrete. Mention provider state onl
 
 Use plain provider-state wording:
 
+- "Claude Code, Antigravity, and Grok Build are all running."
 - "Claude Code and Antigravity are both running."
 - "Claude Code is running."
 - "Antigravity is running."
+- "Grok Build is running."
 - "Antigravity completed; Claude Code is still running."
 
 Do not mention provider internals in progress updates: no auth details, session IDs, implementation details, internal rationale, or skill-compliance narration. Do not describe review focus text in progress updates.
@@ -40,4 +42,4 @@ The runtime compiles the focus, context brief, provider plan, repository evidenc
 
 Do not answer from prior context or summarize the plugin build. Run the runtime and then synthesize provider results critically. Keep false positives and weakly supported claims separate from material findings.
 
-Preserve provider attribution in the final summary. Call out whether each material finding came from Claude Code, Antigravity, or both. Do not flatten provider-specific findings into anonymous feedback. If you merge duplicate findings, name the contributing providers. Keep weak or disconfirmed provider-specific claims separate from validated findings.
+Preserve provider attribution in the final summary. Call out whether each material finding came from Claude Code, Antigravity, Grok Build, or more than one. Do not flatten provider-specific findings into anonymous feedback. If you merge duplicate findings, name the contributing providers. Keep weak or disconfirmed provider-specific claims separate from validated findings.

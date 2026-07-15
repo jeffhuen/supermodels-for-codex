@@ -2,9 +2,9 @@
 
 *A panel of frontier models that's really, really, ridiculously good at reviewing code.*
 
-![status](https://img.shields.io/badge/status-v0.1.1-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![built for](https://img.shields.io/badge/built%20for-Codex-111827)
+![status](https://img.shields.io/badge/status-v0.2.0-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![built for](https://img.shields.io/badge/built%20for-Codex-111827)
 
-Supermodels is a [Codex](https://github.com/openai/codex) plugin that lets Codex stop reviewing its own homework. Instead of trusting one model to grade its own diff, you can have it hand the work to **Claude Code** and **Google Antigravity**, collect their independent reviews, and — if you want a fight — make them tear into each other's findings before reporting back.
+Supermodels is a [Codex](https://github.com/openai/codex) plugin that lets Codex stop reviewing its own homework. Instead of trusting one model to grade its own diff, you can have it hand the work to **Claude Code**, **Google Antigravity**, and **Grok Build**, collect their independent reviews, and — if you want a fight — make them tear into each other's findings before reporting back.
 
 Here's the thing models are bad at admitting: reviewing in the same session you built something in is barely a review at all. The whole story of *why* every choice was made is sitting right there in context, and the model already decided those choices were good — its "self-review" mostly agrees with itself, confidently, and calls it a day.
 
@@ -17,7 +17,7 @@ A *different* model sheds both. Different training, different context window, di
 - **Independent review.** Ask every authenticated provider to review your working tree at the same time. They don't see each other's answers, so you get genuinely independent takes — not an echo.
 - **Adversarial review.** Same blind first pass, then each model is handed its peer's review and told to *attack* it: unsupported claims, missed bugs, weak evidence, wrong severities, over-engineered fixes. What survives the cross-examination is usually worth your attention.
 - **Task delegation.** Hand a bounded job ("investigate this failing test", "draft this refactor") to a single provider through its native CLI. Read-only by default; writes only when you explicitly ask.
-- **It uses your existing logins.** No API keys to paste, no new accounts. It reuses the OAuth credentials already sitting in your local Claude Code and `agy` installs.
+- **It uses your existing logins.** No API keys to paste, no new accounts. It reuses the OAuth credentials already sitting in your local Claude Code, `agy`, and `grok` installs.
 - **Everything is attributed and kept.** Each finding is tagged with who said it, and the raw provider output is saved to disk so you can check the receipts instead of trusting a summary.
 - **Findings stay anchored.** Supermodels verifies cited file/line ranges, requires high-risk changed hunks to be read before final submission, and has a structured way to report "this caller should have changed but didn't" without inventing a line for absent code.
 
@@ -30,7 +30,7 @@ Inside a Codex session, the skills look like this:
 ```text
 you ▸ $supermodels:review
       → asks every ready provider to review the current diff, independently
-      → returns one synthesized report, each point attributed to Claude or Antigravity
+      → returns one synthesized report, each point attributed to Claude, Antigravity, or Grok
 
 you ▸ $supermodels:adversarial-review
       → same blind first pass, then the models challenge each other
@@ -54,7 +54,7 @@ node scripts/supermodels.mjs status
 Add this repo as a Codex plugin marketplace, pinned to the latest release:
 
 ```bash
-codex plugin marketplace add jeffhuen/supermodels-for-codex --ref v0.1.1
+codex plugin marketplace add jeffhuen/supermodels-for-codex --ref v0.2.0
 codex plugin add supermodels@supermodels
 ```
 
@@ -62,11 +62,12 @@ Prefer to live on the edge? Point `--ref` at `main` instead. Either way, **start
 
 ## Setup
 
-You need at least one of the two providers installed and logged in. Both is better — that's when reviews actually run in parallel and adversarial mode has something to argue about.
+You need at least one of the three providers installed and logged in. More is better — that's when reviews actually run in parallel and adversarial mode has peers to argue with.
 
 ```bash
 claude   # Claude Code — sign in if you haven't
 agy      # Antigravity — sign in if you haven't
+grok     # Grok Build — sign in if you haven't
 ```
 
 Then, from inside Codex, run:
@@ -75,7 +76,7 @@ Then, from inside Codex, run:
 $supermodels:setup
 ```
 
-It checks Node, Git, both provider CLIs, your auth state, and where it'll keep its data. If exactly one provider is ready, Supermodels just uses that one and tells you. If both are ready, you get the full panel.
+It checks Node, Git, all three provider CLIs, your auth state, and where it'll keep its data. Supermodels uses whichever providers are ready and tells you which ones it skipped and why. The full panel needs all three.
 
 ## Commands
 
@@ -112,7 +113,7 @@ Under the hood it's less "message passer," more "verification harness." Things i
 - **Adversarial means adversarial.** Each model attacks the *other* model's structured findings — not its own. Only findings that survive an independent model's cross-examination get reported.
 - **Structured, attributed, kept.** Findings come back as validated JSON (verdict, severity, confidence, evidence), tagged with who said it, raw and normalized output written to disk so you can audit the receipts.
 - **It fails honest.** Diff too big to fully load? It says so, disables the coverage check, and flags the gap instead of quietly implying it read everything.
-- **It stays a broker, not a babysitter.** It never owns Claude's or Antigravity's auth or sessions; those stay on the OAuth logins already in your local `claude` and `agy` installs.
+- **It stays a broker, not a babysitter.** It never owns Claude's, Antigravity's, or Grok's auth or sessions; those stay on the OAuth logins already in your local `claude`, `agy`, and `grok` installs.
 
 Provider transport details, model defaults, and tuning knobs live in [`decisions/`](./decisions) (the architecture decision records) and the [package README](./plugins/supermodels/README.md).
 
@@ -128,17 +129,18 @@ Each run saves job metadata and progress, the shared context packet, the prompts
 
 ## Credentials & privacy
 
-No provider API keys, account credentials, or OAuth client secrets are embedded in this plugin. Reviews reuse the OAuth credentials already on your machine — Claude tokens refresh through Claude Code's own store; AGY tokens refresh through the native `agy` flow and get read back from its token store.
+No provider API keys, account credentials, or OAuth client secrets are embedded in this plugin. Reviews reuse the OAuth credentials already on your machine — Claude tokens refresh through Claude Code's own store; AGY tokens refresh through the native `agy` flow and get read back from its token store; Grok tokens refresh through the same OIDC flow `grok login` uses and get read back from `~/.grok/auth.json`.
 
 The provider CLIs still do their own thing with their own auth files, sessions, telemetry, and storage. If that matters to you, read their docs — Supermodels doesn't change or hide any of it.
 
 ## What's rough (the honest part)
 
-This is `v0.1.1` of a hobby project. It's well-tested and it works on my machine, but you should know the edges:
+This is `v0.2.0` of a hobby project. It's well-tested and it works on my machine, but you should know the edges:
 
-- **Two providers, on purpose.** Claude Code and Antigravity, capped at two. More agents is a future problem; a clean two-provider loop was the one I wanted to actually ship and maintain.
+- **Three providers, still on purpose.** Claude Code, Antigravity, and Grok Build. The Grok review transport uses the chat-proxy surface xAI documents for auth.json tokens; if xAI tightens its client-version gate you'll get an explicit "run `grok update`" error, never silent junk.
 - **macOS is the path I live on.** The OAuth/keychain bits are exercised on macOS. Other platforms may have sharp corners I haven't hit yet.
 - **Antigravity write tasks inherit the `agy` CLI's permission model.** Today that's a read-only `--sandbox` or a broad `--dangerously-skip-permissions` — there's no Claude-style edit allow-list. Only pass `--write --provider antigravity` if you're okay with that.
+- **Grok write tasks are approved per-call by Supermodels' own broker**, not left to the `grok` CLI's own prompts, with an OS-level workspace sandbox as a backstop underneath.
 - **Multi-provider *write* tasks are refused** by design in v1. Writes go to one provider at a time, deliberately.
 
 If you hit something, open an issue — I'd genuinely like to know.

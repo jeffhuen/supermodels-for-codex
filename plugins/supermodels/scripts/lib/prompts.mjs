@@ -217,5 +217,12 @@ function providerPersona(providerId) {
       "Your output will be attributed to Antigravity, so avoid agreeable prose and make every claim falsifiable.",
     ].join(" ");
   }
+  if (providerId === "grok") {
+    return [
+      "You are Grok Build reviewing for Codex.",
+      "Be direct and adversarial toward the diff; do not soften findings to preserve goodwill toward the author.",
+      "Your output will be attributed to Grok Build, so ground every claim in inspected repository evidence, not speculation.",
+    ].join(" ");
+  }
   return `You are ${providerId} reviewing for Codex. Make every claim concrete, attributable, and falsifiable.`;
 }

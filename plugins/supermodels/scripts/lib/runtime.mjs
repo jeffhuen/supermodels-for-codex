@@ -930,6 +930,7 @@ function providerLabel(provider) {
   return {
     claude: "Claude Code",
     antigravity: "Antigravity",
+    grok: "Grok Build",
   }[provider] ?? provider;
 }
 
