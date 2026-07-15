@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -11,6 +11,10 @@ import {
   createClaudeAdapter,
   parseClaudeOutput,
 } from "../scripts/providers/claude/adapter.mjs";
+import {
+  claudeTaskPermissionDecision,
+  writeClaudeTaskHook,
+} from "../scripts/providers/claude/task-permissions.mjs";
 import {
   createAntigravityAdapter,
   buildAntigravityCommand,
@@ -118,7 +122,7 @@ test("buildClaudeCommand asks Claude CLI for schema-validated review output", ()
   ]);
 });
 
-test("buildClaudeCommand constrains read-only review and task sessions", () => {
+test("buildClaudeCommand constrains read-only reviews and isolates task sessions", () => {
   const command = buildClaudeCommand({ mode: "review" });
   assert(command.args.includes("--allowedTools"));
   assert(command.args.includes("Read,Grep,Glob,LS"));
@@ -128,18 +132,37 @@ test("buildClaudeCommand constrains read-only review and task sessions", () => {
   );
   assert(!command.args.includes("--no-session-persistence"));
 
-  const task = buildClaudeCommand({ mode: "task" });
-  assert(task.args.includes("--allowedTools"));
-  assert(task.args.includes("Read,Grep,Glob,LS"));
+  // Tasks no longer use the coarse allow-list; they run under the broker's
+  // isolated, fail-closed PreToolUse hook (isolation triple, verified in B0).
+  const task = buildClaudeCommand({ mode: "task", settingsPath: "/tmp/s.json" });
+  assert(!task.args.includes("--allowedTools"));
+  assert(!task.args.includes("bypassPermissions"));
+  assert(task.args.includes("--setting-sources"));
+  assert.equal(task.args[task.args.indexOf("--setting-sources") + 1], "");
+  assert.deepEqual(
+    task.args.slice(task.args.indexOf("--settings"), task.args.indexOf("--settings") + 2),
+    ["--settings", "/tmp/s.json"],
+  );
+  assert.deepEqual(
+    task.args.slice(task.args.indexOf("--permission-mode"), task.args.indexOf("--permission-mode") + 2),
+    ["--permission-mode", "dontAsk"],
+  );
 });
 
-test("buildClaudeCommand leaves write tasks write-capable", () => {
-  const command = buildClaudeCommand({ mode: "task", write: true });
-  assert(command.args.includes("--allowedTools"));
-  assert(command.args.includes("Read,Grep,Glob,LS,Edit,MultiEdit,Write"));
+test("buildClaudeCommand keeps write tasks under the same isolated hook gating", () => {
+  // Write authority lives in the hook script's embedded policy, not in argv:
+  // the command is identical to a read-only task (no --allowedTools leak).
+  const command = buildClaudeCommand({ mode: "task", write: true, settingsPath: "/tmp/s.json" });
+  assert(!command.args.includes("--allowedTools"));
+  assert(!command.args.includes("Read,Grep,Glob,LS,Edit,MultiEdit,Write"));
+  assert(!command.args.includes("bypassPermissions"));
+  assert.deepEqual(
+    command.args.slice(command.args.indexOf("--settings"), command.args.indexOf("--settings") + 2),
+    ["--settings", "/tmp/s.json"],
+  );
   assert.deepEqual(
     command.args.slice(command.args.indexOf("--permission-mode"), command.args.indexOf("--permission-mode") + 2),
-    ["--permission-mode", "acceptEdits"],
+    ["--permission-mode", "dontAsk"],
   );
 });
 
@@ -1450,4 +1473,128 @@ test("readWorkspaceTextFile bounds the read to maxBytes", async () => {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("claudeTaskPermissionDecision read-only denies writes and shell, allows reads", () => {
+  const cwd = "/work";
+  assert.equal(claudeTaskPermissionDecision({ toolName: "Read", toolInput: { file_path: "/work/a" }, cwd }, { write: false }).decision, "allow");
+  assert.equal(claudeTaskPermissionDecision({ toolName: "Write", toolInput: { file_path: "/work/a" }, cwd }, { write: false }).decision, "deny");
+  assert.equal(claudeTaskPermissionDecision({ toolName: "Bash", toolInput: { command: "ls" }, cwd }, { write: false }).decision, "deny");
+});
+
+test("claudeTaskPermissionDecision denies Bash even on write tasks (no sandbox)", () => {
+  assert.equal(claudeTaskPermissionDecision({ toolName: "Bash", toolInput: { command: "npm test" }, cwd: "/work" }, { write: true }).decision, "deny");
+});
+
+test("claudeTaskPermissionDecision write allows in-workspace edits, denies lexical escapes and unknown tools", () => {
+  const cwd = "/work";
+  assert.equal(claudeTaskPermissionDecision({ toolName: "Edit", toolInput: { file_path: "/work/src/a.mjs" }, cwd }, { write: true }).decision, "allow");
+  assert.equal(claudeTaskPermissionDecision({ toolName: "Write", toolInput: { file_path: "/etc/passwd" }, cwd }, { write: true }).decision, "deny");
+  assert.equal(claudeTaskPermissionDecision({ toolName: "Mystery", toolInput: {}, cwd }, { write: true }).decision, "deny");
+});
+
+test("claudeTaskPermissionDecision gates NotebookEdit on notebook_path (CLI sends notebook_path, not file_path)", () => {
+  const cwd = "/work";
+  assert.equal(
+    claudeTaskPermissionDecision({ toolName: "NotebookEdit", toolInput: { notebook_path: "/work/nb.ipynb" }, cwd }, { write: true }).decision,
+    "allow",
+  );
+  assert.equal(
+    claudeTaskPermissionDecision({ toolName: "NotebookEdit", toolInput: { notebook_path: "/etc/nb.ipynb" }, cwd }, { write: true }).decision,
+    "deny",
+  );
+  assert.equal(
+    claudeTaskPermissionDecision({ toolName: "NotebookEdit", toolInput: { notebook_path: "/work/nb.ipynb" }, cwd }, { write: false }).decision,
+    "deny",
+  );
+});
+
+test("claudeTaskPermissionDecision denies an in-workspace symlink that escapes (real fixture)", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "supermodels-claude-cwd-"));
+  const outside = await mkdtemp(path.join(tmpdir(), "supermodels-claude-out-"));
+  try {
+    await symlink(outside, path.join(root, "link")); // /root/link -> /outside
+    // A write to /root/link/evil.txt lexically looks in-workspace but realpaths outside.
+    const d = claudeTaskPermissionDecision({ toolName: "Write", toolInput: { file_path: path.join(root, "link", "evil.txt") }, cwd: root }, { write: true });
+    assert.equal(d.decision, "deny");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("writeClaudeTaskHook produces a settings file registering a PreToolUse hook", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "supermodels-claude-hook-"));
+  try {
+    const { settingsPath, hookScriptPath } = await writeClaudeTaskHook({ dir, cwd: "/work", write: false });
+    const settings = JSON.parse(await readFile(settingsPath, "utf8"));
+    const entry = settings.hooks.PreToolUse[0];
+    assert.equal(entry.matcher, ".*");
+    assert.ok(entry.hooks[0].command.includes(path.basename(hookScriptPath)));
+    const mode = (await stat(hookScriptPath)).mode & 0o111;
+    assert.ok(mode, "hook script must be executable");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the generated hook script denies a write on a read-only task", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "supermodels-claude-hook-"));
+  try {
+    const { hookScriptPath } = await writeClaudeTaskHook({ dir, cwd: "/work", write: false });
+    const res = spawnSync(hookScriptPath, {
+      input: JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Write", tool_input: { file_path: "/work/a.txt" } }),
+      encoding: "utf8",
+    });
+    const out = JSON.parse(res.stdout);
+    assert.equal(out.hookSpecificOutput.permissionDecision, "deny");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildClaudeCommand isolates and fail-closes claude task permissions", () => {
+  const cmd = buildClaudeCommand({ mode: "task", write: false, settingsPath: "/tmp/s.json" });
+  assert.ok(!cmd.args.includes("--allowedTools"), "must not use the coarse allow-list");
+  assert.ok(!cmd.args.includes("bypassPermissions"), "must never bypass permissions");
+  // isolation triple from B0 (verified on CLI 2.1.209):
+  assert.deepEqual(cmd.args.slice(cmd.args.indexOf("--settings"), cmd.args.indexOf("--settings") + 2), ["--settings", "/tmp/s.json"]);
+  assert.ok(cmd.args.includes("--setting-sources"));
+  const ssIdx = cmd.args.indexOf("--setting-sources");
+  assert.equal(cmd.args[ssIdx + 1], "");
+  assert.deepEqual(cmd.args.slice(cmd.args.indexOf("--permission-mode"), cmd.args.indexOf("--permission-mode") + 2), ["--permission-mode", "dontAsk"]);
+});
+
+test("buildClaudeCommand refuses to build a task command without an isolated settings file (fail-closed)", () => {
+  assert.throws(() => buildClaudeCommand({ mode: "task" }), /isolated settings/);
+});
+
+test("parseClaudeOutput surfaces permission_denials as provider events", () => {
+  const stdout = [
+    JSON.stringify({ type: "result", subtype: "success", result: "done",
+      permission_denials: [{ tool_name: "Write", tool_use_id: "t1", tool_input: { file_path: "/etc/x" } }] }),
+  ].join("\n");
+  const parsed = parseClaudeOutput(stdout);
+  const denial = parsed.events.find((e) => e.type === "permission-denied");
+  assert.ok(denial, "a permission-denied event must be emitted");
+  assert.match(denial.message, /Write/);
+});
+
+test("parseClaudeOutput handles both object-shaped and string-shaped permission_denials", () => {
+  const objectShaped = parseClaudeOutput(JSON.stringify({
+    type: "result",
+    permission_denials: [{ tool_name: "Write", tool_input: { file_path: "/etc/x" } }],
+  }));
+  const objectDenial = objectShaped.events.find((e) => e.type === "permission-denied");
+  assert.equal(objectDenial.message, "claude denied Write (/etc/x)");
+
+  const stringShaped = parseClaudeOutput(JSON.stringify({
+    type: "result",
+    permission_denials: ["Write", "Bash"],
+  }));
+  const stringDenials = stringShaped.events.filter((e) => e.type === "permission-denied");
+  assert.equal(stringDenials.length, 2);
+  assert.equal(stringDenials[0].message, "claude denied Write");
+  assert.equal(stringDenials[1].message, "claude denied Bash");
+  assert.ok(!stringDenials.some((e) => /unknown tool/.test(e.message)), "distinct string denials must not collapse to \"unknown tool\"");
 });

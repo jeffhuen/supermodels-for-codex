@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -12,13 +13,13 @@ import {
 } from "../../lib/review-schema.mjs";
 import { ClaudeCodeCredentials } from "./oauth.mjs";
 import { ClaudeOAuthMessagesTransport } from "./messages-transport.mjs";
+import { writeClaudeTaskHook } from "./task-permissions.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULTS = JSON.parse(readFileSync(path.join(__dirname, "defaults.json"), "utf8"));
 const DEFAULT_MODEL = process.env.SUPERMODELS_CLAUDE_MODEL || DEFAULTS.defaultModel;
 const DEFAULT_EFFORT = process.env.SUPERMODELS_CLAUDE_EFFORT || DEFAULTS.defaultEffort;
 const READ_ONLY_TOOLS = "Read,Grep,Glob,LS";
-const WRITE_TASK_TOOLS = "Read,Grep,Glob,LS,Edit,MultiEdit,Write";
 
 export function createClaudeAdapter(factoryOptions = {}) {
   return {
@@ -105,16 +106,27 @@ export function buildClaudeCommand(options = {}) {
   if (effort && effort !== "cli-default") {
     args.push("--effort", effort);
   }
-  if (isWriteTaskMode(options)) {
-    args.push("--allowedTools", WRITE_TASK_TOOLS);
-    args.push("--permission-mode", "acceptEdits");
-  }
-  if (isReadOnlyMode(options)) {
+  if (isReviewMode(options)) {
+    // Reviews stay read-only via the coarse allow-list + plan mode. They never
+    // touch the workspace, and the direct Messages transport does the real work.
     args.push("--allowedTools", READ_ONLY_TOOLS);
     args.push("--permission-mode", "plan");
-  }
-  if (isReviewMode(options)) {
     args.push("--json-schema", JSON.stringify(REVIEW_RESULT_SCHEMA));
+  }
+  if (isTaskMode(options)) {
+    // Tasks (read-only AND write) are gated per-call by the broker's isolated,
+    // fail-closed PreToolUse hook. The generated settings file is the SOLE
+    // permission authority: `--setting-sources ""` excludes user/project/local
+    // sources, and `--permission-mode dontAsk` denies anything the hook does not
+    // explicitly allow. Never emit `--allowedTools` or `bypassPermissions` here
+    // (either would void the per-call, path-scoped gating). Write vs read-only
+    // authority lives in the hook script's embedded policy, not in argv.
+    if (!options.settingsPath) {
+      throw new Error("refusing to build a Claude task command without an isolated settings file (fail-closed)");
+    }
+    args.push("--settings", options.settingsPath);
+    args.push("--setting-sources", "");
+    args.push("--permission-mode", "dontAsk");
   }
   if (options.resume) {
     args.push("--resume", options.resume);
@@ -171,6 +183,23 @@ export function parseClaudeOutput(stdout) {
     }
     events.push(...claudeProviderEvents(event));
 
+    // Surface every broker denial to the user through the persisted provider
+    // `events` channel. A bare top-level field would be dropped by
+    // normalizeProviderResult (runtime.mjs), so each denial becomes an event.
+    if (Array.isArray(event.permission_denials)) {
+      const at = new Date().toISOString();
+      for (const denial of event.permission_denials) {
+        const toolName = typeof denial === "string" ? denial : (denial?.tool_name ?? "unknown tool");
+        const filePath = typeof denial === "string" ? "" : (denial?.tool_input?.file_path ?? "");
+        const detail = filePath ? ` (${filePath})` : "";
+        events.push({
+          type: "permission-denied",
+          message: `claude denied ${toolName}${detail}`,
+          at,
+        });
+      }
+    }
+
     if (typeof event.result === "string") {
       addText(event.result);
     }
@@ -211,44 +240,65 @@ export function parseClaudeOutput(stdout) {
 
 async function runClaudePrompt(input, options = {}) {
   const startedAt = new Date().toISOString();
-  const command = buildClaudeCommand({
-    bin: options.bin,
-    model: options.model,
-    effort: options.effort,
-    mode: input.mode,
-    write: Boolean(options.write),
-    resume: options.resume,
-    name: options.name ?? `supermodels-${input.mode ?? "task"}`,
-  });
-  const streamParser = createClaudeStreamEventParser(options.onEvent);
-  const result = await runCommand(command, {
-    cwd: options.cwd,
-    input: input.prompt,
-    timeoutMs: options.timeoutMs ?? 20 * 60 * 1000,
-    controller: options.controller,
-    signalKillMs: options.signalKillMs,
-    onStart: options.onStart,
-    onStdout: (chunk) => streamParser.push(chunk),
-  });
-  streamParser.end();
-  const parsed = parseClaudeOutput(result.stdout);
+  // Broker an isolated, fail-closed PreToolUse hook for this task. Its temp
+  // settings file is the sole permission authority for the run; we never mutate
+  // the user's repo/global .claude config. Cleaned up in the finally below even
+  // on throw/timeout so no broker settings survive the process.
+  const hookDir = await mkdtemp(path.join(tmpdir(), "supermodels-claude-hook-"));
+  let settingsPath, cleanup;
+  try {
+    ({ settingsPath, cleanup } = await writeClaudeTaskHook({
+      dir: hookDir,
+      cwd: options.cwd,
+      write: Boolean(options.write),
+    }));
+  } catch (err) {
+    await rm(hookDir, { recursive: true, force: true });
+    throw err;
+  }
+  try {
+    const command = buildClaudeCommand({
+      bin: options.bin,
+      model: options.model,
+      effort: options.effort,
+      mode: input.mode,
+      write: Boolean(options.write),
+      settingsPath,
+      resume: options.resume,
+      name: options.name ?? `supermodels-${input.mode ?? "task"}`,
+    });
+    const streamParser = createClaudeStreamEventParser(options.onEvent);
+    const result = await runCommand(command, {
+      cwd: options.cwd,
+      input: input.prompt,
+      timeoutMs: options.timeoutMs ?? 20 * 60 * 1000,
+      controller: options.controller,
+      signalKillMs: options.signalKillMs,
+      onStart: options.onStart,
+      onStdout: (chunk) => streamParser.push(chunk),
+    });
+    streamParser.end();
+    const parsed = parseClaudeOutput(result.stdout);
 
-  return {
-    provider: "claude",
-    exitCode: result.exitCode ?? null,
-    signal: result.signal ?? null,
-    timedOut: result.timedOut ?? false,
-    rawText: parsed.text || result.stdout,
-    stderr: result.stderr,
-    sessionId: parsed.sessionId,
-    pid: result.pid ?? null,
-    commandLine: commandLine(command),
-    structured: parsed.structured,
-    usage: parsed.usage,
-    events: parsed.events,
-    startedAt,
-    completedAt: new Date().toISOString(),
-  };
+    return {
+      provider: "claude",
+      exitCode: result.exitCode ?? null,
+      signal: result.signal ?? null,
+      timedOut: result.timedOut ?? false,
+      rawText: parsed.text || result.stdout,
+      stderr: result.stderr,
+      sessionId: parsed.sessionId,
+      pid: result.pid ?? null,
+      commandLine: commandLine(command),
+      structured: parsed.structured,
+      usage: parsed.usage,
+      events: parsed.events,
+      startedAt,
+      completedAt: new Date().toISOString(),
+    };
+  } finally {
+    await cleanup();
+  }
 }
 
 async function runClaudeReview(input, options = {}, factoryOptions = {}) {
@@ -330,14 +380,8 @@ export async function hasClaudeNativeSessionStore() {
   }
 }
 
-function isReadOnlyMode(options = {}) {
-  return options.mode === "review"
-    || options.mode === "adversarial-review"
-    || (options.mode === "task" && !options.write);
-}
-
-function isWriteTaskMode(options = {}) {
-  return options.mode === "task" && options.write === true;
+function isTaskMode(options = {}) {
+  return options.mode === "task";
 }
 
 function isReviewMode(options = {}) {
