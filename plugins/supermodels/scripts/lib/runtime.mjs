@@ -989,7 +989,7 @@ function pushFindingDetail(lines, label, value) {
   }
 }
 
-function providerRunStatus(command, normalized, options = {}) {
+export function providerRunStatus(command, normalized, options = {}) {
   if (options.cancelled) {
     return "cancelled";
   }
@@ -1013,6 +1013,12 @@ function providerRunStatus(command, normalized, options = {}) {
   }
   if (command.exitCode !== 0) {
     return "failed";
+  }
+  // The provider ended its own turn as cancelled (e.g. Grok's headless --check
+  // verifier, or an ACP turn it aborted) and returned only partial output —
+  // that is not a completed run even though the process exited cleanly.
+  if (String(command.stopReason ?? "").toLowerCase() === "cancelled") {
+    return "cancelled";
   }
   return "completed";
 }

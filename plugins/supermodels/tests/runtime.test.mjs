@@ -10,6 +10,7 @@ import {
   getStatus,
   markCancelled,
   normalizeProviderResult,
+  providerRunStatus,
   providerTimeoutMs,
   renderHumanResult,
   runReview,
@@ -1995,3 +1996,25 @@ function inconclusiveReview(summary) {
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+test("providerRunStatus maps provider-reported cancellation to a non-success status", () => {
+  // clean process exit, valid output, but the provider cancelled its own turn
+  assert.equal(
+    providerRunStatus({ exitCode: 0, stopReason: "Cancelled" }, { output_valid: true }),
+    "cancelled",
+  );
+  assert.equal(
+    providerRunStatus({ exitCode: 0, stopReason: "cancelled" }, { output_valid: true }),
+    "cancelled",
+  );
+  // a normal end_turn is still completed
+  assert.equal(
+    providerRunStatus({ exitCode: 0, stopReason: "end_turn" }, { output_valid: true }),
+    "completed",
+  );
+  // a real failure still outranks the stopReason check
+  assert.equal(
+    providerRunStatus({ exitCode: 0, timedOut: true, stopReason: "Cancelled" }, {}),
+    "failed",
+  );
+});
