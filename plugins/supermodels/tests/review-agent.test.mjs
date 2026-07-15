@@ -1864,7 +1864,7 @@ test("runReviewAgent passes event sink to provider transports", async () => {
   assert(events.some((event) => event.message === "transport progress"));
 });
 
-for (const provider of ["claude", "antigravity"]) {
+for (const provider of ["claude", "antigravity", "grok"]) {
   test(`runReviewAgent accepts no-tool structured final text for ${provider}`, async () => {
     const fakeTransport = {
       calls: 0,

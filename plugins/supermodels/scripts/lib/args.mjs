@@ -1,10 +1,11 @@
-export const PROVIDER_IDS = Object.freeze(["claude", "antigravity"]);
+export const PROVIDER_IDS = Object.freeze(["claude", "antigravity", "grok"]);
 
 const PROVIDER_ALIASES = Object.freeze({
   agy: "antigravity",
   antigravity: "antigravity",
   claude: "claude",
   "claude-code": "claude",
+  grok: "grok",
 });
 
 export function parseArgs(argv, config = {}) {
@@ -196,7 +197,7 @@ export function resolveProviderIds(options = {}, config = {}) {
   for (const raw of requestedRaw) {
     const normalized = PROVIDER_ALIASES[raw.toLowerCase()];
     if (!normalized) {
-      throw new Error(`Unsupported provider '${raw}'. Version 1 supports claude and antigravity only.`);
+      throw new Error(`Unsupported provider '${raw}'. Supported providers: claude, antigravity, grok.`);
     }
     if (!requested.includes(normalized)) {
       requested.push(normalized);

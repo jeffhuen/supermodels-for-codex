@@ -61,20 +61,24 @@ test("parseRuntimeArgs accepts live review mode", () => {
   assert.equal(parsed.options["context-file"], "brief.md");
 });
 
-test("resolveProviderIds caps v1 providers to claude and antigravity", () => {
-  assert.deepEqual(resolveProviderIds({ provider: "claude, antigravity" }), {
+test("resolveProviderIds accepts claude, antigravity, and grok", () => {
+  assert.deepEqual(resolveProviderIds({ provider: "claude, antigravity, grok" }), {
     explicit: true,
-    requested: ["claude", "antigravity"],
+    requested: ["claude", "antigravity", "grok"],
+  });
+  assert.deepEqual(resolveProviderIds({ provider: "grok" }), {
+    explicit: true,
+    requested: ["grok"],
   });
   assert.deepEqual(resolveProviderIds({ all: true }), {
     explicit: false,
-    requested: ["claude", "antigravity"],
+    requested: ["claude", "antigravity", "grok"],
   });
 });
 
-test("resolveProviderIds rejects future providers in v1", () => {
+test("resolveProviderIds rejects unknown providers", () => {
   assert.throws(
-    () => resolveProviderIds({ provider: "claude,grok" }),
+    () => resolveProviderIds({ provider: "claude,not-a-real-provider" }),
     /unsupported provider/i,
   );
 });

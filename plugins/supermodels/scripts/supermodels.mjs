@@ -737,15 +737,15 @@ function usage() {
 Commands:
   setup [--json]
   providers [--json]
-  review [--all|--provider claude,antigravity] [--base REF] [--context-file PATH] [--live|--background] [focus]
-  adversarial-review [--all|--provider claude,antigravity] [--base REF] [--context-file PATH] [--model MODEL] [--effort xhigh|max] [--live|--background] [focus]
-  task [--provider claude|antigravity] [--write] [--background] <task>
+  review [--all|--provider claude,antigravity,grok] [--base REF] [--context-file PATH] [--live|--background] [focus]
+  adversarial-review [--all|--provider claude,antigravity,grok] [--base REF] [--context-file PATH] [--model MODEL] [--effort xhigh|max] [--live|--background] [focus]
+  task [--provider claude|antigravity|grok] [--write] [--background] <task>
   status [job-id] [--json]
   watch <job-id> [--interval seconds] [--max-wait seconds]
   result <job-id> [--json]
   cancel <job-id> [--json]
 
-Provider v1 scope: claude and antigravity only.`;
+Supported providers: claude, antigravity, grok.`;
 }
 
 function sleep(ms) {
