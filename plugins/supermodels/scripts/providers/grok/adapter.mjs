@@ -85,7 +85,7 @@ export async function check(options = {}, factoryOptions = {}) {
 }
 
 export function buildGrokHeadlessCommand(options = {}) {
-  const args = ["-p", options.prompt ?? "", "--output-format", "streaming-json"];
+  const args = ["-p", options.prompt ?? "", "--output-format", "streaming-json", "--no-memory"];
   const model = resolveGrokModelAlias(options.model ?? DEFAULT_MODEL);
   const effort = options.effort ?? DEFAULT_EFFORT;
   if (model && model !== "cli-default") {
@@ -95,13 +95,13 @@ export function buildGrokHeadlessCommand(options = {}) {
     args.push("--reasoning-effort", effort);
   }
   args.push("--sandbox", options.write ? "workspace" : "read-only");
-  if (options.write) {
-    args.push("--check");
-  }
   if (options.bestOfN) {
     args.push("--best-of-n", String(options.bestOfN));
   }
-  if (options.check && !options.write) {
+  // Only on explicit request: grok 0.2.x's headless --check verifier can end
+  // the turn as Cancelled and swallow the final answer (verified live), so it
+  // is never appended automatically.
+  if (options.check) {
     args.push("--check");
   }
   if (options.jsonSchema) {

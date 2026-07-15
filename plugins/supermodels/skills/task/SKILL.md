@@ -19,6 +19,6 @@ Use `--provider claude`, `--provider antigravity`, or `--provider grok` for writ
 
 Grok tasks run over ACP (`grok agent stdio`) by default, with full tool-call streaming. Read-only Grok tasks are enforced by Supermodels' own permission broker — write attempts are denied at the broker, not just discouraged by the `grok` CLI's own prompts. `--write --provider grok` tasks are approved per sanctioned edit at that same broker, backed by an OS-level `GROK_SANDBOX` workspace sandbox as a backstop.
 
-Grok also supports one-shot modes no other provider has, run through headless `grok -p` instead of ACP: `--best-of-n <N>` runs N attempts and keeps the best one, and `--check` asks Grok to self-verify its output before returning.
+Grok also supports one-shot modes no other provider has, run through headless `grok -p` instead of ACP: `--best-of-n <N>` runs N attempts and keeps the best one, and `--check` asks Grok to self-verify its output before returning. Known upstream issue: on current Grok CLI releases (0.2.x) the `--check` verifier can end the run as `Cancelled` and drop the final answer, so treat `--check` as experimental and inspect the saved run artifacts if the result looks truncated.
 
 Relay attributed provider output and artifact paths when the run completes. Include native provider session IDs only when the CLI exposes them.

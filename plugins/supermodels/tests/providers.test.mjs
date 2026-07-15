@@ -1112,7 +1112,7 @@ test("buildGrokHeadlessCommand composes sandbox, model, and exclusive-mode flags
   });
   assert.equal(command.bin, "grok");
   assert.deepEqual(command.args, [
-    "-p", "do it", "--output-format", "streaming-json",
+    "-p", "do it", "--output-format", "streaming-json", "--no-memory",
     "-m", "grok-4.5", "--reasoning-effort", "high",
     "--sandbox", "read-only", "--best-of-n", "3",
     "--json-schema", '{"type":"object"}',
@@ -1121,9 +1121,14 @@ test("buildGrokHeadlessCommand composes sandbox, model, and exclusive-mode flags
     prompt: "fix", write: true, model: "cli-default", effort: "cli-default", worktree: "feat-x",
   });
   assert.ok(writeCommand.args.includes("workspace"));
-  assert.ok(writeCommand.args.includes("--check"));
+  // --check is never appended automatically (grok 0.2.x headless --check can
+  // cancel the turn and swallow output); it appears only on explicit request.
+  assert.ok(!writeCommand.args.includes("--check"));
   assert.ok(writeCommand.args.includes("--worktree"));
   assert.ok(writeCommand.args.includes("feat-x"));
+  assert.ok(writeCommand.args.includes("--no-memory"));
+  const checkCommand = buildGrokHeadlessCommand({ prompt: "verify", check: true, write: true });
+  assert.ok(checkCommand.args.includes("--check"));
 });
 
 test("parseGrokHeadlessOutput collects text, usage, and session from NDJSON", () => {
