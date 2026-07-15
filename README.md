@@ -2,7 +2,7 @@
 
 *A panel of frontier models that's really, really, ridiculously good at reviewing code.*
 
-![status](https://img.shields.io/badge/status-v0.2.1-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![built for](https://img.shields.io/badge/built%20for-Codex-111827)
+![status](https://img.shields.io/badge/status-v0.2.2-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![built for](https://img.shields.io/badge/built%20for-Codex-111827)
 
 Supermodels is a [Codex](https://github.com/openai/codex) plugin that lets Codex stop reviewing its own homework. Instead of trusting one model to grade its own diff, you can have it hand the work to **Claude Code**, **Google Antigravity**, and **Grok Build**, collect their independent reviews, and — if you want a fight — make them tear into each other's findings before reporting back.
 
@@ -54,7 +54,7 @@ node scripts/supermodels.mjs status
 Add this repo as a Codex plugin marketplace, pinned to the latest release:
 
 ```bash
-codex plugin marketplace add jeffhuen/supermodels-for-codex --ref v0.2.1
+codex plugin marketplace add jeffhuen/supermodels-for-codex --ref v0.2.2
 codex plugin add supermodels@supermodels
 ```
 
@@ -137,11 +137,11 @@ The provider CLIs still do their own thing with their own auth files, sessions, 
 
 ## What's rough (the honest part)
 
-This is `v0.2.1` of a hobby project. It's well-tested and it works on my machine, but you should know the edges:
+This is `v0.2.2` of a hobby project. It's well-tested and it works on my machine, but you should know the edges:
 
 - **Three providers, still on purpose.** Claude Code, Antigravity, and Grok Build. The Grok review transport uses the chat-proxy surface xAI documents for auth.json tokens; if xAI tightens its client-version gate you'll get an explicit "run `grok update`" error, never silent junk.
 - **macOS is the path I live on.** The OAuth/keychain bits are exercised on macOS. Other platforms may have sharp corners I haven't hit yet.
-- **Claude write tasks are approved per-call by Supermodels' own broker** via Claude Code PreToolUse hooks — only in-workspace edits (canonicalized, symlink-safe) are allowed, `Bash` is refused in both modes because a Claude task has no OS sandbox, and a missing or broken hook fails closed.
+- **Claude write tasks are approved per-call by Supermodels' own broker** via Claude Code PreToolUse hooks. The task runs under a read/edit tool allowlist that excludes shell, so `Bash` stays unavailable even if the hook fails (a Claude task has no OS sandbox); within that, only in-workspace edits (canonicalized, symlink-safe) are allowed, and a broken hook denies writes.
 - **Antigravity write tasks inherit the `agy` CLI's permission model.** Today that's a read-only `--sandbox` or a broad `--dangerously-skip-permissions` — there's no per-call edit gating like Claude Code's or Grok's. Only pass `--write --provider antigravity` if you're okay with that.
 - **Grok write tasks are approved per-call by Supermodels' own broker**, not left to the `grok` CLI's own prompts, with an OS-level workspace sandbox as a backstop underneath.
 - **Multi-provider *write* tasks are refused** by design in v1. Writes go to one provider at a time, deliberately.
