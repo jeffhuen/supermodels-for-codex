@@ -55,10 +55,13 @@ export function claudeTaskPermissionDecision({ toolName, toolInput = {}, cwd }, 
 // script that evaluates `claudeTaskPermissionDecision` on the CLI's stdin and
 // prints the decision contract, plus a 0600 settings file registering it as a
 // PreToolUse matcher ".*". Per the B0 verification on CLI 2.1.209 the hook is a
-// bare `command` STRING pointing at the 0755 script (temp paths are space-free),
-// and `--permission-mode dontAsk` alone is fail-closed, so no `permissions`
-// baseline is emitted. The script imports the policy module by file: URL so the
-// single source of truth resolves robustly across Node versions.
+// bare `command` STRING pointing at the 0755 script (temp paths are space-free).
+// `--permission-mode dontAsk` is fail-closed for *writes* (a broken hook still
+// denies a Write), so no `permissions` baseline is emitted here. It is NOT
+// fail-closed for read-only shell — `Bash` is contained separately by the
+// `--tools` allowlist in buildClaudeCommand, not by these settings. The script
+// imports the policy module by file: URL so the single source of truth resolves
+// robustly across Node versions.
 export async function writeClaudeTaskHook({ dir, cwd, write }) {
   await mkdir(dir, { recursive: true });
   const policyModule = path.join(HERE, "task-permissions.mjs");
