@@ -1561,3 +1561,51 @@ test("GrokOAuthResponsesTransport retries retryable statuses with backoff", asyn
   assert.equal(result.text, "done");
   assert.equal(calls.length, 2);
 });
+
+test("GrokOAuthResponsesTransport preserves one deadline across retries", async () => {
+  let calls = 0;
+  let clock = 1000;
+  const transport = new GrokOAuthResponsesTransport({
+    credentials: {
+      accessToken: async () => "t",
+      forceRefresh: async () => "t",
+      forceReload() {},
+      identity: async () => ({ userId: "", email: "" }),
+    },
+    clientVersion: "0.2.101",
+    url: "https://proxy.test/v1/responses",
+    retryBaseDelayMs: 1,
+    now: () => clock,
+    fetchImpl: async () => {
+      calls += 1;
+      clock += 500; // each attempt burns 500ms of the 400ms budget
+      return new Response("busy", { status: 503 });
+    },
+  });
+  await assert.rejects(
+    () => transport.messages({ model: "grok-4.5", max_tokens: 10, messages: [] }, { timeoutMs: 400 }),
+    /overall deadline/,
+  );
+  assert.equal(calls, 1);
+});
+
+test("ClaudeOAuthMessagesTransport preserves one deadline across retries", async () => {
+  let calls = 0;
+  let clock = 1000;
+  const transport = new ClaudeOAuthMessagesTransport({
+    credentials: { accessToken: async () => "t", forceRefresh: async () => "t", forceReload() {} },
+    url: "https://api.test/v1/messages",
+    retryBaseDelayMs: 1,
+    now: () => clock,
+    fetchImpl: async () => {
+      calls += 1;
+      clock += 500;
+      return new Response("busy", { status: 503 });
+    },
+  });
+  await assert.rejects(
+    () => transport.messages({ model: "claude", max_tokens: 10, messages: [] }, { timeoutMs: 400 }),
+    /overall deadline/,
+  );
+  assert.equal(calls, 1);
+});

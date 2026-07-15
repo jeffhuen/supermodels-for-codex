@@ -4,6 +4,7 @@ const DEFAULT_RESPONSES_URL = "https://cli-chat-proxy.grok.com/v1/responses";
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_RETRY_BASE_DELAY_MS = 1000;
 const DEFAULT_RETRY_MAX_DELAY_MS = 30_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 600_000;
 
 export function toGrokResponsesRequest(body = {}) {
   const request = {
@@ -105,6 +106,7 @@ export class GrokOAuthResponsesTransport {
     this.retryBaseDelayMs = options.retryBaseDelayMs ?? DEFAULT_RETRY_BASE_DELAY_MS;
     this.retryMaxDelayMs = options.retryMaxDelayMs ?? DEFAULT_RETRY_MAX_DELAY_MS;
     this.clientVersion = options.clientVersion;
+    this.now = options.now ?? (() => Date.now());
   }
 
   async messages(body, options = {}) {
@@ -116,8 +118,15 @@ export class GrokOAuthResponsesTransport {
       throw new Error("GrokOAuthResponsesTransport requires credentials.");
     }
     const attempt = options.retryAttempt ?? 0;
-    const timeoutMs = options.timeoutMs ?? 600_000;
-    const signal = combineAbortSignals(options.signal, timeoutMs);
+    // One absolute deadline for the whole call: retries and refreshes draw down
+    // the same budget instead of each re-arming a fresh full timeout.
+    const deadline = options.deadline ?? this.now() + (options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+    const remaining = deadline - this.now();
+    if (remaining <= 0) {
+      throw new Error("Grok Responses request exceeded its overall deadline before completing.");
+    }
+    const nextOptions = { ...options, deadline };
+    const signal = combineAbortSignals(options.signal, remaining);
     try {
       const clientVersion = await this.resolveClientVersion();
       const token = tokenOverride ?? await this.credentials.accessToken();
@@ -130,7 +139,7 @@ export class GrokOAuthResponsesTransport {
       if (response.status === 401) {
         if (!refreshed) {
           const refreshedToken = await this.credentials.forceRefresh();
-          return await this.request(body, options, true, refreshedToken);
+          return await this.request(body, nextOptions, true, refreshedToken);
         }
         this.credentials.forceReload?.();
         throw new Error("Grok auth expired — run `grok login`.");
@@ -143,7 +152,7 @@ export class GrokOAuthResponsesTransport {
         const bodyText = await response.text();
         if (isRetryableGrokStatus(response.status) && attempt < this.maxRetries) {
           await sleep(retryDelayMs(response, this.retryBaseDelayMs, this.retryMaxDelayMs, attempt), signal.signal);
-          return await this.request(body, { ...options, retryAttempt: attempt + 1 }, refreshed, tokenOverride);
+          return await this.request(body, { ...nextOptions, retryAttempt: attempt + 1 }, refreshed, tokenOverride);
         }
         throw new Error(`Grok Responses request failed: ${response.status} ${bodyText}`);
       }
@@ -156,7 +165,7 @@ export class GrokOAuthResponsesTransport {
         if (responseJson === null) {
           if (attempt < this.maxRetries) {
             await sleep(retryDelayMs(response, this.retryBaseDelayMs, this.retryMaxDelayMs, attempt), signal.signal);
-            return await this.request(body, { ...options, retryAttempt: attempt + 1 }, refreshed, tokenOverride);
+            return await this.request(body, { ...nextOptions, retryAttempt: attempt + 1 }, refreshed, tokenOverride);
           }
           throw new Error("Grok Responses stream ended without a response.completed event.");
         }

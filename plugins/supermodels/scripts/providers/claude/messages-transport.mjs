@@ -4,6 +4,7 @@ const OAUTH_BETA = "oauth-2025-04-20";
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_RETRY_BASE_DELAY_MS = 1000;
 const DEFAULT_RETRY_MAX_DELAY_MS = 30_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 600_000;
 
 export class ClaudeOAuthMessagesTransport {
   constructor(options = {}) {
@@ -13,6 +14,7 @@ export class ClaudeOAuthMessagesTransport {
     this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.retryBaseDelayMs = options.retryBaseDelayMs ?? DEFAULT_RETRY_BASE_DELAY_MS;
     this.retryMaxDelayMs = options.retryMaxDelayMs ?? DEFAULT_RETRY_MAX_DELAY_MS;
+    this.now = options.now ?? (() => Date.now());
   }
 
   async messages(body, options = {}) {
@@ -24,8 +26,15 @@ export class ClaudeOAuthMessagesTransport {
       throw new Error("ClaudeOAuthMessagesTransport requires credentials.");
     }
     const attempt = options.retryAttempt ?? 0;
-    const timeoutMs = options.timeoutMs ?? 600_000;
-    const signal = combineAbortSignals(options.signal, timeoutMs);
+    // One absolute deadline for the whole call: retries and refreshes draw down
+    // the same budget instead of each re-arming a fresh full timeout.
+    const deadline = options.deadline ?? this.now() + (options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+    const remaining = deadline - this.now();
+    if (remaining <= 0) {
+      throw new Error("Anthropic Messages request exceeded its overall deadline before completing.");
+    }
+    const nextOptions = { ...options, deadline };
+    const signal = combineAbortSignals(options.signal, remaining);
     try {
       const response = await this.fetchImpl(this.url, {
         method: "POST",
@@ -41,13 +50,13 @@ export class ClaudeOAuthMessagesTransport {
       });
       if (response.status === 401 && !refreshed) {
         await refreshCredentials(this.credentials);
-        return await this.request(body, options, true);
+        return await this.request(body, nextOptions, true);
       }
       if (!response.ok) {
         const bodyText = await response.text();
         if (isRetryableAnthropicStatus(response.status) && attempt < this.maxRetries) {
           await sleep(retryDelayMs(response, this.retryBaseDelayMs, this.retryMaxDelayMs, attempt), signal.signal);
-          return await this.request(body, { ...options, retryAttempt: attempt + 1 }, refreshed);
+          return await this.request(body, { ...nextOptions, retryAttempt: attempt + 1 }, refreshed);
         }
         throw new Error(`Anthropic Messages request failed: ${response.status} ${bodyText}`);
       }
@@ -56,7 +65,7 @@ export class ClaudeOAuthMessagesTransport {
       } catch (error) {
         if (isRetryableAnthropicStreamError(error) && attempt < this.maxRetries) {
           await sleep(retryDelayMs(response, this.retryBaseDelayMs, this.retryMaxDelayMs, attempt), signal.signal);
-          return await this.request(body, { ...options, retryAttempt: attempt + 1 }, refreshed);
+          return await this.request(body, { ...nextOptions, retryAttempt: attempt + 1 }, refreshed);
         }
         throw error;
       }
