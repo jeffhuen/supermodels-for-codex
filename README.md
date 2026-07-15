@@ -141,7 +141,8 @@ This is `v0.2.1` of a hobby project. It's well-tested and it works on my machine
 
 - **Three providers, still on purpose.** Claude Code, Antigravity, and Grok Build. The Grok review transport uses the chat-proxy surface xAI documents for auth.json tokens; if xAI tightens its client-version gate you'll get an explicit "run `grok update`" error, never silent junk.
 - **macOS is the path I live on.** The OAuth/keychain bits are exercised on macOS. Other platforms may have sharp corners I haven't hit yet.
-- **Antigravity write tasks inherit the `agy` CLI's permission model.** Today that's a read-only `--sandbox` or a broad `--dangerously-skip-permissions` — there's no Claude-style edit allow-list. Only pass `--write --provider antigravity` if you're okay with that.
+- **Claude write tasks are approved per-call by Supermodels' own broker** via Claude Code PreToolUse hooks — only in-workspace edits (canonicalized, symlink-safe) are allowed, `Bash` is refused in both modes because a Claude task has no OS sandbox, and a missing or broken hook fails closed.
+- **Antigravity write tasks inherit the `agy` CLI's permission model.** Today that's a read-only `--sandbox` or a broad `--dangerously-skip-permissions` — there's no per-call edit gating like Claude Code's or Grok's. Only pass `--write --provider antigravity` if you're okay with that.
 - **Grok write tasks are approved per-call by Supermodels' own broker**, not left to the `grok` CLI's own prompts, with an OS-level workspace sandbox as a backstop underneath.
 - **Multi-provider *write* tasks are refused** by design in v1. Writes go to one provider at a time, deliberately.
 
