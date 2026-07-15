@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.2.1
+
+Corrective release for issues found in an independent review of v0.2.0.
+
+### Fixed
+
+- Grok reviews are now bounded by the same finite post-evidence backstop as Antigravity, in both first-pass and adversarial modes. An unbounded Grok review could previously run 10+ tool rounds and ~1.5M tokens (and again in the challenge phase), risking subscription/rate-limit exhaustion.
+- Foreground `review`/`task` runs now exit nonzero when the job ends `failed` or `partial`, so CI and scripts no longer read a failed review as a pass.
+- Transport retries now share one absolute per-call deadline instead of each re-arming a fresh full timeout, so a review can't run far past its timeout budget. Fixed in both the Grok Responses and Claude Messages transports.
+- A run whose provider ended its own turn as cancelled (e.g. Grok's headless `--check`) with only partial output is now recorded as `cancelled`, not `completed`.
+- The Grok ACP client-side file read canonicalizes the path (an in-workspace symlink can no longer serve a file from outside the workspace), rejects non-regular files, and bounds the read so a huge file can't exhaust worker memory.
+- `--json-schema` must be a JSON object (a degenerate value like `false` is rejected at parse time instead of being silently dropped); `--worktree` is boolean (Grok auto-names the worktree; a name no longer leaks into the task prompt).
+- Version metadata is consistent at `0.2.1` across the plugin manifest and the npm package; `usage()` and the task skill now list the Grok-only flags.
+
+### Changed
+
+- The `--write` task documentation now states accurately that Grok write tasks auto-approve the operations Grok requests (including shell commands), with the OS-level workspace sandbox as the actual containment boundary — not an edit-only classifier.
+- The subscription-only Grok auth contract (reuse `grok login`; do not fall back to `XAI_API_KEY`) is documented and locked with a readiness test.
+
 ## v0.2.0
 
 ### Added
