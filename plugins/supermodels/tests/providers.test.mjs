@@ -957,6 +957,22 @@ test("runGrokAcpTask approves writes on write tasks", async () => {
   assert.equal(result.usage.total_tokens, 25);
 });
 
+test("runGrokAcpTask places model and effort flags before the stdio subcommand", async () => {
+  let capturedArgs = null;
+  const result = await runGrokAcpTask({ mode: "task", prompt: "look around" }, {
+    cwd: process.cwd(),
+    model: "grok-4.5",
+    effort: "high",
+    spawnImpl: (bin, args, opts) => {
+      capturedArgs = args;
+      return spawn(process.execPath, [FAKE_ACP], { ...opts, env: { ...opts.env, FAKE_ACP_MODE: "read" } });
+    },
+    timeoutMs: 10_000,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(capturedArgs, ["agent", "-m", "grok-4.5", "--reasoning-effort", "high", "stdio"]);
+});
+
 test("runGrokAcpTask survives an agent that dies mid-permission-exchange", async () => {
   const result = await runGrokAcpTask({ mode: "task", prompt: "crash please" }, {
     cwd: process.cwd(),

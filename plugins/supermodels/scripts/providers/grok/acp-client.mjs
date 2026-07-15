@@ -175,7 +175,8 @@ export async function runGrokAcpTask(input, options = {}) {
   const effortArgs = options.effort && options.effort !== "cli-default"
     ? ["--reasoning-effort", options.effort]
     : [];
-  const args = ["agent", "stdio", ...modelArgs, ...effortArgs];
+  // Model/effort are options of the `agent` subcommand and must precede `stdio`.
+  const args = ["agent", ...modelArgs, ...effortArgs, "stdio"];
   const resolvedCwd = path.resolve(options.cwd ?? process.cwd());
   const env = {
     ...process.env,
