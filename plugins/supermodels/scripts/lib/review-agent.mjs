@@ -92,7 +92,7 @@ export async function runReviewAgent(options = {}) {
   };
   const schemas = [
     ...(tools.schemas ?? []),
-    submitReviewToolSchema(),
+    submitReviewToolSchema({ strict: providerStrictSubmit(provider) }),
   ];
   const reviewStartedAt = Date.now();
   let inspectionSatisfiedAtRound = null;
@@ -179,7 +179,7 @@ export async function runReviewAgent(options = {}) {
         message: `${provider} review round ${round}`,
         at: new Date().toISOString(),
       });
-      const response = await transport.messages({
+      let requestBody = {
         model,
         max_tokens: maxTokens,
         system: providerSystemInstructions(provider),
@@ -187,7 +187,11 @@ export async function runReviewAgent(options = {}) {
         tools: schemas,
         ...reasoningOptions,
         ...(forcedToolChoice ? { tool_choice: forcedToolChoice } : {}),
-      }, {
+      };
+      if (providerCacheControl(provider)) {
+        requestBody = withReviewCacheBreakpoints(requestBody);
+      }
+      const response = await transport.messages(requestBody, {
         signal: abort.signal,
         timeoutMs: remainingReviewTimeoutMs(timeoutMs, reviewStartedAt, provider),
         onEvent,
@@ -546,6 +550,36 @@ function providerMaxTokens(provider) {
     return DEFAULT_REVIEW_POLICY.grokMaxTokens;
   }
   return DEFAULT_REVIEW_POLICY.antigravityMaxTokens;
+}
+
+function providerStrictSubmit(provider) {
+  return provider === "claude";
+}
+
+function providerCacheControl(provider) {
+  return provider === "claude";
+}
+
+// Annotate a cloned request with cache_control breakpoints on the stable prefix
+// (last system block = caches tools+system) and the last block of the latest
+// message turn (rolled per round). Mutates a shallow copy; ≤4 breakpoints.
+function withReviewCacheBreakpoints(request) {
+  const system = Array.isArray(request.system) ? request.system.map((b) => ({ ...b })) : request.system;
+  if (Array.isArray(system) && system.length) {
+    system[system.length - 1] = { ...system[system.length - 1], cache_control: { type: "ephemeral" } };
+  }
+  const messages = (request.messages ?? []).map((m) => ({ ...m }));
+  // roll one breakpoint onto the last content block of the last message
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const content = messages[i].content;
+    if (Array.isArray(content) && content.length) {
+      const copy = content.map((b) => ({ ...b }));
+      copy[copy.length - 1] = { ...copy[copy.length - 1], cache_control: { type: "ephemeral" } };
+      messages[i] = { ...messages[i], content: copy };
+      break;
+    }
+  }
+  return { ...request, system, messages };
 }
 
 function providerForceAfterSatisfiedRounds(provider, mode) {
@@ -1204,11 +1238,12 @@ function inspectionTargetKey(name, result, input) {
   return "";
 }
 
-function submitReviewToolSchema() {
+function submitReviewToolSchema({ strict = false } = {}) {
   return {
     name: "submit_review",
     description: "Submit the final structured review after inspecting repository evidence.",
     input_schema: REVIEW_RESULT_SCHEMA,
+    ...(strict ? { strict: true } : {}),
   };
 }
 

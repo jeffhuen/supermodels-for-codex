@@ -2777,6 +2777,117 @@ test("runReviewAgent grok provider sets reasoning effort, max tokens, and person
   assert.match(bodies[0].system[0].text, /Grok Build reviewing for Codex/);
 });
 
+test("runReviewAgent sends a strict submit_review tool for claude", async () => {
+  const bodies = [];
+  const transport = {
+    messages: async (body) => {
+      bodies.push(body);
+      return responseWithTool("submit_1", "submit_review", cleanReview("No issues found."));
+    },
+  };
+  await runReviewAgent({
+    provider: "claude",
+    transport,
+    tools: { schemas: [], async execute() { return { ok: true }; } },
+    model: "claude-opus-4-8",
+    minInspection: { diff: false, fileOrSearch: false, explicitFileOrSearchToolCalls: 0, cleanExplicitFileOrSearchToolCalls: 0 },
+    preloadTools: [],
+  });
+  const submit = bodies[0].tools.find((t) => t.name === "submit_review");
+  assert.equal(submit.strict, true);
+});
+
+test("runReviewAgent does not send strict submit_review for antigravity", async () => {
+  const bodies = [];
+  const transport = {
+    messages: async (body) => {
+      bodies.push(body);
+      return responseWithTool("submit_1", "submit_review", cleanReview("No issues found."));
+    },
+  };
+  await runReviewAgent({
+    provider: "antigravity",
+    transport,
+    tools: { schemas: [], async execute() { return { ok: true }; } },
+    model: "gemini-3-flash-preview",
+    minInspection: { diff: false, fileOrSearch: false, explicitFileOrSearchToolCalls: 0, cleanExplicitFileOrSearchToolCalls: 0 },
+    preloadTools: [],
+  });
+  const submit = bodies[0].tools.find((t) => t.name === "submit_review");
+  assert.equal(submit.strict, undefined);
+});
+
+test("claude review caching: stable system + rolling latest-turn breakpoint, ≤4, no mutation of stored messages", async () => {
+  const bodies = [];
+  let round = 0;
+  const transport = {
+    messages: async (body) => {
+      bodies.push(JSON.parse(JSON.stringify(body))); // deep snapshot of what was SENT
+      round += 1;
+      // two inspection rounds, then submit
+      if (round === 1) return responseWithTool("d1", "get_diff", {});
+      if (round === 2) return responseWithTool("r1", "read_file", { path: "a.mjs" });
+      return responseWithTool("submit_1", "submit_review", cleanReview("No issues found."));
+    },
+  };
+  await runReviewAgent({
+    provider: "claude", transport, tools: reviewToolsForDiffAndFiles(),
+    minInspection: { diff: false, fileOrSearch: false, explicitFileOrSearchToolCalls: 0, cleanExplicitFileOrSearchToolCalls: 0 },
+    preloadTools: [],
+  });
+  const countCC = (arr) => (arr ?? []).filter((b) => b && b.cache_control).length;
+  // NO-MUTATION: the review loop's stored messages must not accumulate cache_control
+  // across rounds (annotation happens on a per-request copy, not the loop's stored
+  // `messages` accumulator). Observe the rolling breakpoint directly instead of the
+  // prior (vacuous) slice(0,-1) check. Runs first so a leak is attributed to THIS
+  // check rather than incidentally tripping the per-round loop below.
+  // Round 1: the first user turn IS the latest turn, so its last block carries the rolling breakpoint.
+  assert.deepEqual(
+    bodies[0].messages[0].content.at(-1).cache_control,
+    { type: "ephemeral" },
+    "round 1: rolling breakpoint should sit on the first (and only) turn's last block",
+  );
+  // Round 2+: the first user turn is no longer the latest turn. Its last block must be CLEAN —
+  // proving the round-1 breakpoint was written on a per-request copy and never leaked back into
+  // the loop's stored `messages` accumulator (blocker-6).
+  for (let i = 1; i < bodies.length; i += 1) {
+    assert.equal(
+      bodies[i].messages[0].content.at(-1).cache_control,
+      undefined,
+      `round ${i + 1}: first turn's breakpoint must have rolled off (no cross-round mutation)`,
+    );
+  }
+  for (const body of bodies) {
+    // system: last block always carries the breakpoint (caches tools+system)
+    const sys = body.system;
+    assert.deepEqual(sys[sys.length - 1].cache_control, { type: "ephemeral" });
+    // the first user turn (initial prompt + preloaded evidence) stays a breakpoint every round
+    // and one rolling breakpoint sits on the last content block of the latest turn.
+    const total = countCC(sys) + body.messages.reduce((n, m) => n + (Array.isArray(m.content) ? countCC(m.content) : 0), 0);
+    assert.ok(total >= 2 && total <= 4, `breakpoint count out of range: ${total}`);
+    const lastMsg = body.messages[body.messages.length - 1];
+    assert.deepEqual(lastMsg.content[lastMsg.content.length - 1].cache_control, { type: "ephemeral" });
+  }
+});
+
+test("antigravity review requests do not carry cache_control", async () => {
+  const bodies = [];
+  const transport = {
+    messages: async (body) => {
+      bodies.push(body);
+      return responseWithTool("submit_1", "submit_review", cleanReview("No issues found."));
+    },
+  };
+  await runReviewAgent({
+    provider: "antigravity", transport, tools: { schemas: [], async execute() { return { ok: true }; } }, model: "gemini-3-flash-preview",
+    minInspection: { diff: false, fileOrSearch: false, explicitFileOrSearchToolCalls: 0, cleanExplicitFileOrSearchToolCalls: 0 },
+    preloadTools: [],
+  });
+  const sys = bodies[0].system;
+  const last = Array.isArray(sys) ? sys[sys.length - 1] : null;
+  assert.equal(last?.cache_control, undefined);
+});
+
 function responseWithTool(id, name, input) {
   return {
     content: [{ type: "tool_use", id, name, input }],

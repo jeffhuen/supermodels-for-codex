@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { normalizeStructuredReview, structuredReviewInstructions } from "../scripts/lib/review-schema.mjs";
+import {
+  normalizeStructuredReview,
+  structuredReviewInstructions,
+  REVIEW_RESULT_SCHEMA,
+  validateStructuredReview,
+} from "../scripts/lib/review-schema.mjs";
 
 test("normalizeStructuredReview rejects findings with missing location or evidence fields", () => {
   const invalid = normalizeStructuredReview({
@@ -133,4 +138,33 @@ test("structuredReviewInstructions include a severity rubric", () => {
   assert.match(instructions, /medium: plausible/i);
   assert.match(instructions, /low: maintainability/i);
   assert.match(instructions, /missing-change/i);
+});
+
+test("REVIEW_RESULT_SCHEMA sets additionalProperties:false on every object (strict-tool-use ready)", () => {
+  const offenders = [];
+  const walk = (node, path) => {
+    if (!node || typeof node !== "object") return;
+    if (node.type === "object") {
+      if (node.additionalProperties !== false) offenders.push(path || "<root>");
+      for (const [k, v] of Object.entries(node.properties ?? {})) walk(v, `${path}.${k}`);
+    }
+    if (node.type === "array" && node.items) walk(node.items, `${path}[]`);
+    // anyOf/oneOf/allOf branches
+    for (const key of ["anyOf", "oneOf", "allOf"]) {
+      if (Array.isArray(node[key])) node[key].forEach((b, i) => walk(b, `${path}.${key}[${i}]`));
+    }
+  };
+  walk(REVIEW_RESULT_SCHEMA, "");
+  assert.deepEqual(offenders, [], `objects missing additionalProperties:false: ${offenders.join(", ")}`);
+});
+
+test("REVIEW_RESULT_SCHEMA still accepts a well-formed review after the audit", () => {
+  const ok = validateStructuredReview({
+    verdict: "clean",
+    summary: "No issues found after inspecting the diff and files.",
+    findings: [],
+    assumptions: [],
+    verification_gaps: [],
+  });
+  assert.ok(ok.review, JSON.stringify(ok.errors));
 });

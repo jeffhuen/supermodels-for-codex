@@ -65,6 +65,7 @@ export const REVIEW_RESULT_SCHEMA = Object.freeze({
             ],
           },
         ],
+        additionalProperties: false,
       },
     },
     assumptions: {
@@ -83,6 +84,7 @@ export const REVIEW_RESULT_SCHEMA = Object.freeze({
     "assumptions",
     "verification_gaps",
   ],
+  additionalProperties: false,
 });
 
 const VALID_VERDICTS = new Set(["clean", "needs-attention", "inconclusive"]);
