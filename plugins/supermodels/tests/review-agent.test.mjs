@@ -1778,6 +1778,61 @@ test("runReviewAgent keeps adversarial Antigravity reviews model-led by default"
   assert.deepEqual(seenToolChoices, Array.from({ length: 12 }, () => null));
 });
 
+function grokBackstopTransport() {
+  return {
+    calls: 0,
+    async messages(body) {
+      this.calls += 1;
+      this.seenToolChoices ??= [];
+      this.seenToolChoices.push(body.tool_choice ?? null);
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", { path: "a.mjs" });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", { query: "runReviewAgent" });
+      }
+      if (body.tool_choice?.name === "submit_review") {
+        return responseWithTool("submit_1", "submit_review", inconclusiveReview("grok post-evidence backstop"));
+      }
+      return responseWithTool(`read_${this.calls}`, "read_file", { path: `extra-${this.calls}.mjs` });
+    },
+  };
+}
+
+test("runReviewAgent forces Grok submission after the post-evidence backstop", async () => {
+  const fakeTransport = grokBackstopTransport();
+
+  const result = await runReviewAgent({
+    provider: "grok",
+    transport: fakeTransport,
+    tools: reviewToolsForDiffAndFiles(),
+    maxRounds: 30,
+  });
+
+  assert.equal(result.verdict, "inconclusive");
+  assert.equal(result.rounds, 8);
+  assert.deepEqual(fakeTransport.seenToolChoices[7], { type: "tool", name: "submit_review" });
+});
+
+test("runReviewAgent bounds adversarial Grok challenges with the same backstop", async () => {
+  const fakeTransport = grokBackstopTransport();
+
+  const result = await runReviewAgent({
+    provider: "grok",
+    transport: fakeTransport,
+    tools: reviewToolsForDiffAndFiles(),
+    mode: "adversarial-review",
+    maxRounds: 30,
+  });
+
+  assert.equal(result.verdict, "inconclusive");
+  assert.equal(result.rounds, 8);
+  assert.deepEqual(fakeTransport.seenToolChoices[7], { type: "tool", name: "submit_review" });
+});
+
 test("runReviewAgent aggregates usage across every model turn", async () => {
   const events = [];
   const fakeTransport = {

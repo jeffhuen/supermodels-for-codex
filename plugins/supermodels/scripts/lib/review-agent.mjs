@@ -31,7 +31,7 @@ const DEFAULT_REVIEW_POLICY = Object.freeze({
   }),
   forceInspectionTools: false,
 });
-const ANTIGRAVITY_NORMAL_REVIEW_POST_EVIDENCE_ROUNDS = 4;
+const POST_EVIDENCE_INSPECTION_ROUNDS = 4;
 const MAX_FINDING_LOCATION_LINES = 200;
 const MAX_COVERAGE_GAPS = 12;
 const COVERAGE_TRUNCATED_GAP = "Supermodels: high-risk hunk coverage enforcement was disabled because the review-tool diff was truncated; some changed hunks may not have been inspected. Re-run with a narrower --base scope or smaller diff to restore coverage checks.";
@@ -552,7 +552,14 @@ function providerForceAfterSatisfiedRounds(provider, mode) {
   if (provider === "antigravity" && mode === "review") {
     // Gemini/AGY can keep inspecting after enough evidence. Leave several
     // model-led rounds after the gate, then ask for the structured verdict.
-    return ANTIGRAVITY_NORMAL_REVIEW_POST_EVIDENCE_ROUNDS;
+    return POST_EVIDENCE_INSPECTION_ROUNDS;
+  }
+  if (provider === "grok") {
+    // grok-4.5 keeps inspecting on large diffs and, without a bound, has run
+    // 10+ rounds and ~1.5M tokens in a single first pass (and again in the
+    // challenge phase). Cap both first-pass and adversarial runs with the same
+    // post-evidence backstop so a review can't exhaust the subscription.
+    return POST_EVIDENCE_INSPECTION_ROUNDS;
   }
   return DEFAULT_REVIEW_POLICY.forceAfterSatisfiedRounds;
 }
