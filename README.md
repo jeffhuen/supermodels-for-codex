@@ -131,6 +131,8 @@ Each run saves job metadata and progress, the shared context packet, the prompts
 
 No provider API keys, account credentials, or OAuth client secrets are embedded in this plugin. Reviews reuse the OAuth credentials already on your machine — Claude tokens refresh through Claude Code's own store; AGY tokens refresh through the native `agy` flow and get read back from its token store; Grok tokens refresh through the same OIDC flow `grok login` uses and get read back from `~/.grok/auth.json`.
 
+Supermodels deliberately exposes a **subscription-only** contract for Grok. xAI's CLI also supports `XAI_API_KEY` and external auth providers, but Supermodels reuses your `grok login` subscription session and treats a missing OAuth session as not-ready — it will not fall back to an API key. If you need metered API-key access, that's out of scope by design.
+
 The provider CLIs still do their own thing with their own auth files, sessions, telemetry, and storage. If that matters to you, read their docs — Supermodels doesn't change or hide any of it.
 
 ## What's rough (the honest part)

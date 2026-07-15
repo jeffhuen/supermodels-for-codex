@@ -1151,6 +1151,28 @@ test("grok check fails with grok login guidance when credentials are unusable", 
   }
 });
 
+test("grok readiness requires the subscription OAuth session, not an API key", async () => {
+  // Supermodels intentionally exposes a narrower subscription-only contract:
+  // even though xAI supports XAI_API_KEY / external auth for the CLI, Supermodels
+  // reuses the `grok login` OAuth session and rejects API-key-only setups.
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-grok-apikey-"));
+  try {
+    const fakeGrok = path.join(tempDir, "grok");
+    await writeFile(fakeGrok, "#!/bin/sh\necho grok 0.2.101 [stable]\n", { mode: 0o755 });
+    const adapter = createGrokAdapter({
+      credentialsOptions: { authPath: path.join(tempDir, "missing-auth.json") },
+      versionOptions: { versionPath: path.join(tempDir, "version.json") },
+    });
+    // An API key present in the environment must NOT satisfy readiness.
+    const check = await adapter.check({ env: { PATH: tempDir, XAI_API_KEY: "xai-not-accepted" } });
+    assert.equal(check.ready, false);
+    assert.equal(check.auth, "missing");
+    assert.match(check.error, /grok login/);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("a bare --worktree task routes to the headless runner, not ACP", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-grok-worktree-"));
   try {
