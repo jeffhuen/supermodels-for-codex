@@ -145,6 +145,13 @@ export function installWorkerCancelHandlers({
   };
 }
 
+// Foreground/live CLI runs must exit nonzero when the job did not succeed, so
+// CI and scripts don't read a failed or partial review as a pass. Terminal
+// success is "completed"; "cancelled" keeps the shell's signal-based exit code.
+export function exitCodeForJobStatus(status) {
+  return status === "failed" || status === "partial" ? 1 : 0;
+}
+
 export function outputFromJob(job) {
   const request = job.request ?? {};
   const runs = Object.values(job.providerRuns ?? {});

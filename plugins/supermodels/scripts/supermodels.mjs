@@ -9,6 +9,7 @@ import {
   buildReviewRequest,
   buildTaskRequest,
   installWorkerCancelHandlers,
+  exitCodeForJobStatus,
   outputFromJob,
   runStoredWorkerJob,
   startWorkerJob,
@@ -251,7 +252,11 @@ async function runLiveWorkerJob({ parsed, request }) {
   if (!exitCodeFromSignal && close.code) {
     process.exitCode = close.code;
   }
-  return outputFromJob(await getStatus({ workspaceRoot, dataRoot, jobId: job.id }));
+  const finalJob = await getStatus({ workspaceRoot, dataRoot, jobId: job.id });
+  if (!process.exitCode) {
+    process.exitCode = exitCodeForJobStatus(finalJob.status);
+  }
+  return outputFromJob(finalJob);
 }
 
 async function handleTask(parsed) {
@@ -486,7 +491,11 @@ async function runForegroundWorkerJob({ parsed, request }) {
   } finally {
     cleanup();
   }
-  return outputFromJob(await getStatus({ workspaceRoot, dataRoot, jobId: job.id }));
+  const finalJob = await getStatus({ workspaceRoot, dataRoot, jobId: job.id });
+  if (!process.exitCode) {
+    process.exitCode = exitCodeForJobStatus(finalJob.status);
+  }
+  return outputFromJob(finalJob);
 }
 
 async function startBackgroundWorkerJob({ parsed, request }) {

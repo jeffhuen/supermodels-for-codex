@@ -8,8 +8,15 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import { signalProcessTree } from "../scripts/lib/process.mjs";
-import { buildReviewRequest, buildTaskRequest, startWorkerJob } from "../scripts/lib/job-lifecycle.mjs";
+import { buildReviewRequest, buildTaskRequest, exitCodeForJobStatus, startWorkerJob } from "../scripts/lib/job-lifecycle.mjs";
 import { createState, listJobs, readJob } from "../scripts/lib/state.mjs";
+
+test("exitCodeForJobStatus returns nonzero for failed and partial jobs", () => {
+  assert.equal(exitCodeForJobStatus("failed"), 1);
+  assert.equal(exitCodeForJobStatus("partial"), 1);
+  assert.equal(exitCodeForJobStatus("completed"), 0);
+  assert.equal(exitCodeForJobStatus("cancelled"), 0);
+});
 
 const execFileAsync = promisify(execFile);
 
