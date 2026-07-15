@@ -1023,6 +1023,45 @@ test("grok check fails with grok login guidance when credentials are unusable", 
   }
 });
 
+test("a bare --worktree task routes to the headless runner, not ACP", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-grok-worktree-"));
+  try {
+    const recordPath = path.join(tempDir, "record.json");
+    const fakeGrok = path.join(tempDir, "grok");
+    await writeFile(fakeGrok, [
+      "#!/usr/bin/env node",
+      "import { writeFileSync } from 'node:fs';",
+      `writeFileSync(${JSON.stringify(recordPath)}, JSON.stringify(process.argv.slice(2)));`,
+      "console.log(JSON.stringify({ type: 'text', data: 'worktree headless output' }));",
+      "console.log(JSON.stringify({ type: 'end', stopReason: 'EndTurn', sessionId: 'headless-session', usage: { input_tokens: 1, output_tokens: 1 } }));",
+      "",
+    ].join("\n"));
+    await chmod(fakeGrok, 0o755);
+
+    const adapter = createGrokAdapter();
+    const result = await adapter.task({ mode: "task", prompt: "do the thing" }, {
+      cwd: tempDir,
+      bin: fakeGrok,
+      worktree: true,
+      // If routing ever regresses back to ACP, this fake agent answers
+      // instead and produces a distinguishable ACP-shaped result (see the
+      // runGrokAcpTask "read" tests above), which the assertions below rule
+      // out.
+      spawnImpl: nodeSpawnFakeAgent("read"),
+      timeoutMs: 10_000,
+    });
+
+    const record = JSON.parse(await readFile(recordPath, "utf8"));
+    assert.ok(record.includes("--worktree"));
+    assert.equal(result.provider, "grok");
+    assert.equal(result.sessionId, "headless-session");
+    assert.match(result.rawText, /worktree headless output/);
+    assert.match(result.commandLine, /--worktree/);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("buildGrokHeadlessCommand composes sandbox, model, and exclusive-mode flags", () => {
   const command = buildGrokHeadlessCommand({
     prompt: "do it", model: "grok-4.5", effort: "high", bestOfN: 3, jsonSchema: { type: "object" },

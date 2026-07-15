@@ -176,7 +176,7 @@ async function runGrokTask(input, options = {}) {
   const model = resolveGrokModelAlias(options.model ?? DEFAULT_MODEL);
   const effort = options.effort ?? DEFAULT_EFFORT;
 
-  if (options.bestOfN || options.check || options.jsonSchema) {
+  if (options.bestOfN || options.check || options.jsonSchema || options.worktree) {
     return await runGrokHeadlessTask(input, options, model, effort);
   }
 
