@@ -1,3 +1,6 @@
+const SEVERITY_ENUM = { type: "string", enum: ["critical", "high", "medium", "low"] };
+const CONFIDENCE_ENUM = { type: "string", enum: ["high", "medium", "low"] };
+
 export const REVIEW_RESULT_SCHEMA = Object.freeze({
   type: "object",
   properties: {
@@ -13,30 +16,15 @@ export const REVIEW_RESULT_SCHEMA = Object.freeze({
       items: {
         type: "object",
         properties: {
-          severity: {
-            type: "string",
-            enum: ["critical", "high", "medium", "low"],
-          },
+          severity: SEVERITY_ENUM,
           title: { type: "string" },
           evidence: { type: "string" },
           impact: { type: "string" },
           recommendation: { type: "string" },
-          kind: {
-            type: "string",
-            enum: ["code", "missing-change"],
-          },
+          confidence: CONFIDENCE_ENUM,
           file: { type: "string" },
           line_start: { type: "integer" },
           line_end: { type: "integer" },
-          anchor_file: { type: "string" },
-          anchor_line: { type: "integer" },
-          expected_symbol: { type: "string" },
-          searched_for: { type: "string" },
-          missing_change_reason: { type: "string" },
-          confidence: {
-            type: "string",
-            enum: ["high", "medium", "low"],
-          },
         },
         required: [
           "severity",
@@ -45,25 +33,42 @@ export const REVIEW_RESULT_SCHEMA = Object.freeze({
           "impact",
           "recommendation",
           "confidence",
+          "file",
+          "line_start",
+          "line_end",
         ],
-        anyOf: [
-          {
-            required: [
-              "file",
-              "line_start",
-              "line_end",
-            ],
-          },
-          {
-            required: [
-              "kind",
-              "anchor_file",
-              "anchor_line",
-              "expected_symbol",
-              "searched_for",
-              "missing_change_reason",
-            ],
-          },
+        additionalProperties: false,
+      },
+    },
+    missing_change_findings: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          severity: SEVERITY_ENUM,
+          title: { type: "string" },
+          evidence: { type: "string" },
+          impact: { type: "string" },
+          recommendation: { type: "string" },
+          confidence: CONFIDENCE_ENUM,
+          anchor_file: { type: "string" },
+          anchor_line: { type: "integer" },
+          expected_symbol: { type: "string" },
+          searched_for: { type: "string" },
+          missing_change_reason: { type: "string" },
+        },
+        required: [
+          "severity",
+          "title",
+          "evidence",
+          "impact",
+          "recommendation",
+          "confidence",
+          "anchor_file",
+          "anchor_line",
+          "expected_symbol",
+          "searched_for",
+          "missing_change_reason",
         ],
         additionalProperties: false,
       },
@@ -81,6 +86,7 @@ export const REVIEW_RESULT_SCHEMA = Object.freeze({
     "verdict",
     "summary",
     "findings",
+    "missing_change_findings",
     "assumptions",
     "verification_gaps",
   ],
@@ -100,12 +106,13 @@ export function structuredReviewInstructions() {
     "Required top-level fields:",
     "- verdict: clean | needs-attention | inconclusive",
     "- summary: concise review summary",
-    "- findings: array of concrete findings, ordered by severity; use [] when there are no concrete findings",
+    "- findings: array of concrete code findings, ordered by severity; use [] when there are none",
+    "- missing_change_findings: array of expected-but-absent changes; use [] when there are none",
     "- assumptions: array of assumptions you relied on",
     "- verification_gaps: array of checks that still need verification",
     "",
-    "Each code finding must include severity, title, evidence, impact, recommendation, file, line_start, line_end, and confidence.",
-    "For a missing-change finding, set kind to missing-change and include anchor_file, anchor_line, expected_symbol, searched_for, missing_change_reason, and confidence; anchor_file:anchor_line must point to inspected repository evidence.",
+    "Each entry in findings must include severity, title, evidence, impact, recommendation, file, line_start, line_end, and confidence.",
+    "Each entry in missing_change_findings must include severity, title, evidence, impact, recommendation, anchor_file, anchor_line, expected_symbol, searched_for, missing_change_reason, and confidence; anchor_file:anchor_line must point to inspected repository evidence.",
     "",
     "Severity rubric:",
     "- critical: security breach, data loss, irreversible corruption, or production outage.",
@@ -130,19 +137,49 @@ export function validateStructuredReview(value) {
     return { review: null, errors: ["verdict must be clean, needs-attention, or inconclusive"] };
   }
 
-  const rawFindings = normalizeFindingsArray(value.findings, verdict);
-  if (!rawFindings) {
-    return { review: null, errors: ["findings must be an array"] };
-  }
-  const findings = [];
-  rawFindings.forEach((finding, index) => {
-    const { finding: normalized, errors: findingErrors } = normalizeStructuredFinding(finding, `findings[${index}]`);
-    if (findingErrors.length) {
-      errors.push(...findingErrors);
-      return;
+  // Two explicit modes, selected by whether the split-array wire is present.
+  //
+  // Split mode (new strict-native wire): `findings` carries code findings and
+  // `missing_change_findings` carries missing-change findings. Kind is forced
+  // by the array an item came from, after spreading, so a loose provider cannot
+  // override the array's implied kind.
+  //
+  // Legacy mode (no `missing_change_findings` key): `findings` is a single
+  // mixed array and kind is inferred per item. This path is required, not a
+  // courtesy: runtime.mjs re-normalizes the already-normalized internal review,
+  // whose merged `findings` list carries `kind` and has no
+  // `missing_change_findings` key. Inferring kind here (instead of forcing
+  // `findings` -> code) keeps normalization idempotent on that second pass.
+  const splitMode = value.missing_change_findings !== undefined;
+
+  let codeItems;
+  let missingItems;
+  if (splitMode) {
+    if (!Array.isArray(value.findings)) {
+      return { review: null, errors: ["findings must be an array"] };
     }
-    findings.push(normalized);
-  });
+    if (!Array.isArray(value.missing_change_findings)) {
+      return { review: null, errors: ["missing_change_findings must be an array"] };
+    }
+    codeItems = value.findings.map((item) => forceFindingKind(item, "code"));
+    missingItems = value.missing_change_findings.map((item) => forceFindingKind(item, "missing-change"));
+  } else {
+    const rawFindings = normalizeFindingsArray(value.findings, verdict);
+    if (!rawFindings) {
+      return { review: null, errors: ["findings must be an array"] };
+    }
+    codeItems = rawFindings;
+    missingItems = [];
+  }
+
+  // Validate the two arrays separately, before merging, so item errors keep
+  // precise paths (findings[i] / missing_change_findings[i]).
+  const codeFindings = collectStructuredFindings(codeItems, "findings", errors);
+  const missingFindings = collectStructuredFindings(missingItems, "missing_change_findings", errors);
+  // Merge order: code findings first, then missing-change, preserving input
+  // order within each array. No dedup, no ordinals.
+  const findings = [...codeFindings, ...missingFindings];
+
   if (verdict === "needs-attention" && findings.length === 0) {
     errors.push("needs-attention reviews must include at least one valid finding");
   }
@@ -160,6 +197,28 @@ export function validateStructuredReview(value) {
     },
     errors: [],
   };
+}
+
+function collectStructuredFindings(items, prefix, errors) {
+  const findings = [];
+  items.forEach((finding, index) => {
+    const { finding: normalized, errors: findingErrors } = normalizeStructuredFinding(finding, `${prefix}[${index}]`);
+    if (findingErrors.length) {
+      errors.push(...findingErrors);
+      return;
+    }
+    findings.push(normalized);
+  });
+  return findings;
+}
+
+function forceFindingKind(item, kind) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    // Leave non-objects untouched so normalizeStructuredFinding reports the
+    // precise "must be an object" error instead of a spread masking it.
+    return item;
+  }
+  return { ...item, kind };
 }
 
 export function parseStructuredReviewText(rawText) {

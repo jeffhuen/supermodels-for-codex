@@ -1261,7 +1261,7 @@ function initialPrompt({ provider, brief, focus, mode }) {
     "Review rules:",
     "- Prefer concrete bugs, regressions, security issues, lifecycle races, and missing verification.",
     "- Cite file paths and line numbers from inspected files.",
-    "- For a bug caused by a missing change elsewhere, use a missing-change finding anchored to inspected evidence instead of inventing a line for absent code.",
+    "- For a bug caused by a missing change elsewhere, put it in missing_change_findings anchored to inspected evidence instead of inventing a line for absent code.",
     "- Treat user-provided prior findings as hypotheses, not facts.",
     "- If evidence is missing, put that in verification_gaps instead of inventing a finding.",
     "- Do not report vague concerns, stylistic preferences, or issues that are already covered by tests unless the tests are insufficient.",

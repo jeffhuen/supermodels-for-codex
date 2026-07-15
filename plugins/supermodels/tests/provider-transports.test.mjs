@@ -748,6 +748,67 @@ test("toCodeAssistRequest preserves schema property names that match stripped me
   assert.equal(params.properties.findings.items.anyOf, undefined);
 });
 
+test("toCodeAssistRequest converts the two-array review schema, stripping additionalProperties but keeping structure", () => {
+  const request = toCodeAssistRequest({
+    messages: [{ role: "user", content: [{ type: "text", text: "review" }] }],
+    tools: [{
+      name: "submit_review",
+      description: "Submit review",
+      input_schema: REVIEW_RESULT_SCHEMA,
+    }],
+  });
+
+  const params = request.tools[0].functionDeclarations[0].parameters;
+  // Both arrays survive the Gemini-subset conversion.
+  assert(params.properties.findings.items.properties.file);
+  assert(params.properties.findings.items.required.includes("file"));
+  assert(params.properties.missing_change_findings.items.properties.anchor_file);
+  assert(params.properties.missing_change_findings.items.properties.expected_symbol);
+  assert(params.properties.missing_change_findings.items.required.includes("anchor_file"));
+  assert(params.properties.missing_change_findings.items.required.includes("missing_change_reason"));
+  // additionalProperties is stripped for the Code Assist function-declaration subset.
+  assert.equal(params.additionalProperties, undefined);
+  assert.equal(params.properties.findings.items.additionalProperties, undefined);
+  assert.equal(params.properties.missing_change_findings.items.additionalProperties, undefined);
+});
+
+test("stripForGemini keeps removing anyOf from arbitrary tool schemas", () => {
+  const request = toCodeAssistRequest({
+    messages: [{ role: "user", content: [{ type: "text", text: "x" }] }],
+    tools: [{
+      name: "custom_tool",
+      description: "Custom",
+      input_schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          choice: { anyOf: [{ type: "string" }, { type: "number" }] },
+        },
+        required: ["choice"],
+      },
+    }],
+  });
+
+  const params = request.tools[0].functionDeclarations[0].parameters;
+  assert.equal(params.properties.choice.anyOf, undefined);
+  assert.equal(params.additionalProperties, undefined);
+});
+
+test("toGrokResponsesRequest passes the two-array review schema through verbatim", () => {
+  const request = toGrokResponsesRequest({
+    model: "grok-4.5",
+    max_tokens: 1_000,
+    tools: [{ name: "submit_review", description: "Submit.", input_schema: REVIEW_RESULT_SCHEMA }],
+    messages: [{ role: "user", content: [{ type: "text", text: "Review." }] }],
+  });
+
+  const submit = request.tools.find((tool) => tool.name === "submit_review");
+  assert.deepEqual(submit.parameters, REVIEW_RESULT_SCHEMA);
+  assert(submit.parameters.properties.missing_change_findings);
+  assert.equal(submit.parameters.properties.findings.items.anyOf, undefined);
+  assert.equal(submit.parameters.properties.missing_change_findings.items.anyOf, undefined);
+});
+
 test("collectAntigravityResponse parses function calls, text, and usage", () => {
   const result = collectAntigravityResponse({
     candidates: [{

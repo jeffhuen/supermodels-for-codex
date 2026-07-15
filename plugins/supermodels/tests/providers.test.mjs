@@ -117,6 +117,7 @@ test("buildClaudeCommand asks Claude CLI for schema-validated review output", ()
     "verdict",
     "summary",
     "findings",
+    "missing_change_findings",
     "assumptions",
     "verification_gaps",
   ]);

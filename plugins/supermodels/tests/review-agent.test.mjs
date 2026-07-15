@@ -346,7 +346,7 @@ test("runReviewAgent applies pre-diff file reads to later high-risk hunk coverag
   assert.equal(fakeTransport.calls, 4);
 });
 
-test("runReviewAgent accepts missing-change findings anchored to readable evidence", async () => {
+test("runReviewAgent accepts missing_change_findings submitted through the two-array wire", async () => {
   const fakeTransport = {
     calls: 0,
     async messages() {
@@ -369,8 +369,8 @@ test("runReviewAgent accepts missing-change findings anchored to readable eviden
       return responseWithTool("submit_1", "submit_review", {
         verdict: "needs-attention",
         summary: "Missing caller update.",
-        findings: [{
-          kind: "missing-change",
+        findings: [],
+        missing_change_findings: [{
           severity: "high",
           title: "Caller still uses the removed symbol",
           evidence: "Search found a caller that still references runLegacyThing.",
@@ -397,6 +397,7 @@ test("runReviewAgent accepts missing-change findings anchored to readable eviden
   });
 
   assert.equal(result.verdict, "needs-attention");
+  assert.equal(result.findings.length, 1);
   assert.equal(result.findings[0].kind, "missing-change");
   assert.equal(result.findings[0].file, "plugins/supermodels/scripts/lib/runtime.mjs");
   assert.equal(result.findings[0].line_start, 1);
