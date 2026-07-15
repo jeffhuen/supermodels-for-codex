@@ -957,6 +957,21 @@ test("runGrokAcpTask approves writes on write tasks", async () => {
   assert.equal(result.usage.total_tokens, 25);
 });
 
+test("runGrokAcpTask redirects once after a read-only policy denial and completes", async () => {
+  const events = [];
+  const result = await runGrokAcpTask({ mode: "task", prompt: "explore the repo" }, {
+    cwd: process.cwd(),
+    spawnImpl: nodeSpawnFakeAgent("redirect"),
+    onEvent: (event) => events.push(event),
+    timeoutMs: 10_000,
+  });
+  assert.equal(result.stopReason, "end_turn");
+  assert.match(result.rawText, /redirected answer/);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.usage.total_tokens, 22 + 34);
+  assert.ok(events.some((event) => /redirected/.test(event.message)));
+});
+
 test("runGrokAcpTask reports success even when the agent ignores stdin EOF and must be killed", async () => {
   const result = await runGrokAcpTask({ mode: "task", prompt: "look around" }, {
     cwd: process.cwd(),

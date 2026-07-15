@@ -7,12 +7,15 @@
 //     dying mid-permission-exchange, e.g. crash or EPIPE regression coverage)
 //   linger: like read, but ignores stdin EOF and stays alive until killed
 //     (the real `grok agent stdio` does not exit on EOF)
+//   redirect: first prompt requests permission for a shell Execute (denied on
+//     read-only tasks -> cancelled); a follow-up prompt answers normally
 import readline from "node:readline";
 
 const mode = process.env.FAKE_ACP_MODE ?? "read";
 if (mode === "linger") {
   setInterval(() => {}, 1_000);
 }
+let promptCount = 0;
 const rl = readline.createInterface({ input: process.stdin });
 const send = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
 const update = (sessionId, update_) =>
@@ -48,6 +51,31 @@ rl.on("line", (line) => {
       // Die before the client's permission response can be read, so its
       // write lands on a dead/closing pipe (async EPIPE regression coverage).
       process.exit(1);
+      return;
+    }
+    if (mode === "redirect") {
+      promptCount += 1;
+      if (promptCount === 1) {
+        const permissionId = nextId += 1;
+        pendingPermission.set(permissionId, sessionId);
+        send({
+          jsonrpc: "2.0", id: permissionId, method: "session/request_permission",
+          params: {
+            toolCall: { toolCallId: "tc-2", title: "Execute `find .`" },
+            options: [
+              { optionId: "allow-once", name: "Yes", kind: "allow_once" },
+              { optionId: "reject-once", name: "No", kind: "reject_once" },
+            ],
+          },
+        });
+        pendingPermission.set(`${permissionId}:promptId`, msg.id);
+      } else {
+        update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "redirected answer" } });
+        send({
+          jsonrpc: "2.0", id: msg.id,
+          result: { stopReason: "end_turn", _meta: { inputTokens: 30, outputTokens: 4, totalTokens: 34 } },
+        });
+      }
       return;
     }
     update(sessionId, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "thinking" } });

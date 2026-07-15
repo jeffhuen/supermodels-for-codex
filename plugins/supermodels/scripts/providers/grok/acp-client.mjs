@@ -8,6 +8,11 @@ const STDERR_LIMIT = 16 * 1024;
 const THOUGHT_EMIT_THRESHOLD = 2000;
 const CANCEL_GRACE_MS = 2000;
 const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
+const READ_ONLY_REDIRECT_PROMPT = [
+  "Supermodels policy notice: your previous action was denied because this task is read-only.",
+  "Do not run shell commands or modify files.",
+  "Complete the task using only your built-in file read and search tools, then report your findings.",
+].join(" ");
 
 // write: allow_always > allow_once > first option. read-only: reject_once > first option.
 export function grokAcpPermissionDecision(params, policy = {}) {
@@ -147,6 +152,14 @@ function buildUsage(meta) {
   return usage;
 }
 
+function sumUsage(first, second) {
+  const merged = { ...first };
+  for (const [key, value] of Object.entries(second)) {
+    merged[key] = Number.isFinite(merged[key]) ? merged[key] + value : value;
+  }
+  return merged;
+}
+
 // Ends the child's stdin (agents exit on EOF) and waits (bounded) for it to close.
 async function finalizeChild(child, childClosed) {
   if (child.exitCode !== null || child.signalCode !== null) {
@@ -189,6 +202,7 @@ export async function runGrokAcpTask(input, options = {}) {
   return await new Promise((resolveOuter, rejectOuter) => {
     let settled = false;
     let timedOut = false;
+    let permissionDenials = 0;
     let cancelTriggered = false;
     let killTimer = null;
     let timeoutTimer = null;
@@ -286,6 +300,11 @@ export async function runGrokAcpTask(input, options = {}) {
 
     connection.onRequest("session/request_permission", (params) => {
       const optionId = grokAcpPermissionDecision(params, { write: Boolean(options.write) });
+      const rejected = (params?.options ?? []).some((option) =>
+        option?.optionId === optionId && String(option?.kind ?? "").startsWith("reject"));
+      if (rejected) {
+        permissionDenials += 1;
+      }
       emit({ type: "progress", message: `grok permission ${optionId}`, at: new Date().toISOString() });
       return { outcome: { outcome: "selected", optionId } };
     });
@@ -371,14 +390,32 @@ export async function runGrokAcpTask(input, options = {}) {
       }
       sessionId = sessionOutcome.result?.sessionId ?? "";
 
-      const promptOutcome = await guarded(connection.request("session/prompt", {
+      let promptOutcome = await guarded(connection.request("session/prompt", {
         sessionId,
         prompt: [{ type: "text", text: input.prompt }],
       }));
 
       if (promptOutcome.kind === "ok") {
-        const stopReason = promptOutcome.result?.stopReason ?? "";
-        const usage = buildUsage(promptOutcome.result?._meta);
+        let stopReason = promptOutcome.result?.stopReason ?? "";
+        let usage = buildUsage(promptOutcome.result?._meta);
+        // A denial on a read-only task ends the turn as "cancelled"; give the
+        // agent one redirect toward its permitted tools before giving up.
+        if (stopReason === "cancelled" && permissionDenials > 0 && !options.write) {
+          emit({
+            type: "progress",
+            message: "grok redirected after read-only policy denial",
+            at: new Date().toISOString(),
+          });
+          const redirectOutcome = await guarded(connection.request("session/prompt", {
+            sessionId,
+            prompt: [{ type: "text", text: READ_ONLY_REDIRECT_PROMPT }],
+          }));
+          if (redirectOutcome.kind !== "ok") {
+            return await earlyResult(redirectOutcome);
+          }
+          stopReason = redirectOutcome.result?.stopReason ?? "";
+          usage = sumUsage(usage, buildUsage(redirectOutcome.result?._meta));
+        }
         // Reap the child, but a client-initiated teardown after a successful
         // prompt is not a task failure — the real agent ignores stdin EOF and
         // has to be killed, which must not read as a failed run.
