@@ -1202,14 +1202,15 @@ test("buildGrokHeadlessCommand composes sandbox, model, and exclusive-mode flags
     "--json-schema", '{"type":"object"}',
   ]);
   const writeCommand = buildGrokHeadlessCommand({
-    promptFile: "/tmp/supermodels-prompts/provider-grok.prompt.md", write: true, model: "cli-default", effort: "cli-default", worktree: "feat-x",
+    promptFile: "/tmp/supermodels-prompts/provider-grok.prompt.md", write: true, model: "cli-default", effort: "cli-default", worktree: true,
   });
   assert.ok(writeCommand.args.includes("workspace"));
   // --check is never appended automatically (grok 0.2.x headless --check can
   // cancel the turn and swallow output); it appears only on explicit request.
   assert.ok(!writeCommand.args.includes("--check"));
-  assert.ok(writeCommand.args.includes("--worktree"));
-  assert.ok(writeCommand.args.includes("feat-x"));
+  // --worktree is boolean (Grok auto-names); no worktree name is passed through.
+  assert.equal(writeCommand.args.filter((arg) => arg === "--worktree").length, 1);
+  assert.equal(writeCommand.args[writeCommand.args.indexOf("--worktree") + 1], undefined);
   assert.ok(writeCommand.args.includes("--no-memory"));
   const checkCommand = buildGrokHeadlessCommand({
     promptFile: "/tmp/supermodels-prompts/provider-grok.prompt.md", check: true, write: true,

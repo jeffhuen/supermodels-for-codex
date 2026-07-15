@@ -205,11 +205,19 @@ function normalizeGrokTaskOptions(options) {
   }
   if (next["json-schema"] !== undefined) {
     const raw = next["json-schema"];
+    let parsed;
     try {
-      next["json-schema"] = JSON.parse(raw);
+      parsed = JSON.parse(raw);
     } catch (error) {
       throw new Error(`--json-schema must be valid JSON: ${error.message}`);
     }
+    // A JSON Schema passed to Grok must be an object; reject false/arrays/
+    // scalars so a degenerate value can't parse cleanly here and then be
+    // silently dropped downstream by a truthiness check.
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`--json-schema must be a JSON object describing the schema, got '${raw}'.`);
+    }
+    next["json-schema"] = parsed;
   }
   return next;
 }

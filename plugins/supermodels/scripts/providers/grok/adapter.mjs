@@ -109,11 +109,14 @@ export function buildGrokHeadlessCommand(options = {}) {
   if (options.check) {
     args.push("--check");
   }
-  if (options.jsonSchema) {
+  if (options.jsonSchema !== undefined) {
     args.push("--json-schema", JSON.stringify(options.jsonSchema));
   }
+  // Boolean only: Grok auto-names the worktree. Supermodels does not accept a
+  // worktree name (a bare `--worktree <name>` would otherwise leak the name
+  // into the task prompt as a positional).
   if (options.worktree) {
-    args.push("--worktree", ...(typeof options.worktree === "string" ? [options.worktree] : []));
+    args.push("--worktree");
   }
   return { bin: options.bin ?? "grok", args, stdin: false };
 }

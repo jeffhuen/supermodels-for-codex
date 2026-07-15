@@ -772,7 +772,7 @@ Commands:
   providers [--json]
   review [--all|--provider claude,antigravity,grok] [--base REF] [--context-file PATH] [--live|--background] [focus]
   adversarial-review [--all|--provider claude,antigravity,grok] [--base REF] [--context-file PATH] [--model MODEL] [--effort xhigh|max] [--live|--background] [focus]
-  task [--provider claude|antigravity|grok] [--write] [--background] <task>
+  task [--provider claude|antigravity|grok] [--write] [--background] [grok-only: --best-of-n N | --check | --json-schema JSON | --worktree] <task>
   status [job-id] [--json]
   watch <job-id> [--interval seconds] [--max-wait seconds]
   result <job-id> [--json]

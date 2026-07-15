@@ -123,6 +123,24 @@ test("parseRuntimeArgs rejects a non-positive-integer --best-of-n", () => {
   );
 });
 
+test("parseRuntimeArgs requires --json-schema to be a JSON object", () => {
+  // valid JSON but not an object -> rejected at the source, not silently dropped
+  assert.throws(
+    () => parseRuntimeArgs(["task", "--json-schema", "false", "task"]),
+    /--json-schema must be a JSON object/i,
+  );
+  assert.throws(
+    () => parseRuntimeArgs(["task", "--json-schema", "[1,2]", "task"]),
+    /--json-schema must be a JSON object/i,
+  );
+  assert.throws(
+    () => parseRuntimeArgs(["task", "--json-schema", "{bad", "task"]),
+    /--json-schema must be valid JSON/i,
+  );
+  const parsed = parseRuntimeArgs(["task", "--json-schema", '{"type":"object"}', "task"]);
+  assert.deepEqual(parsed.options["json-schema"], { type: "object" });
+});
+
 test("parseRuntimeArgs rejects invalid --json-schema JSON", () => {
   assert.throws(
     () => parseRuntimeArgs(["task", "--json-schema", "{not json", "task"]),
