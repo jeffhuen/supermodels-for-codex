@@ -262,7 +262,7 @@ async function handleTask(parsed) {
     throw new Error("task requires a task description.");
   }
   if (parsed.options.write && providerSelection.requested.length > 1) {
-    throw new Error("Refusing multi-provider --write task in v1. Pick --provider claude or --provider antigravity.");
+    throw new Error("Refusing multi-provider --write task. Pick a single provider: --provider claude, --provider antigravity, or --provider grok.");
   }
   const request = buildTaskRequest({
     options: parsed.options,
