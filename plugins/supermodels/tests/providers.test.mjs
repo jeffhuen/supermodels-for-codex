@@ -14,6 +14,8 @@ import {
 import {
   claudeTaskPermissionDecision,
   writeClaudeTaskHook,
+  READ_TASK_TOOL_NAMES,
+  EDIT_TASK_TOOL_NAMES,
 } from "../scripts/providers/claude/task-permissions.mjs";
 import {
   createAntigravityAdapter,
@@ -133,11 +135,17 @@ test("buildClaudeCommand constrains read-only reviews and isolates task sessions
   );
   assert(!command.args.includes("--no-session-persistence"));
 
-  // Tasks no longer use the coarse allow-list; they run under the broker's
-  // isolated, fail-closed PreToolUse hook (isolation triple, verified in B0).
+  // Tasks run under the broker's isolated, fail-closed PreToolUse hook (isolation
+  // triple, verified in B0) AND a coarse `--tools` availability allowlist. The
+  // allowlist is what closes the broken-hook Bash fail-open: `dontAsk`
+  // auto-allows read-only shell, so a missing/crashing hook would otherwise let
+  // Bash execute. `--tools` bounds availability without pre-approving (unlike the
+  // banned `--allowedTools`), so per-call path-scoping in the hook is preserved.
   const task = buildClaudeCommand({ mode: "task", settingsPath: "/tmp/s.json" });
   assert(!task.args.includes("--allowedTools"));
   assert(!task.args.includes("bypassPermissions"));
+  assert(task.args.includes("--tools"));
+  assert(!task.args.includes("Bash"));
   assert(task.args.includes("--setting-sources"));
   assert.equal(task.args[task.args.indexOf("--setting-sources") + 1], "");
   assert.deepEqual(
@@ -151,12 +159,18 @@ test("buildClaudeCommand constrains read-only reviews and isolates task sessions
 });
 
 test("buildClaudeCommand keeps write tasks under the same isolated hook gating", () => {
-  // Write authority lives in the hook script's embedded policy, not in argv:
-  // the command is identical to a read-only task (no --allowedTools leak).
+  // Per-call write authority (path-scoping) lives in the hook script's embedded
+  // policy, not in argv: no `--allowedTools` pre-approval leaks. Write tasks
+  // widen the `--tools` availability allowlist to include the edit tools, but
+  // still never expose Bash (shell voids path-gating with no OS sandbox).
   const command = buildClaudeCommand({ mode: "task", write: true, settingsPath: "/tmp/s.json" });
   assert(!command.args.includes("--allowedTools"));
   assert(!command.args.includes("Read,Grep,Glob,LS,Edit,MultiEdit,Write"));
   assert(!command.args.includes("bypassPermissions"));
+  assert(command.args.includes("--tools"));
+  assert(!command.args.includes("Bash"));
+  assert(command.args.includes("Write"));
+  assert(command.args.includes("Edit"));
   assert.deepEqual(
     command.args.slice(command.args.indexOf("--settings"), command.args.indexOf("--settings") + 2),
     ["--settings", "/tmp/s.json"],
@@ -165,6 +179,90 @@ test("buildClaudeCommand keeps write tasks under the same isolated hook gating",
     command.args.slice(command.args.indexOf("--permission-mode"), command.args.indexOf("--permission-mode") + 2),
     ["--permission-mode", "dontAsk"],
   );
+});
+
+test("buildClaudeCommand allowlists read-only task tools and never exposes Bash", () => {
+  // FAIL-OPEN CLOSURE: under `--permission-mode dontAsk` a missing/crashing/
+  // malformed/timed-out hook lets read-only Bash EXECUTE (dontAsk auto-allows
+  // read-only shell; the hook's Bash-deny only applies when the hook runs). The
+  // `--tools` allowlist makes Bash unavailable regardless of hook health while
+  // still composing with the hook's per-call path-scoping (verified live).
+  const readOnly = buildClaudeCommand({ mode: "task", write: false, settingsPath: "/tmp/s.json" });
+  assert(readOnly.args.includes("--tools"));
+  for (const name of READ_TASK_TOOL_NAMES) {
+    assert(readOnly.args.includes(name), `read-only task --tools must include ${name}`);
+  }
+  for (const forbidden of ["Bash", ...EDIT_TASK_TOOL_NAMES]) {
+    assert(!readOnly.args.includes(forbidden), `read-only task must not expose ${forbidden}`);
+  }
+  assert(!readOnly.args.includes("--allowedTools"));
+
+  const write = buildClaudeCommand({ mode: "task", write: true, settingsPath: "/tmp/s.json" });
+  assert(write.args.includes("--tools"));
+  for (const name of [...READ_TASK_TOOL_NAMES, ...EDIT_TASK_TOOL_NAMES]) {
+    assert(write.args.includes(name), `write task --tools must include ${name}`);
+  }
+  assert(!write.args.includes("--allowedTools"));
+
+  // Bash is unavailable in BOTH modes: no OS sandbox on Claude tasks, so shell
+  // would void the hook's path-gating.
+  assert(!readOnly.args.includes("Bash"));
+  assert(!write.args.includes("Bash"));
+});
+
+test("runClaudePrompt forces task-mode gating even when input.mode is missing/misspelled", async () => {
+  // FAIL-OPEN CLOSURE (mode boundary): runClaudePrompt is exclusively the task
+  // implementation, so it must force mode:"task" at the buildClaudeCommand
+  // boundary. If it forwarded a caller's missing/misspelled mode, isTaskMode
+  // would be false and NO gating (isolation triple, --tools) would be emitted —
+  // the task would run wide open. This drives the real runClaudePrompt through a
+  // fake claude binary that records the argv it was actually invoked with.
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-claude-force-task-"));
+  try {
+    const recordPath = path.join(tempDir, "argv.json");
+    const fakeClaude = path.join(tempDir, "claude");
+    await writeFile(fakeClaude, [
+      "#!/usr/bin/env node",
+      "import { writeFileSync } from 'node:fs';",
+      "let stdin = '';",
+      "process.stdin.setEncoding('utf8');",
+      "process.stdin.on('data', (c) => { stdin += c; });",
+      "process.stdin.on('end', () => {",
+      `  writeFileSync(${JSON.stringify(recordPath)}, JSON.stringify(process.argv.slice(2)));`,
+      "  console.log(JSON.stringify({ type: 'system', session_id: 'fake-task-session' }));",
+      "  console.log(JSON.stringify({ type: 'result', result: 'ok' }));",
+      "});",
+      "",
+    ].join("\n"), { mode: 0o755 });
+
+    const adapter = createClaudeAdapter();
+    await adapter.task({ mode: "definitely-not-a-real-mode", prompt: "look around" }, {
+      bin: fakeClaude,
+      cwd: tempDir,
+      write: false,
+      timeoutMs: 10_000,
+    });
+
+    const argv = JSON.parse(await readFile(recordPath, "utf8"));
+    // Isolation triple emitted despite the bogus input.mode.
+    assert(argv.includes("--settings"));
+    assert(argv.includes("--setting-sources"));
+    assert.equal(argv[argv.indexOf("--setting-sources") + 1], "");
+    assert.deepEqual(
+      argv.slice(argv.indexOf("--permission-mode"), argv.indexOf("--permission-mode") + 2),
+      ["--permission-mode", "dontAsk"],
+    );
+    // --tools allowlist emitted; Bash closed; no pre-approval / bypass leak.
+    assert(argv.includes("--tools"));
+    for (const name of READ_TASK_TOOL_NAMES) {
+      assert(argv.includes(name), `forced task --tools must include ${name}`);
+    }
+    assert(!argv.includes("Bash"));
+    assert(!argv.includes("--allowedTools"));
+    assert(!argv.includes("bypassPermissions"));
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("buildClaudeCommand supports opus alias and explicit max effort", () => {

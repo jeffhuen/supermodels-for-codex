@@ -5,8 +5,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
-const READ_TOOLS = new Set(["Read", "Grep", "Glob", "LS", "NotebookRead"]);
-const EDIT_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+// Single source of truth for the task tool names. The broker hook policy (below)
+// and the CLI `--tools` availability allowlist (adapter.mjs buildClaudeCommand)
+// both derive from these arrays so the coarse availability bound and the
+// per-call path-scoping can never drift apart. Bash is intentionally absent from
+// both: with no OS sandbox on Claude tasks, shell voids path-gating.
+export const READ_TASK_TOOL_NAMES = ["Read", "Grep", "Glob", "LS", "NotebookRead"];
+export const EDIT_TASK_TOOL_NAMES = ["Write", "Edit", "MultiEdit", "NotebookEdit"];
+const READ_TOOLS = new Set(READ_TASK_TOOL_NAMES);
+const EDIT_TOOLS = new Set(EDIT_TASK_TOOL_NAMES);
 
 function canonicalWithinCwd(cwd, filePath) {
   if (!filePath) return false;

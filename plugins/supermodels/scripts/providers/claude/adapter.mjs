@@ -13,7 +13,11 @@ import {
 } from "../../lib/review-schema.mjs";
 import { ClaudeCodeCredentials } from "./oauth.mjs";
 import { ClaudeOAuthMessagesTransport } from "./messages-transport.mjs";
-import { writeClaudeTaskHook } from "./task-permissions.mjs";
+import {
+  writeClaudeTaskHook,
+  READ_TASK_TOOL_NAMES,
+  EDIT_TASK_TOOL_NAMES,
+} from "./task-permissions.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULTS = JSON.parse(readFileSync(path.join(__dirname, "defaults.json"), "utf8"));
@@ -118,15 +122,26 @@ export function buildClaudeCommand(options = {}) {
     // fail-closed PreToolUse hook. The generated settings file is the SOLE
     // permission authority: `--setting-sources ""` excludes user/project/local
     // sources, and `--permission-mode dontAsk` denies anything the hook does not
-    // explicitly allow. Never emit `--allowedTools` or `bypassPermissions` here
-    // (either would void the per-call, path-scoped gating). Write vs read-only
-    // authority lives in the hook script's embedded policy, not in argv.
+    // explicitly allow. Write vs read-only authority lives in the hook script's
+    // embedded policy, not in argv.
     if (!options.settingsPath) {
       throw new Error("refusing to build a Claude task command without an isolated settings file (fail-closed)");
     }
     args.push("--settings", options.settingsPath);
     args.push("--setting-sources", "");
     args.push("--permission-mode", "dontAsk");
+    // The hook does per-call path-scoping of edits, but it is not sufficient on
+    // its own: `--permission-mode dontAsk` auto-allows read-only Bash, so a
+    // missing/crashing/malformed/timed-out hook fails OPEN to shell execution.
+    // `--tools` is the coarse availability bound that closes that fail-open — it
+    // makes Bash (and, in read-only mode, the edit tools) unavailable regardless
+    // of hook health, and it composes with the hook (it bounds availability
+    // without pre-approving). NEVER emit `--allowedTools` (it pre-approves and
+    // would void the hook's path-scoping) or `bypassPermissions`.
+    const taskTools = options.write
+      ? [...READ_TASK_TOOL_NAMES, ...EDIT_TASK_TOOL_NAMES]
+      : READ_TASK_TOOL_NAMES;
+    args.push("--tools", ...taskTools);
   }
   if (options.resume) {
     args.push("--resume", options.resume);
@@ -261,11 +276,15 @@ async function runClaudePrompt(input, options = {}) {
       bin: options.bin,
       model: options.model,
       effort: options.effort,
-      mode: input.mode,
+      // runClaudePrompt is exclusively the task implementation. Force task mode
+      // at the boundary so a caller passing a missing/misspelled input.mode can
+      // never skip the isolation triple + --tools gating (which would run the
+      // task wide open). Never forward input.mode here.
+      mode: "task",
       write: Boolean(options.write),
       settingsPath,
       resume: options.resume,
-      name: options.name ?? `supermodels-${input.mode ?? "task"}`,
+      name: options.name ?? "supermodels-task",
     });
     const streamParser = createClaudeStreamEventParser(options.onEvent);
     const result = await runCommand(command, {

@@ -2818,16 +2818,76 @@ test("runReviewAgent does not send strict submit_review for antigravity", async 
   assert.equal(submit.strict, undefined);
 });
 
-test("claude review caching: stable system + rolling latest-turn breakpoint, ≤4, no mutation of stored messages", async () => {
+const countCacheControl = (arr) => (arr ?? []).filter((b) => b && b.cache_control).length;
+const totalCacheBreakpoints = (body) =>
+  countCacheControl(body.system)
+  + body.messages.reduce((n, m) => n + (Array.isArray(m.content) ? countCacheControl(m.content) : 0), 0);
+
+test("claude review caching: system + stable evidence anchor + rolling breakpoint, ≤4, no cross-round mutation", async () => {
   const bodies = [];
   let round = 0;
   const transport = {
     messages: async (body) => {
       bodies.push(JSON.parse(JSON.stringify(body))); // deep snapshot of what was SENT
       round += 1;
-      // two inspection rounds, then submit
-      if (round === 1) return responseWithTool("d1", "get_diff", {});
-      if (round === 2) return responseWithTool("r1", "read_file", { path: "a.mjs" });
+      // Preloaded evidence is messages[1]; then two model-led inspection rounds, then submit.
+      if (round === 1) return responseWithTool("r1", "read_file", { path: "a.mjs" });
+      if (round === 2) return responseWithTool("s1", "search", { query: "runReviewAgent" });
+      return responseWithTool("submit_1", "submit_review", cleanReview("No issues found."));
+    },
+  };
+  await runReviewAgent({
+    provider: "claude", transport, tools: reviewToolsForDiffAndFiles(),
+    minInspection: { diff: false, fileOrSearch: false, explicitFileOrSearchToolCalls: 0, cleanExplicitFileOrSearchToolCalls: 0 },
+    // Non-empty preloadTools makes messages[1] the preloaded-evidence turn, so the
+    // stable prefix ends at index 1 (stablePrefixEnd === 2).
+    preloadTools: ["get_diff"],
+  });
+  assert.equal(bodies.length, 3, "expected exactly three model rounds (read_file, search, submit)");
+
+  for (const body of bodies) {
+    // Identity block system[0] must never be cached; the last system block caches tools+system.
+    assert.equal(body.system[0].cache_control, undefined, "system[0] identity block must stay uncached");
+    assert.deepEqual(body.system[body.system.length - 1].cache_control, { type: "ephemeral" });
+    // STABLE ANCHOR (Fix 3): the preloaded-evidence turn (messages[1]) carries a
+    // breakpoint EVERY round so a long round appending >20 blocks cannot push the
+    // evidence prefix outside the API lookback window from the rolling breakpoint.
+    assert.deepEqual(
+      body.messages[1].content.at(-1).cache_control,
+      { type: "ephemeral" },
+      "preloaded-evidence anchor must be cached every round",
+    );
+    // The prompt (messages[0]) is never the anchor and never the latest turn, so it stays clean.
+    assert.equal(body.messages[0].content.at(-1).cache_control, undefined);
+    // Rolling breakpoint sits on the last content block of the latest turn.
+    const lastMsg = body.messages[body.messages.length - 1];
+    assert.deepEqual(lastMsg.content[lastMsg.content.length - 1].cache_control, { type: "ephemeral" });
+    // Never exceed the API's four-breakpoint budget.
+    const total = totalCacheBreakpoints(body);
+    assert.ok(total >= 2 && total <= 4, `breakpoint count out of range: ${total}`);
+  }
+
+  // DEDUP: round 1's latest turn IS the evidence anchor (messages[1]), so anchor and
+  // rolling coincide → exactly two breakpoints (system + the shared message block).
+  assert.equal(totalCacheBreakpoints(bodies[0]), 2, "round 1 must dedup the coincident anchor/rolling breakpoint");
+  assert.equal(bodies[0].messages.length, 2);
+
+  // NO CROSS-ROUND MUTATION: the round-2 rolling breakpoint on the first tool-result
+  // turn (messages[3]) must have rolled OFF by round 3 — proving each round annotates
+  // a per-request copy, never the loop's stored `messages` accumulator.
+  assert.deepEqual(bodies[1].messages[3].content.at(-1).cache_control, { type: "ephemeral" });
+  assert.equal(
+    bodies[2].messages[3].content.at(-1).cache_control,
+    undefined,
+    "round 3: the round-2 rolling breakpoint must have rolled off (no cross-round mutation)",
+  );
+});
+
+test("claude review caching: no-preload round 1 dedups stable+rolling to one message breakpoint", async () => {
+  const bodies = [];
+  const transport = {
+    messages: async (body) => {
+      bodies.push(JSON.parse(JSON.stringify(body)));
       return responseWithTool("submit_1", "submit_review", cleanReview("No issues found."));
     },
   };
@@ -2836,39 +2896,13 @@ test("claude review caching: stable system + rolling latest-turn breakpoint, ≤
     minInspection: { diff: false, fileOrSearch: false, explicitFileOrSearchToolCalls: 0, cleanExplicitFileOrSearchToolCalls: 0 },
     preloadTools: [],
   });
-  const countCC = (arr) => (arr ?? []).filter((b) => b && b.cache_control).length;
-  // NO-MUTATION: the review loop's stored messages must not accumulate cache_control
-  // across rounds (annotation happens on a per-request copy, not the loop's stored
-  // `messages` accumulator). Observe the rolling breakpoint directly instead of the
-  // prior (vacuous) slice(0,-1) check. Runs first so a leak is attributed to THIS
-  // check rather than incidentally tripping the per-round loop below.
-  // Round 1: the first user turn IS the latest turn, so its last block carries the rolling breakpoint.
-  assert.deepEqual(
-    bodies[0].messages[0].content.at(-1).cache_control,
-    { type: "ephemeral" },
-    "round 1: rolling breakpoint should sit on the first (and only) turn's last block",
-  );
-  // Round 2+: the first user turn is no longer the latest turn. Its last block must be CLEAN —
-  // proving the round-1 breakpoint was written on a per-request copy and never leaked back into
-  // the loop's stored `messages` accumulator (blocker-6).
-  for (let i = 1; i < bodies.length; i += 1) {
-    assert.equal(
-      bodies[i].messages[0].content.at(-1).cache_control,
-      undefined,
-      `round ${i + 1}: first turn's breakpoint must have rolled off (no cross-round mutation)`,
-    );
-  }
-  for (const body of bodies) {
-    // system: last block always carries the breakpoint (caches tools+system)
-    const sys = body.system;
-    assert.deepEqual(sys[sys.length - 1].cache_control, { type: "ephemeral" });
-    // the first user turn (initial prompt + preloaded evidence) stays a breakpoint every round
-    // and one rolling breakpoint sits on the last content block of the latest turn.
-    const total = countCC(sys) + body.messages.reduce((n, m) => n + (Array.isArray(m.content) ? countCC(m.content) : 0), 0);
-    assert.ok(total >= 2 && total <= 4, `breakpoint count out of range: ${total}`);
-    const lastMsg = body.messages[body.messages.length - 1];
-    assert.deepEqual(lastMsg.content[lastMsg.content.length - 1].cache_control, { type: "ephemeral" });
-  }
+  const body = bodies[0];
+  // With no preload the stable prefix is just the prompt (stablePrefixEnd === 1), so
+  // in round 1 the anchor and rolling breakpoint both land on messages[0] and dedup.
+  assert.equal(body.system[0].cache_control, undefined, "system[0] identity block must stay uncached");
+  assert.deepEqual(body.system[body.system.length - 1].cache_control, { type: "ephemeral" });
+  assert.equal(countCacheControl(body.messages[0].content), 1, "coincident anchor/rolling must mark the block once");
+  assert.equal(totalCacheBreakpoints(body), 2);
 });
 
 test("antigravity review requests do not carry cache_control", async () => {

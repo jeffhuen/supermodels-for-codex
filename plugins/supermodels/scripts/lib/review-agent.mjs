@@ -139,6 +139,16 @@ export async function runReviewAgent(options = {}) {
       });
     }
 
+    // The prompt (messages[0]) plus the optional preloaded-evidence turn
+    // (messages[1]) form the stable prefix that never changes across rounds:
+    // length 1 with no preload, 2 with preload. Anchor a cache breakpoint at its
+    // end (index stablePrefixEnd - 1) so a round that appends many content blocks
+    // cannot push the evidence prefix outside the API's lookback window from the
+    // rolling breakpoint and force it to be reprocessed.
+    // Always in-range (1 without preload, 2 with) and `messages` only grows, so
+    // the helper's stable anchor never falls off the end of the array.
+    const stablePrefixEnd = messages.length;
+
     for (let round = 1; round <= maxRounds; round += 1) {
       throwIfCancelled(controller);
       const satisfied = inspectionSatisfied(inspection, minInspection);
@@ -189,7 +199,7 @@ export async function runReviewAgent(options = {}) {
         ...(forcedToolChoice ? { tool_choice: forcedToolChoice } : {}),
       };
       if (providerCacheControl(provider)) {
-        requestBody = withReviewCacheBreakpoints(requestBody);
+        requestBody = withReviewCacheBreakpoints(requestBody, stablePrefixEnd);
       }
       const response = await transport.messages(requestBody, {
         signal: abort.signal,
@@ -560,24 +570,50 @@ function providerCacheControl(provider) {
   return provider === "claude";
 }
 
-// Annotate a cloned request with cache_control breakpoints on the stable prefix
-// (last system block = caches tools+system) and the last block of the latest
-// message turn (rolled per round). Mutates a shallow copy; ≤4 breakpoints.
-function withReviewCacheBreakpoints(request) {
+// Annotate a cloned request with up to three cache_control breakpoints:
+//   1. the last system block (caches the tools + system prefix; the identity
+//      block system[0] stays uncached),
+//   2. the END of the stable initial prefix (index stablePrefixEnd - 1: the
+//      preloaded-evidence turn, or the prompt when nothing was preloaded), so the
+//      evidence prefix keeps a fixed breakpoint that survives long rounds, and
+//   3. the last block of the latest array-content message (rolled per round).
+// Breakpoints 2 and 3 dedup when they land on the same message (e.g. round 1
+// before any tool rounds). Copy-not-mutate: the caller's stored `messages` are
+// never mutated. At most 3 breakpoints, well within the API's budget of 4.
+function withReviewCacheBreakpoints(request, stablePrefixEnd = 1) {
   const system = Array.isArray(request.system) ? request.system.map((b) => ({ ...b })) : request.system;
   if (Array.isArray(system) && system.length) {
     system[system.length - 1] = { ...system[system.length - 1], cache_control: { type: "ephemeral" } };
   }
   const messages = (request.messages ?? []).map((m) => ({ ...m }));
-  // roll one breakpoint onto the last content block of the last message
+
+  const hasArrayContent = (index) =>
+    index >= 0 && index < messages.length
+    && Array.isArray(messages[index].content) && messages[index].content.length > 0;
+
+  // Rolling breakpoint: the last message with array content.
+  let rollingIndex = -1;
   for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const content = messages[i].content;
-    if (Array.isArray(content) && content.length) {
-      const copy = content.map((b) => ({ ...b }));
-      copy[copy.length - 1] = { ...copy[copy.length - 1], cache_control: { type: "ephemeral" } };
-      messages[i] = { ...messages[i], content: copy };
+    if (hasArrayContent(i)) {
+      rollingIndex = i;
       break;
     }
+  }
+
+  // Stable evidence anchor: the last block of the message ending the initial prefix.
+  const stableIndex = stablePrefixEnd - 1;
+  const targets = new Set();
+  if (hasArrayContent(stableIndex)) {
+    targets.add(stableIndex);
+  }
+  if (rollingIndex >= 0) {
+    targets.add(rollingIndex);
+  }
+
+  for (const index of targets) {
+    const copy = messages[index].content.map((b) => ({ ...b }));
+    copy[copy.length - 1] = { ...copy[copy.length - 1], cache_control: { type: "ephemeral" } };
+    messages[index] = { ...messages[index], content: copy };
   }
   return { ...request, system, messages };
 }
