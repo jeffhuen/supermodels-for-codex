@@ -29,6 +29,19 @@ test("truncateObject flags diffTruncated only when the diff itself is shortened,
   assert.ok(overByDiff.diff.length < bigDiff.length, "the diff was actually shortened");
 });
 
+test("truncateObject preserves the full diff when dropping snippets alone brings the payload under the cap", () => {
+  const cap = 4000;
+  const diff = `diff --git a/x b/x\n@@ -1,120 +1,120 @@\n${"+a changed line of code\n".repeat(120)}`;
+  // The diff is over 55% of the cap (where the old order truncated it) but under
+  // the full cap, so after dropping the oversized snippet it fits whole.
+  assert.ok(Buffer.byteLength(diff, "utf8") > cap * 0.55, "diff exceeds the old 55% pre-trim bound");
+  assert.ok(Buffer.byteLength(diff, "utf8") < cap, "but the full diff fits under the cap");
+  const result = truncateObject({ diff, fileSnippets: [{ path: "big", content: "S".repeat(9000) }] }, cap);
+  assert.equal(result.truncated, true, "context is truncated (the snippet overflowed)");
+  assert.equal(result.diffTruncated, false, "the full diff fits after dropping snippets, so it is not truncated");
+  assert.equal(result.diff, diff, "the full diff is preserved");
+});
+
 test("read_file returns numbered bounded slices inside workspace", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-tools-"));
   try {

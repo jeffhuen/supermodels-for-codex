@@ -532,9 +532,11 @@ export function truncateObject(value, maxBytes) {
     ...value,
     truncated: true,
   };
-  if (typeof out.diff === "string") {
-    out.diff = truncateText(out.diff, Math.floor(maxBytes * 0.55));
-  }
+  // Reclaim space from file snippets BEFORE touching the diff. The diff is the
+  // coverage-critical payload (the high-risk hunk ledger is built from it), so
+  // keep it whole as long as it fits and truncate it only as a last resort —
+  // otherwise a complete diff that would fit after dropping snippets gets cut,
+  // needlessly disabling coverage enforcement.
   if (Array.isArray(out.fileSnippets) && out.fileSnippets.length) {
     const snippetBudget = Math.max(1000, Math.floor((maxBytes * 0.35) / out.fileSnippets.length));
     out.fileSnippets = out.fileSnippets.map((snippet) => ({
@@ -546,16 +548,18 @@ export function truncateObject(value, maxBytes) {
   while (Buffer.byteLength(JSON.stringify(out), "utf8") > maxBytes && out.fileSnippets?.length) {
     out.fileSnippets.pop();
   }
+  // Only if the diff alone still exceeds the cap do we trim it — first to a
+  // generous bound, then harder if it still does not fit.
+  if (Buffer.byteLength(JSON.stringify(out), "utf8") > maxBytes && typeof out.diff === "string") {
+    out.diff = truncateText(out.diff, Math.floor(maxBytes * 0.55));
+  }
   if (Buffer.byteLength(JSON.stringify(out), "utf8") > maxBytes && typeof out.diff === "string") {
     out.diff = truncateText(out.diff, Math.floor(maxBytes * 0.2));
   }
-  // Track whether the DIFF itself was shortened, separately from the
-  // context-level `truncated` flag. Oversized file snippets can set `truncated`
-  // while the diff stays byte-identical, and high-risk hunk coverage enforcement
-  // must key off the diff (the ledger is built from it), not the whole context.
-  out.diffTruncated = typeof out.diff === "string"
-    && typeof value.diff === "string"
-    && Buffer.byteLength(out.diff, "utf8") < Buffer.byteLength(value.diff, "utf8");
+  // The diff was truncated iff its content actually changed. Compare content,
+  // not byte length: for tiny caps the appended truncation marker can make the
+  // result longer than a very short original.
+  out.diffTruncated = out.diff !== value.diff;
   return out;
 }
 

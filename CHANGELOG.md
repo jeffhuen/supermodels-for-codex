@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.5
+
+### Fixed
+
+- Review-tool context truncation now trims and drops file snippets before truncating the diff, so a complete diff that fits once snippets are reclaimed is kept whole. Previously the diff was cut first, which unnecessarily disabled high-risk hunk coverage enforcement (and showed the coverage-degraded banner) even when the full diff would have fit under the cap. Diff truncation is also now detected by exact content comparison rather than byte length, fixing a false negative possible under very small custom caps.
+
 ## v0.2.4
 
 ### Fixed

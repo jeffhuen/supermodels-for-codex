@@ -1,6 +1,6 @@
 {
   "name": "supermodels",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Call Claude Code, Google Antigravity, and Grok Build from Codex for independent code review and task delegation.",
   "author": {
     "name": "Jeff Huen",

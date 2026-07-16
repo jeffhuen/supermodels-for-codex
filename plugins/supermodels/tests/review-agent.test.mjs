@@ -1133,6 +1133,69 @@ test("runReviewAgent surfaces a verification gap when a truncated diff disables 
   );
 });
 
+test("runReviewAgent keeps coverage enabled (no coverage-disabled gap) when only context is truncated but the diff is complete", async () => {
+  const targetPath = "plugins/supermodels/scripts/lib/large-diff.mjs";
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", { path: targetPath, start_line: 1, end_line: 1 });
+      }
+      if (this.calls === 3) {
+        return responseWithTool("search_1", "search", { query: "complete diff" });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "needs-attention",
+        summary: "Finding while the diff is complete despite snippet truncation.",
+        findings: [{
+          severity: "medium",
+          title: "Concrete issue on an inspected line",
+          evidence: "The cited line has current readable content.",
+          impact: "Verifies coverage stays enabled when only context is truncated.",
+          recommendation: "Keep the finding; no coverage gap.",
+          file: targetPath,
+          line_start: 1,
+          line_end: 1,
+          confidence: "medium",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+  const fakeTools = reviewToolsWithDeletedDiff({
+    targetPath,
+    missingLine: 700,
+    truncated: true,       // context-level truncation (e.g. oversized snippets)
+    diffTruncated: false,  // ...but the diff itself is complete
+    diff: [
+      `diff --git a/${targetPath} b/${targetPath}`,
+      `--- a/${targetPath}`,
+      `+++ b/${targetPath}`,
+      "@@ -1,1 +1,1 @@",
+      "-early line",
+      "+early replacement",
+    ].join("\n"),
+  });
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    maxRounds: 4,
+  });
+
+  assert.equal(result.verdict, "needs-attention");
+  assert.ok(
+    !result.verification_gaps.some((gap) => /coverage enforcement was disabled/i.test(gap)),
+    "no coverage-disabled gap when the diff is complete (only context/snippets truncated)",
+  );
+});
+
 test("runReviewAgent qualifies a clean verdict when a truncated diff disables coverage", async () => {
   const targetPath = "plugins/supermodels/scripts/lib/large-diff.mjs";
   const fakeTransport = {
@@ -3008,12 +3071,18 @@ function reviewToolsForDiffAndFiles() {
   };
 }
 
-function reviewToolsWithDeletedDiff({ targetPath, missingLine, diff, truncated = false }) {
+function reviewToolsWithDeletedDiff({ targetPath, missingLine, diff, truncated = false, diffTruncated }) {
   return {
     schemas: [],
     async execute(name, input = {}) {
       if (name === "get_diff") {
-        return { ok: true, diffSummary: "1 file changed", diff, truncated };
+        return {
+          ok: true,
+          diffSummary: "1 file changed",
+          diff,
+          truncated,
+          ...(diffTruncated !== undefined ? { diffTruncated } : {}),
+        };
       }
       if (name === "read_file") {
         const start = Number(input.start_line ?? 1);
