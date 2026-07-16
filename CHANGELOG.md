@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.6
+
+### Fixed
+
+- The review-tool payload cap is now a genuine hard cap across every payload component, enforced without over-dropping. Previously `truncateObject` never bounded the changed-files list, so a repository with many untracked or changed files could return a payload over the byte cap and unnecessarily disable high-risk hunk coverage enforcement (and show the coverage-degraded banner) even when the diff itself fit. The changed-files list is now bounded in a single O(n) pass, and reclamation is ordered so the coverage-critical diff is sized first and the changed-files list is re-packed into whatever budget the diff leaves — so a very large diff no longer drops the entire changed-files list (it previously cleared the list, then trimmed the diff, and never restored the entries into the freed space). The `list_changed_files` tool shares one hard-cap packer that fills both its structured array and its text rendering from the same retained set, using the full budget instead of a fixed fraction, so it can neither exceed the cap nor drop entries that would have fit.
+
 ## v0.2.5
 
 ### Fixed

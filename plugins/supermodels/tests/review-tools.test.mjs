@@ -42,6 +42,66 @@ test("truncateObject preserves the full diff when dropping snippets alone brings
   assert.equal(result.diff, diff, "the full diff is preserved");
 });
 
+test("truncateObject bounds the changedFiles array and keeps the payload under the cap while preserving a fitting diff", () => {
+  const cap = 8000;
+  const diff = `diff --git a/x b/x\n@@ -1,120 +1,120 @@\n${"+a changed line of code\n".repeat(120)}`;
+  const changedFiles = Array.from({ length: 2000 }, (_, i) => ({ status: "??", path: `untracked/file-${i}.txt` }));
+  const result = truncateObject({ ok: true, diff, changedFiles, fileSnippets: [] }, cap);
+  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= cap, "serialized payload stays within the cap");
+  assert.ok(result.changedFiles.length < 2000, "excess changedFiles entries are dropped");
+  assert.ok(result.changedFilesOmitted > 0, "the omitted count is recorded");
+  assert.equal(result.diffTruncated, false, "the fitting diff is not truncated");
+  assert.equal(result.diff, diff, "the full diff is preserved (coverage stays enabled)");
+  // No over-drop: the kept set fills the budget — appending several more entries
+  // would exceed the cap, proving it did not stop at a small fraction.
+  const padded = {
+    ...result,
+    changedFiles: [
+      ...result.changedFiles,
+      ...Array.from({ length: 5 }, (_, i) => ({ status: "??", path: `untracked/extra-${i}.txt` })),
+    ],
+  };
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(padded), "utf8") > cap,
+    "appending more entries exceeds the cap — the budget was filled (no over-drop)",
+  );
+});
+
+test("truncateObject retains changed files after trimming an oversized diff instead of dropping them all", () => {
+  const cap = 6000;
+  // The diff ALONE exceeds the cap, so it must be trimmed. The old drop-then-trim
+  // order cleared the entire changed-files list first (packing it against the full
+  // diff) and never restored the entries into the space the diff-trim then freed.
+  const diff = "D".repeat(9000);
+  const changedFiles = Array.from({ length: 40 }, (_, i) => ({ status: "M", path: `src/mod-${i}.ts` }));
+  const result = truncateObject({ ok: true, diff, changedFiles, fileSnippets: [] }, cap);
+  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= cap, "serialized payload stays within the hard cap");
+  assert.equal(result.diffTruncated, true, "the oversized diff was trimmed");
+  assert.ok(result.changedFiles.length > 0, "some changed files survive the diff trim (not all dropped)");
+  assert.equal(
+    result.changedFiles.length + (result.changedFilesOmitted ?? 0),
+    40,
+    "kept + omitted accounts for every changed file",
+  );
+});
+
+test("truncateObject enforces the hard cap when only the diff must be trimmed, and detects it by content", () => {
+  const cap = 400;
+  const diff = "x".repeat(2000); // far larger than the cap, no snippets/changedFiles to reclaim
+  const result = truncateObject({ diff }, cap);
+  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= cap, "serialized payload stays within the hard cap");
+  assert.equal(result.diffTruncated, true, "the trimmed diff is flagged (content comparison)");
+  assert.notEqual(result.diff, diff, "the diff content was changed");
+});
+
+test("truncateObject never loops forever and stays hard-capped even for a pathological tiny cap", () => {
+  // Cap below the truncation-marker size: the diff cannot shrink to fit, so it is
+  // dropped to empty rather than looping forever; the loop terminates.
+  const result = truncateObject({ diff: "x".repeat(50) }, 8);
+  assert.equal(result.diffTruncated, true, "the diff was truncated/dropped");
+  assert.equal(result.diff, "", "an unfittable diff is dropped to empty");
+});
+
 test("read_file returns numbered bounded slices inside workspace", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-tools-"));
   try {
@@ -226,6 +286,88 @@ test("get_review_context uses base refs for committed changes on clean working t
       return snippet.path === "src/app.mjs" && snippet.content.includes("1: export const value = 2;");
     }));
     assert.match(changed.output, /M\s+src\/app\.mjs/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("list_changed_files stays under maxToolBytes with thousands of untracked files and keeps output consistent with the kept array", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-list-cap-"));
+  try {
+    await runGit(workspace, ["init"]);
+    await runGit(workspace, ["config", "user.email", "test@example.com"]);
+    await runGit(workspace, ["config", "user.name", "Test User"]);
+    // Untracked files must live at the repo root: `git status --short` collapses
+    // a wholly-untracked subdirectory into a single line, which would not exercise
+    // the many-file bounding path.
+    const count = 600;
+    await Promise.all(
+      Array.from({ length: count }, (_, i) =>
+        writeFile(
+          path.join(workspace, `generated-source-file-${String(i).padStart(4, "0")}.txt`),
+          "x\n",
+          "utf8",
+        ),
+      ),
+    );
+
+    const maxToolBytes = 8000;
+    const tools = createReviewTools({ workspaceRoot: workspace, maxToolBytes });
+    const changed = await tools.execute("list_changed_files");
+
+    // Hard cap: the serialized payload never exceeds the byte budget, even though
+    // the full file list is many times larger than the cap.
+    const size = Buffer.byteLength(JSON.stringify(changed), "utf8");
+    assert(size <= maxToolBytes, `payload ${size} exceeded cap ${maxToolBytes}`);
+
+    // Truncation is signalled and the omitted count accounts for every dropped file.
+    assert.equal(changed.truncated, true);
+    assert(changed.changedFilesOmitted > 0);
+    assert(changed.changedFiles.length > 0);
+    assert.equal(changed.changedFiles.length + changed.changedFilesOmitted, count);
+
+    // output/structured consistency is exact: the two views are packed together,
+    // so `output` is precisely the retained array rendered line-for-line — no
+    // partial lines, no marker, no entry in one view but not the other.
+    const expectedOutput = changed.changedFiles
+      .map((file) => `${file.status.padEnd(2)} ${file.path}`)
+      .join("\n");
+    assert.equal(changed.output, expectedOutput);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("list_changed_files does not over-drop: a file list that fits under the cap is kept whole", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-list-nodrop-"));
+  try {
+    await runGit(workspace, ["init"]);
+    await runGit(workspace, ["config", "user.email", "test@example.com"]);
+    await runGit(workspace, ["config", "user.name", "Test User"]);
+    const count = 40;
+    await Promise.all(
+      Array.from({ length: count }, (_, i) =>
+        writeFile(
+          path.join(workspace, `generated-source-file-${String(i).padStart(4, "0")}.txt`),
+          "x\n",
+          "utf8",
+        ),
+      ),
+    );
+
+    // The structured array alone exceeds 45% of this cap (where the old fixed
+    // split would have dropped entries), but the combined payload fits whole.
+    const maxToolBytes = 4000;
+    const tools = createReviewTools({ workspaceRoot: workspace, maxToolBytes });
+    const changed = await tools.execute("list_changed_files");
+
+    const arrayBytes = Buffer.byteLength(JSON.stringify(changed.changedFiles), "utf8");
+    assert.ok(arrayBytes > maxToolBytes * 0.45, "the array alone exceeds the old 45% array budget");
+    const size = Buffer.byteLength(JSON.stringify(changed), "utf8");
+    assert.ok(size <= maxToolBytes, `payload ${size} exceeded cap ${maxToolBytes}`);
+    assert.equal(changed.changedFiles.length, count, "every file that fits under the cap is retained");
+    assert.equal(changed.truncated, false, "nothing was truncated");
+    assert.equal(changed.changedFilesOmitted, undefined, "no omission is reported");
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

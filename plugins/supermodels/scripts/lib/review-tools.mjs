@@ -254,17 +254,60 @@ async function listFiles(workspaceRoot, input, maxBytes, controller) {
 async function listChangedFiles(workspaceRoot, options, maxBytes, controller) {
   throwIfCancelled(controller);
   const files = await changedFilesForReview(workspaceRoot, options, controller);
-  return {
+  // Pack files into the hard cap accounting for BOTH redundant views at once —
+  // each retained file costs a structured `changedFiles` entry AND a text
+  // `output` line — so the two always describe the same retained set and the
+  // whole budget is used (no fixed fraction that over-drops entries which would
+  // have fit). Per-file estimates are deliberately conservative (they over-count
+  // separators and re-count the quoted line), so the assembled payload lands
+  // under the cap on the first try in all but pathologically escaped paths.
+  const renderLine = (file) => `${file.status.padEnd(2)} ${file.path}`;
+  const envelope =
+    Buffer.byteLength(
+      JSON.stringify({
+        ok: true,
+        changedFiles: [],
+        changedFilesOmitted: files.length,
+        output: "",
+        truncated: true,
+      }),
+      "utf8",
+    ) + 4;
+  let used = envelope;
+  const kept = [];
+  const lines = [];
+  for (const file of files) {
+    const line = renderLine(file);
+    const cost =
+      Buffer.byteLength(JSON.stringify(file), "utf8") + 1 +
+      Buffer.byteLength(JSON.stringify(line), "utf8") + 1;
+    if (used + cost > maxBytes) {
+      break;
+    }
+    kept.push(file);
+    lines.push(line);
+    used += cost;
+  }
+  let omitted = files.length - kept.length;
+  const build = () => ({
     ok: true,
-    changedFiles: files,
-    output: truncateText(
-      files.length
-        ? files.map((file) => `${file.status.padEnd(2)} ${file.path}`).join("\n")
-        : "(no changed files)",
-      maxBytes,
-    ),
-    truncated: Buffer.byteLength(files.map((file) => `${file.status} ${file.path}`).join("\n"), "utf8") > maxBytes,
-  };
+    changedFiles: kept,
+    ...(omitted > 0 ? { changedFilesOmitted: omitted } : {}),
+    output: lines.length ? lines.join("\n") : "(no changed files)",
+    truncated: omitted > 0,
+  });
+  let result = build();
+  // Final hard-cap guard: if variable-width JSON escaping still nudged the
+  // serialized payload over the cap, drop retained entries (from both views
+  // together, so they stay consistent) until it fits. Rare and short given the
+  // conservative estimate above.
+  while (kept.length > 0 && Buffer.byteLength(JSON.stringify(result), "utf8") > maxBytes) {
+    kept.pop();
+    lines.pop();
+    omitted = files.length - kept.length;
+    result = build();
+  }
+  return result;
 }
 
 async function changedFilesForReview(workspaceRoot, options = {}, controller) {
@@ -531,12 +574,20 @@ export function truncateObject(value, maxBytes) {
   const out = {
     ...value,
     truncated: true,
+    diffTruncated: false,
   };
-  // Reclaim space from file snippets BEFORE touching the diff. The diff is the
-  // coverage-critical payload (the high-risk hunk ledger is built from it), so
-  // keep it whole as long as it fits and truncate it only as a last resort —
-  // otherwise a complete diff that would fit after dropping snippets gets cut,
-  // needlessly disabling coverage enforcement.
+  // Reclaim against the HARD cap. The bookkeeping fields are all present in `out`
+  // at their largest form while we size it — `truncated` is constant, and both
+  // `diffTruncated` (false→true) and `changedFilesOmitted` (reserved at its
+  // maximum below) only ever shrink — so this already guarantees the final
+  // payload fits, without over-dropping to a soft budget.
+  const overCap = () => Buffer.byteLength(JSON.stringify(out), "utf8") > maxBytes;
+
+  // Reclaim space in priority order, keeping the diff whole for as long as it
+  // fits — it is the coverage-critical payload (the high-risk hunk ledger is
+  // built from it), so it is trimmed only as a last resort.
+  //
+  // 1. Trim, then drop, file snippets.
   if (Array.isArray(out.fileSnippets) && out.fileSnippets.length) {
     const snippetBudget = Math.max(1000, Math.floor((maxBytes * 0.35) / out.fileSnippets.length));
     out.fileSnippets = out.fileSnippets.map((snippet) => ({
@@ -545,21 +596,68 @@ export function truncateObject(value, maxBytes) {
       truncated: snippet.truncated || Buffer.byteLength(snippet.content ?? "", "utf8") > snippetBudget,
     }));
   }
-  while (Buffer.byteLength(JSON.stringify(out), "utf8") > maxBytes && out.fileSnippets?.length) {
+  while (overCap() && out.fileSnippets?.length) {
     out.fileSnippets.pop();
   }
-  // Only if the diff alone still exceeds the cap do we trim it — first to a
-  // generous bound, then harder if it still does not fit.
-  if (Buffer.byteLength(JSON.stringify(out), "utf8") > maxBytes && typeof out.diff === "string") {
-    out.diff = truncateText(out.diff, Math.floor(maxBytes * 0.55));
-  }
-  if (Buffer.byteLength(JSON.stringify(out), "utf8") > maxBytes && typeof out.diff === "string") {
-    out.diff = truncateText(out.diff, Math.floor(maxBytes * 0.2));
+  // 2 & 3. The diff is coverage-critical (the high-risk hunk ledger is built
+  //    from it), so it outranks the changed-files list. Clear the list, fix the
+  //    diff's final size against an EMPTY list (keeping it whole while it fits,
+  //    trimming only if the diff ALONE overflows), then re-pack the list into
+  //    whatever budget the diff leaves. This never drops files for room the
+  //    diff-trim would go on to free — the over-drop the old drop-then-trim order
+  //    caused on very large diffs.
+  if (overCap()) {
+    const allChanged = Array.isArray(out.changedFiles) ? out.changedFiles : null;
+    const totalChanged = allChanged ? allChanged.length : 0;
+    if (allChanged) {
+      out.changedFiles = [];
+      out.changedFilesOmitted = totalChanged; // reserve the widest bookkeeping form
+    }
+    // Trim, then (last resort) empty, the diff — only while it still overflows
+    // with the list cleared, so a diff that already fits stays whole.
+    while (overCap() && typeof out.diff === "string" && out.diff.length) {
+      const before = Buffer.byteLength(out.diff, "utf8");
+      out.diff = truncateText(out.diff, Math.floor(before * 0.8));
+      // truncateText appends a marker, so below roughly its own length the diff
+      // can no longer shrink; stop rather than loop forever on a tiny cap.
+      if (Buffer.byteLength(out.diff, "utf8") >= before) {
+        break;
+      }
+    }
+    // Pathological caps below the truncation-marker size: if the diff still
+    // overflows the hard cap and can no longer shrink, drop its content entirely
+    // so it is not the source of the overflow. (A maxBytes below the minimal
+    // serialized object size remains best-effort.)
+    if (overCap() && typeof out.diff === "string" && out.diff.length) {
+      out.diff = "";
+    }
+    // Re-pack the changed-files list into the budget the final diff leaves.
+    // Estimate each entry's serialized cost in a single O(n) pass rather than
+    // re-serializing the whole object per drop (O(n^2) for thousands of paths).
+    if (allChanged) {
+      let used = Buffer.byteLength(JSON.stringify(out), "utf8");
+      const kept = [];
+      for (const entry of allChanged) {
+        const cost = Buffer.byteLength(JSON.stringify(entry), "utf8") + 1;
+        if (used + cost > maxBytes) {
+          break;
+        }
+        kept.push(entry);
+        used += cost;
+      }
+      out.changedFiles = kept;
+      // Only signal omission when entries were actually dropped.
+      if (kept.length < totalChanged) {
+        out.changedFilesOmitted = totalChanged - kept.length;
+      } else {
+        delete out.changedFilesOmitted;
+      }
+    }
   }
   // The diff was truncated iff its content actually changed. Compare content,
   // not byte length: for tiny caps the appended truncation marker can make the
   // result longer than a very short original.
-  out.diffTruncated = out.diff !== value.diff;
+  out.diffTruncated = typeof value.diff === "string" && out.diff !== value.diff;
   return out;
 }
 
