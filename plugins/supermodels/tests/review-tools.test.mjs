@@ -7,7 +7,13 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { collectGitContext } from "../scripts/lib/git.mjs";
-import { createReviewTools, truncateObject } from "../scripts/lib/review-tools.mjs";
+import {
+  COVERAGE_LEDGER_RESERVE,
+  boundReadFileResult,
+  createReviewTools,
+  lastNumberedLine,
+  truncateObject,
+} from "../scripts/lib/review-tools.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -67,22 +73,91 @@ test("truncateObject bounds the changedFiles array and keeps the payload under t
   );
 });
 
-test("truncateObject retains changed files after trimming an oversized diff instead of dropping them all", () => {
+test("truncateObject gives the coverage-critical diff strict priority over the changed-files list", () => {
   const cap = 6000;
-  // The diff ALONE exceeds the cap, so it must be trimmed. The old drop-then-trim
-  // order cleared the entire changed-files list first (packing it against the full
-  // diff) and never restored the entries into the space the diff-trim then freed.
+  // The diff ALONE exceeds the cap, so it must be trimmed. It has strict priority:
+  // it fills the budget and the lower-priority file list yields entirely (no fixed
+  // reserve carving bytes out of the diff), with the omitted count still reported.
   const diff = "D".repeat(9000);
   const changedFiles = Array.from({ length: 40 }, (_, i) => ({ status: "M", path: `src/mod-${i}.ts` }));
   const result = truncateObject({ ok: true, diff, changedFiles, fileSnippets: [] }, cap);
   assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= cap, "serialized payload stays within the hard cap");
   assert.equal(result.diffTruncated, true, "the oversized diff was trimmed");
-  assert.ok(result.changedFiles.length > 0, "some changed files survive the diff trim (not all dropped)");
-  assert.equal(
-    result.changedFiles.length + (result.changedFilesOmitted ?? 0),
-    40,
-    "kept + omitted accounts for every changed file",
-  );
+  assert.ok(Buffer.byteLength(result.diff, "utf8") > cap * 0.8, "the diff fills the budget (strict priority)");
+  assert.equal(result.changedFiles.length, 0, "the lower-priority file list yields to the diff");
+  assert.equal(result.changedFilesOmitted, 40, "every omitted file is still counted");
+});
+
+test("truncateObject sheds a few files, not the diff, when a payload is only a little over", () => {
+  // A small overflow should drop a handful of changed-file entries and leave the
+  // coverage-critical diff untouched — the old 15% reserve trimmed ~18 KB of diff
+  // to keep files even when dropping a few entries would have sufficed.
+  const cap = 20_000;
+  const diff = "D".repeat(10_000);
+  const changedFiles = Array.from({ length: 260 }, (_, i) => ({ status: "M", path: `src/module-${i}.ts` }));
+  const full = { ok: true, diff, changedFiles, fileSnippets: [] };
+  const overBy = Buffer.byteLength(JSON.stringify(full), "utf8") - cap;
+  assert.ok(overBy > 0, "the payload is over the cap");
+  const result = truncateObject(full, cap);
+  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= cap, "serialized payload is within the cap");
+  assert.equal(result.diff, diff, "the diff is untouched (only the file list was reduced)");
+  assert.equal(result.diffTruncated, false, "the diff was not trimmed");
+  assert.ok(result.changedFilesOmitted > 0, "some files were dropped to fit");
+  assert.ok(result.changedFiles.length >= 260 * 0.9, `kept only ${result.changedFiles.length}/260 — dropped far more than the overflow required`);
+});
+
+test("lastNumberedLine returns the last visible line number, or NaN when there is none", () => {
+  assert.equal(lastNumberedLine("10: a\n11: b\n12: c"), 12);
+  assert.equal(lastNumberedLine("10: a\n11: partial"), 11);
+  assert.equal(lastNumberedLine(""), Number.NaN);
+  assert.ok(Number.isNaN(lastNumberedLine("no numbers here")));
+});
+
+test("boundReadFileResult drops whole content lines and keeps end_line consistent with what remains", () => {
+  const lines = Array.from({ length: 200 }, (_, i) => `${i + 1}: const value = ${i};`);
+  const result = {
+    ok: true,
+    path: "src/big.js",
+    start_line: 1,
+    end_line: 200,
+    truncated: false,
+    content: lines.join("\n"),
+  };
+  const cap = Math.floor(Buffer.byteLength(JSON.stringify(result), "utf8") * 0.5);
+  const bounded = boundReadFileResult(result, cap);
+
+  assert.ok(Buffer.byteLength(JSON.stringify(bounded), "utf8") <= cap, "serialized result is within the cap");
+  assert.equal(bounded.truncated, true, "truncation is flagged");
+  assert.ok(bounded.end_line < 200, "end_line was reduced from the original range");
+  // end_line equals the last line ACTUALLY present — no stale range past the content.
+  const contentLines = bounded.content.split("\n");
+  const lastVisible = Number(contentLines[contentLines.length - 1].split(":")[0]);
+  assert.equal(bounded.end_line, lastVisible, "end_line matches the last visible content line");
+  // Whole lines only — the last line is complete, never a mid-line byte cut.
+  assert.match(contentLines[contentLines.length - 1], /^\d+: const value = \d+;$/);
+});
+
+test("read_file reserves ledger headroom so result plus a max coverage ledger stays within the cap", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-readfile-reserve-"));
+  try {
+    // A file far larger than the cap: read_file must bound its serialized result to
+    // maxToolBytes MINUS the ledger reserve, leaving room for the coverage_ledger
+    // the agent attaches afterward.
+    const big = Array.from({ length: 5000 }, (_, i) => `const line${i} = "value ${i}";`).join("\n");
+    await writeFile(path.join(workspace, "big.js"), `${big}\n`, "utf8");
+
+    const maxToolBytes = 40_000;
+    const tools = createReviewTools({ workspaceRoot: workspace, maxToolBytes, maxFileBytes: 500_000 });
+    const result = await tools.execute("read_file", { path: "big.js", start_line: 1, end_line: 5000 });
+
+    const size = Buffer.byteLength(JSON.stringify(result), "utf8");
+    assert.ok(size <= maxToolBytes - COVERAGE_LEDGER_RESERVE, `result ${size} left no room for the ledger reserve`);
+    // end_line reflects the truncated content, not the requested 5000.
+    assert.equal(result.end_line, lastNumberedLine(result.content), "end_line matches visible content");
+    assert.ok(result.end_line < 5000, "end_line was reduced to the visible range");
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
 });
 
 test("truncateObject enforces the hard cap when only the diff must be trimmed, and detects it by content", () => {
