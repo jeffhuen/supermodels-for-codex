@@ -22,36 +22,41 @@ export function createReviewTools(options = {}) {
     async execute(name, input = {}, executionOptions = {}) {
       const activeController = executionOptions.controller ?? controller;
       throwIfCancelled(activeController);
-      if (name === "get_diff") {
-        const context = await collectGitContext({
-          workspaceRoot,
-          scope: options.scope ?? "working-tree",
-          baseRef: options.baseRef ?? "",
-        });
-        throwIfCancelled(activeController);
-        return truncateObject({
-          ok: true,
-          workspaceRoot,
-          diffSummary: context.diffSummary,
-          diff: context.diff,
-        }, maxToolBytes);
-      }
-      if (name === "get_review_context") {
-        return await getReviewContext(workspaceRoot, options, maxToolBytes, activeController);
-      }
-      if (name === "list_changed_files") {
-        return await listChangedFiles(workspaceRoot, options, maxToolBytes, activeController);
-      }
-      if (name === "list_files") {
-        return await listFiles(workspaceRoot, input, maxToolBytes, activeController);
-      }
-      if (name === "search") {
-        return await search(workspaceRoot, input, maxToolBytes, activeController);
-      }
-      if (name === "read_file") {
-        return await readWorkspaceFile(workspaceRoot, input, maxFileBytes, activeController);
-      }
-      throw new Error(`Unknown review tool: ${name}`);
+      const compute = async () => {
+        if (name === "get_diff") {
+          const context = await collectGitContext({
+            workspaceRoot,
+            scope: options.scope ?? "working-tree",
+            baseRef: options.baseRef ?? "",
+          });
+          throwIfCancelled(activeController);
+          return truncateObject({
+            ok: true,
+            workspaceRoot,
+            diffSummary: context.diffSummary,
+            diff: context.diff,
+          }, maxToolBytes);
+        }
+        if (name === "get_review_context") {
+          return await getReviewContext(workspaceRoot, options, maxToolBytes, activeController);
+        }
+        if (name === "list_changed_files") {
+          return await listChangedFiles(workspaceRoot, options, maxToolBytes, activeController);
+        }
+        if (name === "list_files") {
+          return await listFiles(workspaceRoot, input, maxToolBytes, activeController);
+        }
+        if (name === "search") {
+          return await search(workspaceRoot, input, maxToolBytes, activeController);
+        }
+        if (name === "read_file") {
+          return await readWorkspaceFile(workspaceRoot, input, maxFileBytes, activeController);
+        }
+        throw new Error(`Unknown review tool: ${name}`);
+      };
+      // Every tool result passes through the one shared budgeter, so no tool can
+      // exceed the serialized cap regardless of its own bounding.
+      return enforceSerializedCap(await compute(), maxToolBytes);
     },
   };
 }
@@ -217,11 +222,14 @@ async function search(workspaceRoot, input, maxBytes, controller) {
   if (result.exitCode > 1) {
     return { ok: false, error: result.stderr || `rg exited ${result.exitCode}` };
   }
+  // Return the full matches; the shared budgeter (enforceSerializedCap) bounds
+  // the serialized payload escaping-aware and flags truncation. Truncating the
+  // raw text here undercounts JSON escaping and overshoots the cap.
   return {
     ok: true,
     query,
-    output: truncateText(result.stdout || "(no matches)", maxBytes),
-    truncated: Buffer.byteLength(result.stdout ?? "", "utf8") > maxBytes,
+    output: result.stdout || "(no matches)",
+    truncated: false,
   };
 }
 
@@ -244,69 +252,36 @@ async function listFiles(workspaceRoot, input, maxBytes, controller) {
     .split(/\r?\n/)
     .filter(Boolean)
     .filter((file) => !query || file.includes(query));
+  // Return the full list; the shared budgeter drops whole trailing entries to fit
+  // the serialized cap — no marker injected as a fake filename, escaping-aware.
   return {
     ok: true,
-    files: truncateText(files.join("\n"), maxBytes).split(/\r?\n/).filter(Boolean),
-    truncated: Buffer.byteLength(files.join("\n"), "utf8") > maxBytes,
+    files,
+    truncated: false,
   };
 }
 
 async function listChangedFiles(workspaceRoot, options, maxBytes, controller) {
   throwIfCancelled(controller);
   const files = await changedFilesForReview(workspaceRoot, options, controller);
-  // Pack files into the hard cap accounting for BOTH redundant views at once —
-  // each retained file costs a structured `changedFiles` entry AND a text
-  // `output` line — so the two always describe the same retained set and the
-  // whole budget is used (no fixed fraction that over-drops entries which would
-  // have fit). Per-file estimates are deliberately conservative (they over-count
-  // separators and re-count the quoted line), so the assembled payload lands
-  // under the cap on the first try in all but pathologically escaped paths.
+  // Keep the largest number of files whose BOTH views — the structured entry and
+  // the text `output` line — fit within the serialized cap. Binary search the
+  // retained count so the two always describe the same set and it reclaims only
+  // what is required: no conservative estimate that stops one entry short of an
+  // exact fit, and no early break that ignores later entries.
   const renderLine = (file) => `${file.status.padEnd(2)} ${file.path}`;
-  const envelope =
-    Buffer.byteLength(
-      JSON.stringify({
-        ok: true,
-        changedFiles: [],
-        changedFilesOmitted: files.length,
-        output: "",
-        truncated: true,
-      }),
-      "utf8",
-    ) + 4;
-  let used = envelope;
-  const kept = [];
-  const lines = [];
-  for (const file of files) {
-    const line = renderLine(file);
-    const cost =
-      Buffer.byteLength(JSON.stringify(file), "utf8") + 1 +
-      Buffer.byteLength(JSON.stringify(line), "utf8") + 1;
-    if (used + cost > maxBytes) {
-      break;
+  const result = { ok: true, changedFiles: [], output: "", truncated: false };
+  const apply = (k) => {
+    result.changedFiles = files.slice(0, k);
+    result.output = k > 0 ? files.slice(0, k).map(renderLine).join("\n") : "(no changed files)";
+    if (k < files.length) {
+      result.changedFilesOmitted = files.length - k;
+    } else {
+      delete result.changedFilesOmitted;
     }
-    kept.push(file);
-    lines.push(line);
-    used += cost;
-  }
-  let omitted = files.length - kept.length;
-  const build = () => ({
-    ok: true,
-    changedFiles: kept,
-    ...(omitted > 0 ? { changedFilesOmitted: omitted } : {}),
-    output: lines.length ? lines.join("\n") : "(no changed files)",
-    truncated: omitted > 0,
-  });
-  let result = build();
-  // Final hard-cap guard: if variable-width JSON escaping still nudged the
-  // serialized payload over the cap, drop retained entries (from both views
-  // together, so they stay consistent) until it fits. Rare and short given the
-  // conservative estimate above.
-  while (kept.length > 0 && Buffer.byteLength(JSON.stringify(result), "utf8") > maxBytes) {
-    kept.pop();
-    lines.pop();
-    omitted = files.length - kept.length;
-    result = build();
-  }
+    result.truncated = k < files.length;
+  };
+  largestFitting(files.length, apply, () => withinCap(result, maxBytes));
   return result;
 }
 
@@ -583,29 +558,45 @@ export function truncateObject(value, maxBytes) {
   // payload fits, without over-dropping to a soft budget.
   const overCap = () => Buffer.byteLength(JSON.stringify(out), "utf8") > maxBytes;
 
-  // Reclaim space in priority order, keeping the diff whole for as long as it
-  // fits — it is the coverage-critical payload (the high-risk hunk ledger is
-  // built from it), so it is trimmed only as a last resort.
+  // Reclaim in priority order, taking only the bytes actually required at each
+  // step (largest-fitting / binary-search trims, never fixed fractions). The diff
+  // is the coverage-critical payload (the high-risk hunk ledger is built from it),
+  // so it is kept whole while it fits and trimmed only as a last resort.
   //
-  // 1. Trim, then drop, file snippets.
-  if (Array.isArray(out.fileSnippets) && out.fileSnippets.length) {
-    const snippetBudget = Math.max(1000, Math.floor((maxBytes * 0.35) / out.fileSnippets.length));
-    out.fileSnippets = out.fileSnippets.map((snippet) => ({
-      ...snippet,
-      content: truncateText(snippet.content ?? "", snippetBudget),
-      truncated: snippet.truncated || Buffer.byteLength(snippet.content ?? "", "utf8") > snippetBudget,
-    }));
+  // 1. File snippets are the lowest-value context. Shrink every snippet's content
+  //    to the LARGEST uniform byte-cap that still fits — so a small overflow trims
+  //    them by only what it needs, not a fixed 35%/n — then drop whole snippets
+  //    only if emptying their content is still not enough.
+  if (overCap() && Array.isArray(out.fileSnippets) && out.fileSnippets.length) {
+    const original = out.fileSnippets;
+    const fullContents = original.map((snippet) => String(snippet.content ?? ""));
+    const origTruncated = original.map((snippet) => Boolean(snippet.truncated));
+    const maxContentBytes = fullContents.reduce(
+      (max, content) => Math.max(max, Buffer.byteLength(content, "utf8")),
+      0,
+    );
+    // Build fresh snippet objects each step (never mutate the caller's context,
+    // which may be reused across the review loop).
+    largestFitting(
+      maxContentBytes,
+      (cap) => {
+        out.fileSnippets = original.map((snippet, i) => ({
+          ...snippet,
+          content: truncateText(fullContents[i], cap),
+          truncated: origTruncated[i] || Buffer.byteLength(fullContents[i], "utf8") > cap,
+        }));
+      },
+      () => !overCap(),
+    );
   }
   while (overCap() && out.fileSnippets?.length) {
-    out.fileSnippets.pop();
+    out.fileSnippets = out.fileSnippets.slice(0, -1);
   }
-  // 2 & 3. The diff is coverage-critical (the high-risk hunk ledger is built
-  //    from it), so it outranks the changed-files list. Clear the list, fix the
-  //    diff's final size against an EMPTY list (keeping it whole while it fits,
-  //    trimming only if the diff ALONE overflows), then re-pack the list into
-  //    whatever budget the diff leaves. This never drops files for room the
-  //    diff-trim would go on to free — the over-drop the old drop-then-trim order
-  //    caused on very large diffs.
+  // 2 & 3. The diff outranks the changed-files list. Clear the list, then — only
+  //    if the diff still overflows on its own — trim it to the largest prefix that
+  //    fits, keeping a slice of the budget for the changed-files list (bounded by
+  //    the list's real size) so a very large diff does not also discard the entire
+  //    list. Finally re-pack the list into whatever budget remains.
   if (overCap()) {
     const allChanged = Array.isArray(out.changedFiles) ? out.changedFiles : null;
     const totalChanged = allChanged ? allChanged.length : 0;
@@ -613,45 +604,30 @@ export function truncateObject(value, maxBytes) {
       out.changedFiles = [];
       out.changedFilesOmitted = totalChanged; // reserve the widest bookkeeping form
     }
-    // Trim, then (last resort) empty, the diff — only while it still overflows
-    // with the list cleared, so a diff that already fits stays whole.
-    while (overCap() && typeof out.diff === "string" && out.diff.length) {
-      const before = Buffer.byteLength(out.diff, "utf8");
-      out.diff = truncateText(out.diff, Math.floor(before * 0.8));
-      // truncateText appends a marker, so below roughly its own length the diff
-      // can no longer shrink; stop rather than loop forever on a tiny cap.
-      if (Buffer.byteLength(out.diff, "utf8") >= before) {
-        break;
-      }
-    }
-    // Pathological caps below the truncation-marker size: if the diff still
-    // overflows the hard cap and can no longer shrink, drop its content entirely
-    // so it is not the source of the overflow. (A maxBytes below the minimal
-    // serialized object size remains best-effort.)
     if (overCap() && typeof out.diff === "string" && out.diff.length) {
-      out.diff = "";
+      // The reserve is the list's real serialized size, capped so a pathological
+      // list can never starve the coverage-critical diff. When there are no/few
+      // changed files the reserve is ~0, so the diff is trimmed by only what the
+      // overflow requires.
+      const listBytes = allChanged ? Buffer.byteLength(JSON.stringify(allChanged), "utf8") : 0;
+      const fileReserve = Math.min(listBytes, Math.floor(maxBytes * 0.15));
+      fitFieldToBudget(out, "diff", Math.max(0, maxBytes - fileReserve));
     }
-    // Re-pack the changed-files list into the budget the final diff leaves.
-    // Estimate each entry's serialized cost in a single O(n) pass rather than
-    // re-serializing the whole object per drop (O(n^2) for thousands of paths).
     if (allChanged) {
-      let used = Buffer.byteLength(JSON.stringify(out), "utf8");
-      const kept = [];
-      for (const entry of allChanged) {
-        const cost = Buffer.byteLength(JSON.stringify(entry), "utf8") + 1;
-        if (used + cost > maxBytes) {
-          break;
-        }
-        kept.push(entry);
-        used += cost;
-      }
-      out.changedFiles = kept;
-      // Only signal omission when entries were actually dropped.
-      if (kept.length < totalChanged) {
-        out.changedFilesOmitted = totalChanged - kept.length;
-      } else {
-        delete out.changedFilesOmitted;
-      }
+      // Binary search the largest count that fits — exact, so it neither over-drops
+      // on a conservative estimate nor stops short of the cap.
+      largestFitting(
+        totalChanged,
+        (k) => {
+          out.changedFiles = allChanged.slice(0, k);
+          if (k < totalChanged) {
+            out.changedFilesOmitted = totalChanged - k;
+          } else {
+            delete out.changedFilesOmitted;
+          }
+        },
+        () => !overCap(),
+      );
     }
   }
   // The diff was truncated iff its content actually changed. Compare content,
@@ -661,16 +637,140 @@ export function truncateObject(value, maxBytes) {
   return out;
 }
 
+const TRUNCATION_MARKER = "\n... truncated ...";
+
 function truncateText(value, maxBytes) {
   const text = String(value ?? "");
   if (Buffer.byteLength(text, "utf8") <= maxBytes) {
     return text;
   }
-  let end = text.length;
-  while (end > 0 && Buffer.byteLength(text.slice(0, end), "utf8") > maxBytes) {
-    end = Math.floor(end * 0.9);
+  // Largest character prefix whose bytes plus the marker fit maxBytes — a precise
+  // binary search, not a geometric 0.9 step that can overshoot far below budget
+  // (which turned every bounded snippet into a fraction of the room it was given).
+  const budget = Math.max(0, maxBytes - Buffer.byteLength(TRUNCATION_MARKER, "utf8"));
+  let lo = 0;
+  let hi = text.length;
+  let best = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    if (Buffer.byteLength(text.slice(0, mid), "utf8") <= budget) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
   }
-  return `${text.slice(0, end)}\n... truncated ...`;
+  return `${text.slice(0, best)}${TRUNCATION_MARKER}`;
+}
+
+// True when `result` serializes within the byte cap (measured on the FINAL
+// escaped JSON — the only size the model actually receives).
+function withinCap(result, maxBytes) {
+  return Buffer.byteLength(JSON.stringify(result), "utf8") <= maxBytes;
+}
+
+// Largest k in [0, hi] for which fits() holds after apply(k), assuming
+// monotonicity (fits at k ⇒ fits at every smaller k). Leaves state at the chosen
+// k. O(log hi) evaluations, so it reclaims exactly the bytes required rather than
+// a fixed fraction or a coarse geometric step.
+function largestFitting(hi, apply, fits) {
+  apply(hi);
+  if (fits()) {
+    return hi;
+  }
+  let lo = 0;
+  let high = hi;
+  let best = 0;
+  while (lo <= high) {
+    const mid = (lo + high) >>> 1;
+    apply(mid);
+    if (fits()) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  apply(best);
+  return best;
+}
+
+// Trim a string field to the largest prefix that keeps the SERIALIZED result
+// within maxBytes (escaping-aware), appending a marker only when it actually
+// trims. Returns whether it trimmed.
+function fitFieldToBudget(result, field, maxBytes, marker = TRUNCATION_MARKER) {
+  const full = String(result[field] ?? "");
+  result[field] = full;
+  if (withinCap(result, maxBytes)) {
+    return false;
+  }
+  const kept = largestFitting(
+    full.length,
+    (n) => {
+      result[field] = n >= full.length ? full : full.slice(0, n) + marker;
+    },
+    () => withinCap(result, maxBytes),
+  );
+  // Pathological caps below the marker size: if not even an empty prefix + marker
+  // fits, drop the field to empty (the minimal form) rather than leaving a marker
+  // that still overflows.
+  if (kept === 0 && !withinCap(result, maxBytes)) {
+    result[field] = "";
+  }
+  return true;
+}
+
+// The one shared budgeter for every review tool: guarantee the SERIALIZED result
+// never exceeds maxBytes by reclaiming — minimally — from its largest reclaimable
+// component (a string field trimmed to a fitting prefix, or an array's tail
+// dropped). Tools that bound themselves (get_review_context, list_changed_files)
+// already fit, so this is their backstop; for raw-text tools it is the escaping-
+// aware enforcement their pre-serialization truncation could not provide.
+function enforceSerializedCap(result, maxBytes) {
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return result;
+  }
+  let guard = 0;
+  while (!withinCap(result, maxBytes) && guard < 128) {
+    guard += 1;
+    let key = null;
+    let kind = null;
+    let bytes = -1;
+    for (const [candidate, value] of Object.entries(result)) {
+      if (typeof value === "string" && value.length) {
+        const size = Buffer.byteLength(value, "utf8");
+        if (size > bytes) {
+          bytes = size;
+          key = candidate;
+          kind = "string";
+        }
+      } else if (Array.isArray(value) && value.length) {
+        const size = Buffer.byteLength(JSON.stringify(value), "utf8");
+        if (size > bytes) {
+          bytes = size;
+          key = candidate;
+          kind = "array";
+        }
+      }
+    }
+    if (!key) {
+      break; // nothing left to reclaim
+    }
+    if (kind === "string") {
+      fitFieldToBudget(result, key, maxBytes);
+    } else {
+      const items = result[key];
+      largestFitting(
+        items.length,
+        (n) => {
+          result[key] = items.slice(0, n);
+        },
+        () => withinCap(result, maxBytes),
+      );
+    }
+    result.truncated = true;
+  }
+  return result;
 }
 
 function throwIfCancelled(controller) {

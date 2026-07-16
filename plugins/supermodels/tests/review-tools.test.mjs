@@ -102,6 +102,41 @@ test("truncateObject never loops forever and stays hard-capped even for a pathol
   assert.equal(result.diff, "", "an unfittable diff is dropped to empty");
 });
 
+test("truncateObject trims an oversized diff by only the bytes required, not a coarse fraction", () => {
+  // A diff whose payload lands just over the cap should lose ~the overflow, not
+  // ~20%+ (the old 0.8 step compounded by truncateText's geometric shrink turned
+  // a 1-byte overflow into a ~30% cut).
+  const cap = 120_000;
+  const base = Buffer.byteLength(JSON.stringify({ ok: true, diff: "", truncated: true, diffTruncated: false }), "utf8");
+  const diffBytes = cap - base + 200; // 200 bytes over the cap
+  const diff = "d".repeat(diffBytes);
+  const result = truncateObject({ ok: true, diff }, cap);
+  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= cap, "serialized payload is within the cap");
+  assert.equal(result.diffTruncated, true, "the diff was trimmed");
+  // Minimal reclaim: at most a small multiple of the 200-byte overflow is lost.
+  const kept = Buffer.byteLength(result.diff, "utf8");
+  assert.ok(kept >= diffBytes - 1000, `diff kept ${kept} of ${diffBytes} — reclaimed far more than required`);
+});
+
+test("truncateObject trims snippets by only the bytes required, not a fixed 35%/n fraction", () => {
+  // A payload a few hundred bytes over the cap should shave a few hundred bytes
+  // off the snippets — not crush every snippet to 35%/n of the whole cap.
+  const cap = 120_000;
+  const snippetContent = "s".repeat(20_000);
+  const fileSnippets = Array.from({ length: 5 }, (_, i) => ({ path: `f${i}.js`, content: snippetContent, truncated: false }));
+  const totalSnippetBytes = 5 * 20_000;
+  // diff sized so the whole payload is ~500 bytes over the cap.
+  const base = Buffer.byteLength(JSON.stringify({ ok: true, diff: "", fileSnippets, truncated: true, diffTruncated: false }), "utf8");
+  const diff = "d".repeat(cap - base + 500);
+  const result = truncateObject({ ok: true, diff, fileSnippets }, cap);
+  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= cap, "serialized payload is within the cap");
+  assert.equal(result.diff, diff, "the fitting diff is preserved (only snippets were reclaimed)");
+  const keptSnippetBytes = result.fileSnippets.reduce((sum, s) => sum + Buffer.byteLength(s.content, "utf8"), 0);
+  // The old 35%/n rule would cap each of 5 snippets at 0.35*cap/5 = 8400 bytes
+  // (42000 total). Minimal reclaim keeps far more.
+  assert.ok(keptSnippetBytes > totalSnippetBytes - 5000, `kept ${keptSnippetBytes} of ${totalSnippetBytes} snippet bytes — over-dropped`);
+});
+
 test("read_file returns numbered bounded slices inside workspace", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-tools-"));
   try {
@@ -203,6 +238,52 @@ test("search returns bounded line matches", async () => {
     assert.equal(result.ok, true);
     assert.match(result.output, /src\/a\.js:2:needle here/);
     assert.match(result.output, /src\/b\.js:1:needle there/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("search keeps the SERIALIZED result within the cap even for escaping-heavy matches", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-search-cap-"));
+  try {
+    // Lines dominated by quotes and backslashes: each byte roughly doubles under
+    // JSON escaping, so bounding the raw text (the old behavior) overshoots the cap.
+    const heavy = `needle ${"\"\\".repeat(200)}`;
+    const lines = Array.from({ length: 150 }, () => heavy).join("\n");
+    await writeFile(path.join(workspace, "heavy.txt"), `${lines}\n`, "utf8");
+
+    const maxToolBytes = 20_000;
+    const tools = createReviewTools({ workspaceRoot: workspace, maxToolBytes });
+    const result = await tools.execute("search", { query: "needle" });
+
+    const size = Buffer.byteLength(JSON.stringify(result), "utf8");
+    assert.ok(size <= maxToolBytes, `serialized search result ${size} exceeded cap ${maxToolBytes}`);
+    assert.equal(result.truncated, true, "truncation is flagged");
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("list_files keeps the SERIALIZED result within the cap and never emits a marker as a fake filename", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-listfiles-cap-"));
+  try {
+    await Promise.all(
+      Array.from({ length: 800 }, (_, i) =>
+        writeFile(path.join(workspace, `source-file-${String(i).padStart(4, "0")}.txt`), "x\n", "utf8"),
+      ),
+    );
+
+    const maxToolBytes = 12_000;
+    const tools = createReviewTools({ workspaceRoot: workspace, maxToolBytes });
+    const result = await tools.execute("list_files", {});
+
+    const size = Buffer.byteLength(JSON.stringify(result), "utf8");
+    assert.ok(size <= maxToolBytes, `serialized list_files result ${size} exceeded cap ${maxToolBytes}`);
+    assert.equal(result.truncated, true, "truncation is flagged");
+    assert.ok(result.files.length > 0 && result.files.length < 800, "the list was bounded");
+    for (const file of result.files) {
+      assert.ok(!file.includes("truncated"), `a truncation marker leaked in as a filename: ${file}`);
+    }
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -368,6 +449,34 @@ test("list_changed_files does not over-drop: a file list that fits under the cap
     assert.equal(changed.changedFiles.length, count, "every file that fits under the cap is retained");
     assert.equal(changed.truncated, false, "nothing was truncated");
     assert.equal(changed.changedFilesOmitted, undefined, "no omission is reported");
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("list_changed_files retains every entry when the complete result exactly fits the cap", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-list-exact-"));
+  try {
+    await runGit(workspace, ["init"]);
+    await runGit(workspace, ["config", "user.email", "test@example.com"]);
+    await runGit(workspace, ["config", "user.name", "Test User"]);
+    const count = 10;
+    await Promise.all(
+      Array.from({ length: count }, (_, i) =>
+        writeFile(path.join(workspace, `changed-file-${String(i).padStart(2, "0")}.txt`), "x\n", "utf8"),
+      ),
+    );
+
+    // Measure the full result under a generous cap, then set the cap to exactly
+    // that size: a conservative estimator would drop the last entry; the binary
+    // search keeps all of them.
+    const generous = await createReviewTools({ workspaceRoot: workspace, maxToolBytes: 1_000_000 }).execute("list_changed_files");
+    const exact = Buffer.byteLength(JSON.stringify(generous), "utf8");
+    const changed = await createReviewTools({ workspaceRoot: workspace, maxToolBytes: exact }).execute("list_changed_files");
+
+    assert.equal(changed.changedFiles.length, count, "all entries are retained at an exact fit");
+    assert.equal(changed.truncated, false, "nothing is dropped at an exact fit");
+    assert.ok(Buffer.byteLength(JSON.stringify(changed), "utf8") <= exact, "payload stays within the exact cap");
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

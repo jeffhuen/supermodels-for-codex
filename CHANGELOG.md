@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.7
+
+### Fixed
+
+- Every review tool's result now passes through one shared budgeter that enforces the byte cap on the FINAL serialized JSON (after escaping), so no tool can exceed it. `search` and `list_files` previously bounded their raw text before JSON wrapping, so escaping-heavy output overshot the cap — a 120 KB cap could return a 150–240 KB payload — and `list_files` could surface the truncation marker as a phantom filename. Both now return their full result and are bounded by the shared budgeter, which drops whole trailing entries (no phantom filename) or trims a string field to the largest prefix that fits.
+- Reclamation now takes only the bytes actually required — binary-search / largest-fitting trims instead of fixed fractions or coarse geometric steps. Previously an oversized diff was cut in 20% steps (compounded by a geometric text trimmer, turning a near-1-byte overflow into a roughly 30% cut), file snippets were crushed to a fixed 35%/N of the whole cap regardless of the real overflow, and the changed-files packer used a conservative estimate that dropped an entry even at an exact fit. The diff, snippets, and changed-files list now each reclaim to the largest form that fits, and the shared text trimmer slices precisely rather than in geometric steps.
+
 ## v0.2.6
 
 ### Fixed
