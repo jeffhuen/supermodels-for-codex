@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.4
+
+### Fixed
+
+- High-risk hunk coverage enforcement is no longer disabled — and the "coverage degraded" banner no longer shown — when only file snippets are truncated while the diff itself is complete. The review tools now track diff truncation separately from context truncation, so the coverage guarantee is reported as lost only when the diff (which the hunk ledger is built from) is actually truncated.
+- Corrected the upgrade instructions: re-adding a marketplace with a changed `--ref` fails when it is already registered, so upgrading requires `codex plugin marketplace remove` first, then re-add and re-install.
+
 ## v0.2.3
 
 ### Fixed

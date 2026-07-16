@@ -7,9 +7,27 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { collectGitContext } from "../scripts/lib/git.mjs";
-import { createReviewTools } from "../scripts/lib/review-tools.mjs";
+import { createReviewTools, truncateObject } from "../scripts/lib/review-tools.mjs";
 
 const execFileAsync = promisify(execFile);
+
+test("truncateObject flags diffTruncated only when the diff itself is shortened, not when snippets overflow", () => {
+  const smallDiff = "diff --git a/x b/x\n@@ -1 +1 @@\n+one changed line\n";
+  // Context exceeds the cap because of a huge file snippet, but the diff is tiny.
+  const overByCoverage = truncateObject(
+    { diff: smallDiff, fileSnippets: [{ path: "x", content: "S".repeat(8000) }] },
+    1200,
+  );
+  assert.equal(overByCoverage.truncated, true, "context is truncated (snippets overflow the cap)");
+  assert.equal(overByCoverage.diffTruncated, false, "but the diff itself was not shortened");
+  assert.equal(overByCoverage.diff, smallDiff, "diff is byte-identical to the input");
+
+  // A genuinely oversized diff IS flagged as diffTruncated.
+  const bigDiff = "D".repeat(8000);
+  const overByDiff = truncateObject({ diff: bigDiff, fileSnippets: [] }, 1200);
+  assert.equal(overByDiff.diffTruncated, true, "an oversized diff is flagged as diffTruncated");
+  assert.ok(overByDiff.diff.length < bigDiff.length, "the diff was actually shortened");
+});
 
 test("read_file returns numbered bounded slices inside workspace", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-tools-"));

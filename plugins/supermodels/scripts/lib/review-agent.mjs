@@ -1006,7 +1006,11 @@ function updateCoverageFromDiff(inspection, result) {
   }
   const previousCovered = inspection.coverage?.coveredHunkIds ?? new Set();
   const coverage = coverageLedgerFromDiff(diff, {
-    truncated: Boolean(result.truncated),
+    // Prefer the diff-specific truncation signal (get_review_context sets it via
+    // truncateObject); fall back to `result.truncated` for get_diff, where the
+    // diff is the only payload so the flags coincide. This keeps snippet-only
+    // truncation from falsely disabling high-risk hunk coverage.
+    truncated: Boolean(result.diffTruncated ?? result.truncated),
     previousCovered,
   });
   inspection.coverage = coverage;

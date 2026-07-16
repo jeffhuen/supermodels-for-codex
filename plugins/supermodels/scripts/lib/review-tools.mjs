@@ -523,7 +523,7 @@ function normalizeLine(value, fallback) {
   return Number.isInteger(line) && line > 0 ? line : fallback;
 }
 
-function truncateObject(value, maxBytes) {
+export function truncateObject(value, maxBytes) {
   const text = JSON.stringify(value);
   if (Buffer.byteLength(text, "utf8") <= maxBytes) {
     return value;
@@ -549,6 +549,13 @@ function truncateObject(value, maxBytes) {
   if (Buffer.byteLength(JSON.stringify(out), "utf8") > maxBytes && typeof out.diff === "string") {
     out.diff = truncateText(out.diff, Math.floor(maxBytes * 0.2));
   }
+  // Track whether the DIFF itself was shortened, separately from the
+  // context-level `truncated` flag. Oversized file snippets can set `truncated`
+  // while the diff stays byte-identical, and high-risk hunk coverage enforcement
+  // must key off the diff (the ledger is built from it), not the whole context.
+  out.diffTruncated = typeof out.diff === "string"
+    && typeof value.diff === "string"
+    && Buffer.byteLength(out.diff, "utf8") < Buffer.byteLength(value.diff, "utf8");
   return out;
 }
 

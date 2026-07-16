@@ -2,7 +2,7 @@
 
 *A panel of frontier models that's really, really, ridiculously good at reviewing code.*
 
-![status](https://img.shields.io/badge/status-v0.2.3-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![built for](https://img.shields.io/badge/built%20for-Codex-111827)
+![status](https://img.shields.io/badge/status-v0.2.4-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![built for](https://img.shields.io/badge/built%20for-Codex-111827)
 
 Supermodels is a [Codex](https://github.com/openai/codex) plugin that lets Codex stop reviewing its own homework. Instead of trusting one model to grade its own diff, you can have it hand the work to **Claude Code**, **Google Antigravity**, and **Grok Build**, collect their independent reviews, and — if you want a fight — make them tear into each other's findings before reporting back.
 
@@ -54,13 +54,21 @@ node scripts/supermodels.mjs status
 Add this repo as a Codex plugin marketplace, pinned to the latest release:
 
 ```bash
-codex plugin marketplace add jeffhuen/supermodels-for-codex --ref v0.2.3
+codex plugin marketplace add jeffhuen/supermodels-for-codex --ref v0.2.4
 codex plugin add supermodels@supermodels
 ```
 
 Prefer to live on the edge? Point `--ref` at `main` instead. Either way, **start a fresh Codex session after installing or upgrading** so the new skills and runtime files load.
 
-**Upgrading an existing install?** Bump the `--ref` to the new tag and re-run **both** lines above. Codex caches the installed plugin, so `codex plugin add supermodels@supermodels` is what actually pulls the new version — updating the marketplace `--ref` alone leaves the previously installed version in place. (Fresh installs are fine as-is.)
+**Upgrading an existing install?** Re-adding a marketplace with a changed `--ref` fails when it's already registered, so remove it first, then re-add and re-install:
+
+```bash
+codex plugin marketplace remove supermodels
+codex plugin marketplace add jeffhuen/supermodels-for-codex --ref v0.2.4
+codex plugin add supermodels@supermodels
+```
+
+Codex caches the installed plugin, so this full sequence — not just bumping `--ref` — is what actually pulls the new version. (Fresh installs skip the `remove` line. If your marketplace has a different name, `codex plugin marketplace list` shows it.)
 
 ## Setup
 
@@ -139,7 +147,7 @@ The provider CLIs still do their own thing with their own auth files, sessions, 
 
 ## What's rough (the honest part)
 
-This is `v0.2.3` of a hobby project. It's well-tested and it works on my machine, but you should know the edges:
+This is `v0.2.4` of a hobby project. It's well-tested and it works on my machine, but you should know the edges:
 
 - **Three providers, still on purpose.** Claude Code, Antigravity, and Grok Build. The Grok review transport uses the chat-proxy surface xAI documents for auth.json tokens; if xAI tightens its client-version gate you'll get an explicit "run `grok update`" error, never silent junk.
 - **macOS is the path I live on.** The OAuth/keychain bits are exercised on macOS. Other platforms may have sharp corners I haven't hit yet.
