@@ -1196,6 +1196,79 @@ test("runReviewAgent keeps coverage enabled (no coverage-disabled gap) when only
   );
 });
 
+test("runReviewAgent keeps coverage enabled when the PRELOADED get_review_context has truncated:true but diffTruncated:false", async () => {
+  const targetPath = "plugins/supermodels/scripts/lib/large-diff.mjs";
+  const diff = [
+    `diff --git a/${targetPath} b/${targetPath}`,
+    `--- a/${targetPath}`,
+    `+++ b/${targetPath}`,
+    "@@ -1,1 +1,1 @@",
+    "-early line",
+    "+early replacement",
+  ].join("\n");
+  const fakeTools = {
+    schemas: [],
+    async execute(name, input = {}) {
+      if (name === "get_review_context") {
+        // Context-level truncation (e.g. oversized snippets or changedFiles) but
+        // the diff itself is complete — the production coverage source.
+        return { ok: true, diff, changedFiles: [], fileSnippets: [], truncated: true, diffTruncated: false };
+      }
+      if (name === "read_file") {
+        const start = Number(input.start_line ?? 1);
+        return { ok: true, path: input.path, start_line: start, end_line: start, content: `${start}: export {};` };
+      }
+      if (name === "search") {
+        return { ok: true, query: input.query, output: `${targetPath}:1:export {};` };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+  const fakeTransport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return responseWithTool("read_1", "read_file", { path: targetPath, start_line: 1, end_line: 1 });
+      }
+      if (this.calls === 2) {
+        return responseWithTool("search_1", "search", { query: "large diff" });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "needs-attention",
+        summary: "Finding while the preloaded diff is complete despite context truncation.",
+        findings: [{
+          severity: "medium",
+          title: "Concrete issue on an inspected line",
+          evidence: "The cited line has current readable content.",
+          impact: "Verifies coverage stays enabled when only preloaded context is truncated.",
+          recommendation: "Keep the finding; no coverage gap.",
+          file: targetPath,
+          line_start: 1,
+          line_end: 1,
+          confidence: "medium",
+        }],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    preloadTools: ["get_review_context"],
+    maxRounds: 4,
+  });
+
+  assert.equal(result.verdict, "needs-attention");
+  assert.ok(
+    !result.verification_gaps.some((gap) => /coverage enforcement was disabled/i.test(gap)),
+    "no coverage-disabled gap when the preloaded diff is complete (only context truncated)",
+  );
+});
+
 test("runReviewAgent qualifies a clean verdict when a truncated diff disables coverage", async () => {
   const targetPath = "plugins/supermodels/scripts/lib/large-diff.mjs";
   const fakeTransport = {
