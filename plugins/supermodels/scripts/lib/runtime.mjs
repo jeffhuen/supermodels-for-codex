@@ -13,6 +13,7 @@ import {
   normalizeStructuredReview,
   parseStructuredReviewText,
 } from "./review-schema.mjs";
+import { COVERAGE_TRUNCATED_GAP } from "./review-agent.mjs";
 import {
   createJob,
   createState,
@@ -881,6 +882,9 @@ function appendProviderResult(lines, result) {
   const label = providerLabel(result.provider);
   lines.push(`### ${label}`);
   lines.push(`Verdict: ${result.verdict ?? "inconclusive"}`);
+  if (Array.isArray(result.verification_gaps) && result.verification_gaps.includes(COVERAGE_TRUNCATED_GAP)) {
+    lines.push("⚠️  COVERAGE DEGRADED — high-risk hunk enforcement was OFF for this review (the diff exceeded the review-tool cap), so some changed hunks may not have been inspected. Treat these findings as less complete; re-run with a narrower --base scope or smaller diff to restore coverage checks.");
+  }
   if (result.output_valid === false) {
     lines.push(result.summary ?? "Provider output was invalid.");
   } else if (Array.isArray(result.findings) && result.findings.length) {
@@ -915,10 +919,13 @@ function appendProviderResult(lines, result) {
       lines.push(`- ${assumption}`);
     }
   }
-  if (Array.isArray(result.verification_gaps) && result.verification_gaps.length) {
+  const otherGaps = Array.isArray(result.verification_gaps)
+    ? result.verification_gaps.filter((gap) => gap !== COVERAGE_TRUNCATED_GAP)
+    : [];
+  if (otherGaps.length) {
     lines.push("");
     lines.push("Verification gaps:");
-    for (const gap of result.verification_gaps) {
+    for (const gap of otherGaps) {
       lines.push(`- ${gap}`);
     }
   }

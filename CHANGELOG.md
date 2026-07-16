@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.2.3
+
+### Fixed
+
+- Denied `NotebookEdit` calls now report their target path. The permission-denied event reads `notebook_path` (not only `file_path`), so a denied notebook edit no longer surfaces as a bare "claude denied NotebookEdit" with no location — matching the task-permission policy, which already gated on either field.
+
+### Changed
+
+- When a review's diff exceeds the review-tool cap and high-risk hunk coverage enforcement is disabled, the resulting coverage-degraded gap is now shown as a prominent banner directly under the provider verdict, instead of being buried at the bottom of the verification-gaps list. A review that has lost its coverage guarantee now says so up front.
+- Documented that upgrading an existing install requires re-running `codex plugin add supermodels@supermodels`; bumping the marketplace `--ref` alone leaves the previously installed version cached.
+
 ## v0.2.2
 
 ### Changed

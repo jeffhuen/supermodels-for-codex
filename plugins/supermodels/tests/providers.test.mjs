@@ -1697,3 +1697,12 @@ test("parseClaudeOutput handles both object-shaped and string-shaped permission_
   assert.equal(stringDenials[1].message, "claude denied Bash");
   assert.ok(!stringDenials.some((e) => /unknown tool/.test(e.message)), "distinct string denials must not collapse to \"unknown tool\"");
 });
+
+test("parseClaudeOutput includes notebook_path for a denied NotebookEdit (not only file_path)", () => {
+  const parsed = parseClaudeOutput(JSON.stringify({
+    type: "result",
+    permission_denials: [{ tool_name: "NotebookEdit", tool_input: { notebook_path: "/work/nb.ipynb" } }],
+  }));
+  const denial = parsed.events.find((e) => e.type === "permission-denied");
+  assert.equal(denial.message, "claude denied NotebookEdit (/work/nb.ipynb)");
+});

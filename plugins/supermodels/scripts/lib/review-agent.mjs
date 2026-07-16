@@ -34,7 +34,7 @@ const DEFAULT_REVIEW_POLICY = Object.freeze({
 const POST_EVIDENCE_INSPECTION_ROUNDS = 4;
 const MAX_FINDING_LOCATION_LINES = 200;
 const MAX_COVERAGE_GAPS = 12;
-const COVERAGE_TRUNCATED_GAP = "Supermodels: high-risk hunk coverage enforcement was disabled because the review-tool diff was truncated; some changed hunks may not have been inspected. Re-run with a narrower --base scope or smaller diff to restore coverage checks.";
+export const COVERAGE_TRUNCATED_GAP = "Supermodels: high-risk hunk coverage enforcement was disabled because the review-tool diff was truncated; some changed hunks may not have been inspected. Re-run with a narrower --base scope or smaller diff to restore coverage checks.";
 const HIGH_RISK_PATH_RE = /(^|\/)(auth|oauth|session|sessions|token|tokens|credential|credentials|secret|secrets|password|permission|permissions|policy|policies|security|csrf|migration|migrations|schema|db|database|billing|payment|payments|worker|queue|lock|locks|signal|signals|cancel|cancellation)(\/|\.|-|_|$)/i;
 const HIGH_RISK_DIFF_RE = /\b(auth|oauth|session|token|secret|password|permission|policy|csrf|sql|migration|schema|drop|delete|destroy|truncate|unlink|lock|mutex|race|concurrent|parallel|signal|cancel|timeout|retry|process\.env|keychain)\b/i;
 

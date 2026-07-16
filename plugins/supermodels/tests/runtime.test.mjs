@@ -21,6 +21,7 @@ import {
   synthesizeProviderResults,
 } from "../scripts/lib/runtime.mjs";
 import { createJob, createState, jobPath, listJobs, updateJob } from "../scripts/lib/state.mjs";
+import { COVERAGE_TRUNCATED_GAP } from "../scripts/lib/review-agent.mjs";
 
 const checks = {
   claude: {
@@ -446,6 +447,25 @@ test("synthesizeProviderResults preserves longer unstructured provider output", 
 
   assert(normalized.summary.length > 500);
   assert.match(text, /unique-tail-finding/);
+});
+
+test("synthesizeProviderResults promotes the coverage-degraded gap to a banner near the verdict", () => {
+  const text = synthesizeProviderResults([{
+    provider: "claude",
+    verdict: "needs-attention",
+    summary: "Reviewed.",
+    findings: [],
+    assumptions: [],
+    verification_gaps: [COVERAGE_TRUNCATED_GAP, "unrelated gap"],
+  }]);
+  assert.match(text, /COVERAGE DEGRADED/, "a prominent coverage-degraded banner must render");
+  const verdictIdx = text.indexOf("Verdict:");
+  const bannerIdx = text.indexOf("COVERAGE DEGRADED");
+  const gapsIdx = text.indexOf("Verification gaps:");
+  assert.ok(verdictIdx >= 0 && bannerIdx > verdictIdx, "banner sits right after the verdict");
+  assert.ok(gapsIdx > bannerIdx, "banner precedes the (buried) verification-gaps list");
+  assert.ok(!text.includes(`- ${COVERAGE_TRUNCATED_GAP}`), "the coverage gap is promoted to the banner, not also listed under Verification gaps");
+  assert.match(text, /- unrelated gap/, "unrelated verification gaps still render");
 });
 
 test("synthesizeProviderResults groups provider output without cross-examining", () => {

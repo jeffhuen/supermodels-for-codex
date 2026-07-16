@@ -205,7 +205,7 @@ export function parseClaudeOutput(stdout) {
       const at = new Date().toISOString();
       for (const denial of event.permission_denials) {
         const toolName = typeof denial === "string" ? denial : (denial?.tool_name ?? "unknown tool");
-        const filePath = typeof denial === "string" ? "" : (denial?.tool_input?.file_path ?? "");
+        const filePath = typeof denial === "string" ? "" : (denial?.tool_input?.file_path ?? denial?.tool_input?.notebook_path ?? "");
         const detail = filePath ? ` (${filePath})` : "";
         events.push({
           type: "permission-denied",
