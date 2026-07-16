@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.8
+
+### Fixed
+
+- `read_file` no longer reports a line range past the content the model actually received. The shared budgeter could trim a `read_file` result's content while leaving `end_line` unchanged, and both high-risk hunk coverage and citation verification trust `end_line` — so a hunk beyond the visible content could be credited as inspected and a clean verdict accepted (a verification-gate bypass). `read_file` now bounds its content by whole lines and resets `end_line` to the last line that survives; coverage credits only lines proven present in the returned content, failing closed when a read returns no verifiable content lines.
+- The model-visible tool result can no longer exceed the byte cap. The dispatcher capped the tool result, but the review agent then attached a `coverage_ledger` before serialization, pushing the payload over (a 120,000-byte cap returned 120,104). Ledger-bearing tools (`get_diff`, `get_review_context`, `read_file`) now reserve headroom for the ledger, the ledger is bounded to that reserve, and a final serialized-cap guarantee covers any residual at every cap size.
+- The coverage-critical diff is no longer over-trimmed to reserve space for changed-file metadata. Reclamation reserved a fixed 15% of the cap for the changed-files list, so a payload one byte over could shed ~18 KB of diff to retain hundreds of file entries. The diff now has strict priority: it is trimmed only when it alone exceeds the cap, and then fills the budget while the lower-priority file list yields (its omitted count still reported).
+
 ## v0.2.7
 
 ### Fixed

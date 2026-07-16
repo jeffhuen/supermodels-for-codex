@@ -216,6 +216,94 @@ test("runReviewAgent refuses submit_review until high-risk diff hunks are read",
   assert.match(JSON.stringify(calls[3].messages), /missingHighRiskHunks|coverage_gaps/);
 });
 
+test("runReviewAgent does not credit hunk coverage past the visible content of a stale-range read", async () => {
+  // High-risk hunk at lines 120-122 (auth path). The model reads a wide range but
+  // the tool returns content only through line 100 with a STALE end_line of 130 —
+  // exactly what a downstream truncation would leave. Coverage must credit only the
+  // visible lines, so the hunk stays uncovered rather than being falsely satisfied.
+  const diff = [
+    "diff --git a/auth/session.mjs b/auth/session.mjs",
+    "--- a/auth/session.mjs",
+    "+++ b/auth/session.mjs",
+    "@@ -120,2 +120,3 @@",
+    " function keep() {",
+    "+  const added = 1;",
+    " }",
+  ].join("\n");
+  const visibleContent = Array.from({ length: 100 }, (_, i) => `${i + 1}: line ${i + 1}`).join("\n");
+  const calls = [];
+  const fakeTransport = {
+    calls: 0,
+    async messages(body) {
+      this.calls += 1;
+      calls.push(body);
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", { path: "auth/session.mjs", start_line: 1, end_line: 130 });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "clean",
+        summary: "Nothing found.",
+        findings: [],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+  const fakeTools = {
+    schemas: [],
+    async execute(name, input = {}) {
+      if (name === "get_diff") {
+        return { ok: true, diffSummary: "1 file changed", diff };
+      }
+      if (name === "read_file") {
+        return {
+          ok: true,
+          path: input.path,
+          start_line: Number(input.start_line ?? 1),
+          end_line: 130, // STALE: past the visible content, as a downstream trim would leave it
+          content: visibleContent, // lines 1-100 only
+        };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+
+  // The unsatisfiable coverage gate may force further reads and eventually reject;
+  // we assert on what the model was shown, which holds either way.
+  await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    maxRounds: 6,
+    minInspection: { diff: true, fileOrSearch: true, explicitFileOrSearchToolCalls: 1, cleanExplicitFileOrSearchToolCalls: 1 },
+  }).catch(() => {});
+
+  // Inspect the coverage_ledger the agent attached to the read_1 result: the hunk
+  // at line 120 must remain in missingHighRiskHunks (the stale end_line did NOT
+  // credit it). With the bug, the [1,130] range overlaps [120,122] and clears it.
+  let readLedger = null;
+  for (const body of calls) {
+    for (const msg of body.messages ?? []) {
+      if (!Array.isArray(msg.content)) {
+        continue;
+      }
+      for (const part of msg.content) {
+        if (part?.type === "tool_result" && part.tool_use_id === "read_1") {
+          readLedger = JSON.parse(part.content).coverage_ledger;
+        }
+      }
+    }
+  }
+  assert.ok(readLedger, "the read result carried a coverage ledger");
+  assert.ok(
+    (readLedger.missingHighRiskHunks ?? []).some((hunk) => hunk.line_start === 120),
+    "the hunk beyond the visible content stays uncovered (stale end_line did not credit it)",
+  );
+});
+
 test("runReviewAgent does not block low-risk diffs on hunk coverage", async () => {
   const diff = [
     "diff --git a/docs/readme.md b/docs/readme.md",

@@ -8,6 +8,7 @@ import {
   parseUnifiedDiffHeaderPath,
   stripGitSidePrefix,
 } from "./diff-paths.mjs";
+import { COVERAGE_LEDGER_RESERVE, enforceSerializedCap, lastNumberedLine } from "./review-tools.mjs";
 
 const DEFAULT_REVIEW_POLICY = Object.freeze({
   maxRounds: Number.POSITIVE_INFINITY,
@@ -489,6 +490,21 @@ async function executeToolCall({ call, tools, controller, abort, inspection, too
   throwIfCancelled(controller);
   toolUsage[call.name] = (toolUsage[call.name] ?? 0) + 1;
   updateInspection(inspection, call.name, result, call.input ?? {});
+  // Hard guarantee that the MODEL-VISIBLE payload (result + the coverage_ledger
+  // just attached) never exceeds the cap. A no-op at realistic caps, where the
+  // tool already reserved ledger headroom; the backstop only for pathologically
+  // small caps below that reserve. Re-sync read_file's end_line afterward so it
+  // never points past content the backstop trimmed.
+  const cap = Number(tools?.maxToolBytes);
+  if (Number.isFinite(cap)) {
+    enforceSerializedCap(result, cap);
+    if (call.name === "read_file" && result?.ok !== false) {
+      const visibleEnd = lastNumberedLine(result.content);
+      if (Number.isFinite(visibleEnd)) {
+        result.end_line = Math.min(Number(result.end_line ?? visibleEnd), visibleEnd);
+      }
+    }
+  }
   onEvent?.({
     type: "tool_call",
     message: `${provider} used ${call.name}`,
@@ -1017,14 +1033,20 @@ function updateCoverageFromDiff(inspection, result) {
   for (const range of inspection.readRanges ?? []) {
     markCoverageRange(coverage, range);
   }
-  result.coverage_ledger = visibleCoverageState(coverage);
+  result.coverage_ledger = boundCoverageLedger(visibleCoverageState(coverage));
 }
 
 function markCoverageFromRead(inspection, result, input = {}) {
   const file = comparableReviewPath(result.path ?? input.path);
   const start = Number(result.start_line ?? input.start_line ?? 1);
-  const end = Number(result.end_line ?? input.end_line ?? start);
-  if (!file || !Number.isFinite(start) || !Number.isFinite(end)) {
+  const reportedEnd = Number(result.end_line ?? input.end_line ?? start);
+  // Credit coverage only for lines actually present in the returned content — the
+  // last visible `N:` line — never the reported end_line alone, which a downstream
+  // truncation could leave pointing past what the model can see (a coverage-gate
+  // bypass). Absent verifiable content lines, credit nothing (fail closed).
+  const visibleEnd = lastNumberedLine(result.content);
+  const end = Number.isFinite(visibleEnd) ? Math.min(reportedEnd, visibleEnd) : NaN;
+  if (!file || !Number.isFinite(start) || !Number.isFinite(end) || end < start) {
     return;
   }
   const range = { file, start, end };
@@ -1035,7 +1057,7 @@ function markCoverageFromRead(inspection, result, input = {}) {
     return;
   }
   markCoverageRange(coverage, range);
-  result.coverage_ledger = visibleCoverageState(coverage);
+  result.coverage_ledger = boundCoverageLedger(visibleCoverageState(coverage));
 }
 
 function markCoverageRange(coverage, range) {
@@ -1058,6 +1080,24 @@ function coverageGapsForInspection(inspection) {
     .filter((hunk) => !coverage.coveredHunkIds.has(hunk.id))
     .slice(0, MAX_COVERAGE_GAPS)
     .map(({ id: _id, ...hunk }) => hunk);
+}
+
+// Keep the attached coverage_ledger within its reserved headroom by dropping
+// trailing hint hunks if a pathological path/reason list would exceed it. Dropping
+// hints never weakens the gate: coverage is enforced server-side from the full
+// hunk set (coverageGapsForInspection), not from what the ledger displays.
+function boundCoverageLedger(ledger) {
+  if (Buffer.byteLength(JSON.stringify(ledger), "utf8") <= COVERAGE_LEDGER_RESERVE) {
+    return ledger;
+  }
+  const bounded = { ...ledger, missingHighRiskHunks: [...(ledger.missingHighRiskHunks ?? [])] };
+  while (
+    bounded.missingHighRiskHunks.length
+    && Buffer.byteLength(JSON.stringify(bounded), "utf8") > COVERAGE_LEDGER_RESERVE
+  ) {
+    bounded.missingHighRiskHunks.pop();
+  }
+  return bounded;
 }
 
 function visibleCoverageState(coverage) {

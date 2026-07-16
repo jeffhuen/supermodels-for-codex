@@ -10,6 +10,12 @@ const DEFAULT_MAX_FILE_BYTES = 80_000;
 const DEFAULT_MAX_TOOL_BYTES = 120_000;
 const DEFAULT_CONTEXT_FILE_LIMIT = 6;
 const DEFAULT_CONTEXT_FILE_BYTES = 12_000;
+// Headroom reserved on ledger-bearing tool results (get_diff, get_review_context,
+// read_file) for the coverage_ledger the review agent attaches AFTER the tool
+// returns — so the final model-visible payload (result + ledger) still fits
+// maxToolBytes. The agent bounds the ledger itself to this size.
+export const COVERAGE_LEDGER_RESERVE = 8_000;
+const LEDGER_TOOLS = new Set(["get_diff", "get_review_context", "read_file"]);
 
 export function createReviewTools(options = {}) {
   const workspaceRoot = path.resolve(options.workspaceRoot ?? process.cwd());
@@ -19,9 +25,16 @@ export function createReviewTools(options = {}) {
 
   return {
     schemas: reviewToolSchemas(),
+    maxToolBytes,
     async execute(name, input = {}, executionOptions = {}) {
       const activeController = executionOptions.controller ?? controller;
       throwIfCancelled(activeController);
+      // Ledger-bearing tools reserve headroom for the coverage_ledger the review
+      // agent attaches after the tool returns, so the final model-visible payload
+      // (result + ledger) still fits maxToolBytes.
+      const budget = LEDGER_TOOLS.has(name)
+        ? Math.max(0, maxToolBytes - COVERAGE_LEDGER_RESERVE)
+        : maxToolBytes;
       const compute = async () => {
         if (name === "get_diff") {
           const context = await collectGitContext({
@@ -35,10 +48,10 @@ export function createReviewTools(options = {}) {
             workspaceRoot,
             diffSummary: context.diffSummary,
             diff: context.diff,
-          }, maxToolBytes);
+          }, budget);
         }
         if (name === "get_review_context") {
-          return await getReviewContext(workspaceRoot, options, maxToolBytes, activeController);
+          return await getReviewContext(workspaceRoot, options, budget, activeController);
         }
         if (name === "list_changed_files") {
           return await listChangedFiles(workspaceRoot, options, maxToolBytes, activeController);
@@ -50,13 +63,19 @@ export function createReviewTools(options = {}) {
           return await search(workspaceRoot, input, maxToolBytes, activeController);
         }
         if (name === "read_file") {
-          return await readWorkspaceFile(workspaceRoot, input, maxFileBytes, activeController);
+          // Line-aware bound: keeps end_line consistent with the returned content
+          // (an integrity requirement — coverage/citation trust end_line).
+          return boundReadFileResult(
+            await readWorkspaceFile(workspaceRoot, input, maxFileBytes, activeController),
+            budget,
+          );
         }
         throw new Error(`Unknown review tool: ${name}`);
       };
-      // Every tool result passes through the one shared budgeter, so no tool can
-      // exceed the serialized cap regardless of its own bounding.
-      return enforceSerializedCap(await compute(), maxToolBytes);
+      const raw = await compute();
+      // read_file self-bounds line-aware above; every other result passes through
+      // the shared byte budgeter so no tool can exceed the serialized cap.
+      return name === "read_file" ? raw : enforceSerializedCap(raw, budget);
     },
   };
 }
@@ -605,13 +624,13 @@ export function truncateObject(value, maxBytes) {
       out.changedFilesOmitted = totalChanged; // reserve the widest bookkeeping form
     }
     if (overCap() && typeof out.diff === "string" && out.diff.length) {
-      // The reserve is the list's real serialized size, capped so a pathological
-      // list can never starve the coverage-critical diff. When there are no/few
-      // changed files the reserve is ~0, so the diff is trimmed by only what the
-      // overflow requires.
-      const listBytes = allChanged ? Buffer.byteLength(JSON.stringify(allChanged), "utf8") : 0;
-      const fileReserve = Math.min(listBytes, Math.floor(maxBytes * 0.15));
-      fitFieldToBudget(out, "diff", Math.max(0, maxBytes - fileReserve));
+      // The diff has strict priority (coverage-critical): it is only reached here
+      // when it overflows the cap even with the list cleared, so trim it to the
+      // largest prefix that fits the WHOLE cap, then pack the changed-files list
+      // into whatever remains. No fixed reserve — a diff one byte over loses about
+      // one byte, and a diff that alone exceeds the cap simply fills it (the list
+      // yields, its omitted count still reported).
+      fitFieldToBudget(out, "diff", maxBytes);
     }
     if (allChanged) {
       // Binary search the largest count that fits — exact, so it neither over-drops
@@ -726,7 +745,7 @@ function fitFieldToBudget(result, field, maxBytes, marker = TRUNCATION_MARKER) {
 // dropped). Tools that bound themselves (get_review_context, list_changed_files)
 // already fit, so this is their backstop; for raw-text tools it is the escaping-
 // aware enforcement their pre-serialization truncation could not provide.
-function enforceSerializedCap(result, maxBytes) {
+export function enforceSerializedCap(result, maxBytes) {
   if (!result || typeof result !== "object" || Array.isArray(result)) {
     return result;
   }
@@ -770,6 +789,44 @@ function enforceSerializedCap(result, maxBytes) {
     }
     result.truncated = true;
   }
+  return result;
+}
+
+// The number of the last `N: ...` line present in read_file content, or NaN if
+// none. Used to keep end_line honest about what the model can actually see.
+export function lastNumberedLine(content) {
+  const text = String(content ?? "");
+  const regex = /(?:^|\n)(\d+):/g;
+  let last = NaN;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    last = Number(match[1]);
+  }
+  return last;
+}
+
+// Bound a read_file result to the serialized cap by dropping WHOLE trailing
+// content lines (never a mid-line byte cut) and resetting end_line to the last
+// line that survives — so content and end_line never disagree. Coverage and
+// citation both trust end_line, so a stale end_line past the visible content is a
+// verification-gate bypass, not cosmetic.
+export function boundReadFileResult(result, maxBytes) {
+  if (!result || result.ok === false || withinCap(result, maxBytes)) {
+    return result;
+  }
+  const content = String(result.content ?? "");
+  const lines = content.length ? content.split("\n") : [];
+  const start = Number(result.start_line ?? 1);
+  largestFitting(
+    lines.length,
+    (k) => {
+      result.content = lines.slice(0, k).join("\n");
+    },
+    () => withinCap(result, maxBytes),
+  );
+  const visibleEnd = lastNumberedLine(result.content);
+  result.end_line = Number.isFinite(visibleEnd) ? visibleEnd : Math.max(start - 1, 0);
+  result.truncated = true;
   return result;
 }
 
