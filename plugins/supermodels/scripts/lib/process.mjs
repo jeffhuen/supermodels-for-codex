@@ -1,8 +1,6 @@
-import { access } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import { constants } from "node:fs";
 import { spawn } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -19,17 +17,51 @@ export async function findExecutable(bin, options = {}) {
     path.join("/usr/local/bin", bin),
   ];
 
-  for (const candidate of candidates) {
-    try {
-      await access(candidate, constants.X_OK);
-      return candidate;
-    } catch {
-      // Keep scanning.
-    }
+  // Filesystem metadata calls are not abortable and a PATH entry can live on
+  // a dead network mount. Probe in a killable child so provider readiness has
+  // a real deadline, and require a regular executable target (directories can
+  // also satisfy X_OK but are not runnable providers).
+  const result = await runCommand({
+    bin: process.execPath,
+    args: ["-e", EXECUTABLE_PROBE_SCRIPT],
+  }, {
+    timeoutMs: options.executableLookupTimeoutMs ?? 5_000,
+    env,
+    input: JSON.stringify(candidates),
+    signal: options.signal,
+  });
+  if (result.timedOut) {
+    throw new Error(`Executable discovery for '${bin}' timed out.`);
   }
-
-  return "";
+  if (options.signal?.aborted) {
+    throw options.signal.reason instanceof Error
+      ? options.signal.reason
+      : new Error(`Executable discovery for '${bin}' was aborted.`);
+  }
+  if (result.exitCode !== 0) {
+    throw new Error(`Executable discovery for '${bin}' failed: ${result.stderr || result.stdout || `exit ${result.exitCode}`}`);
+  }
+  try {
+    return JSON.parse(result.stdout || '""');
+  } catch {
+    throw new Error(`Executable discovery for '${bin}' returned invalid output.`);
+  }
 }
+
+const EXECUTABLE_PROBE_SCRIPT = String.raw`
+const fs = require("node:fs");
+const candidates = JSON.parse(fs.readFileSync(0, "utf8"));
+let found = "";
+for (const candidate of candidates) {
+  try {
+    if (!fs.statSync(candidate).isFile()) continue;
+    fs.accessSync(candidate, fs.constants.X_OK);
+    found = candidate;
+    break;
+  } catch {}
+}
+process.stdout.write(JSON.stringify(found));
+`;
 
 export async function runCommand(command, options = {}) {
   return await runSpawnedCommand(command, options);
@@ -56,6 +88,7 @@ async function runSpawnedCommand(command, options = {}) {
     let killTimer;
     const signalKillMs = options.signalKillMs ?? PROVIDER_SIGKILL_MS;
     let controllerUnsubscribe = () => {};
+    let signalUnsubscribe = () => {};
     let forwardedSignal = false;
     const forwardSignal = (signal) => {
       if (forwardedSignal) {
@@ -76,10 +109,19 @@ async function runSpawnedCommand(command, options = {}) {
         forwardSignal(options.controller.signal ?? "SIGTERM");
       }
     }
+    if (options.signal) {
+      const onAbort = () => forwardSignal("SIGTERM");
+      options.signal.addEventListener("abort", onAbort, { once: true });
+      signalUnsubscribe = () => options.signal.removeEventListener("abort", onAbort);
+      if (options.signal.aborted) {
+        onAbort();
+      }
+    }
     const cleanup = () => {
       clearTimeout(timer);
       clearTimeout(killTimer);
       controllerUnsubscribe();
+      signalUnsubscribe();
     };
 
     timer = setTimeout(() => {

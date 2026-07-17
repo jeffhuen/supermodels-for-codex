@@ -42,6 +42,25 @@ test("renderReviewPrompt adds Antigravity anti-sycophancy override", async () =>
   assert.doesNotMatch(prompt, /looks good/i);
 });
 
+test("review and challenge prompts do not require a provider-specific override file", async () => {
+  const review = await renderReviewPrompt({
+    mode: "review",
+    providerId: "kimi-k3",
+    focus: "",
+    context,
+  });
+  const challenge = await renderChallengePrompt({
+    challengerId: "kimi-k3",
+    focus: "",
+    context,
+    ownResult: {},
+    peerResults: [],
+  });
+
+  assert.match(review, /You are kimi-k3 reviewing for Codex/);
+  assert.match(challenge, /You are kimi-k3 reviewing for Codex/);
+});
+
 test("renderReviewPrompt requires re-verification of supplied prior findings before user focus", async () => {
   const prompt = await renderReviewPrompt({
     mode: "review",

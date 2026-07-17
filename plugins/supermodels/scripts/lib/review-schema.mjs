@@ -96,6 +96,38 @@ export const REVIEW_RESULT_SCHEMA = Object.freeze({
 const VALID_VERDICTS = new Set(["clean", "needs-attention", "inconclusive"]);
 const VALID_SEVERITIES = new Set(["critical", "high", "medium", "low"]);
 const VALID_CONFIDENCE = new Set(["high", "medium", "low"]);
+const WIRE_FIELDS = new Set([
+  "verdict",
+  "summary",
+  "findings",
+  "missing_change_findings",
+  "assumptions",
+  "verification_gaps",
+]);
+const CODE_FINDING_FIELDS = new Set([
+  "severity",
+  "title",
+  "evidence",
+  "impact",
+  "recommendation",
+  "confidence",
+  "file",
+  "line_start",
+  "line_end",
+]);
+const MISSING_FINDING_FIELDS = new Set([
+  "severity",
+  "title",
+  "evidence",
+  "impact",
+  "recommendation",
+  "confidence",
+  "anchor_file",
+  "anchor_line",
+  "expected_symbol",
+  "searched_for",
+  "missing_change_reason",
+]);
 
 export function structuredReviewInstructions() {
   return [
@@ -126,13 +158,30 @@ export function normalizeStructuredReview(value) {
   return validateStructuredReview(value).review;
 }
 
-export function validateStructuredReview(value) {
+export function validateStructuredReview(value, options = {}) {
   const errors = [];
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return { review: null, errors: ["review must be an object"] };
   }
+  const strictWire = Boolean(options.strictWire);
+  if (strictWire) {
+    validateWireObjectFields(value, WIRE_FIELDS, "", errors);
+    for (const field of WIRE_FIELDS) {
+      if (!Object.hasOwn(value, field)) {
+        errors.push(`${field} is required`);
+      }
+    }
+    if (Object.hasOwn(value, "summary") && typeof value.summary !== "string") {
+      errors.push("summary must be a string");
+    }
+    validateWireStringArray(value, "assumptions", errors);
+    validateWireStringArray(value, "verification_gaps", errors);
+  }
 
   const verdict = String(value.verdict ?? "").trim();
+  if (strictWire && (typeof value.verdict !== "string" || value.verdict !== verdict)) {
+    errors.push("verdict must be an exact schema enum string");
+  }
   if (!VALID_VERDICTS.has(verdict)) {
     return { review: null, errors: ["verdict must be clean, needs-attention, or inconclusive"] };
   }
@@ -150,19 +199,22 @@ export function validateStructuredReview(value) {
   // whose merged `findings` list carries `kind` and has no
   // `missing_change_findings` key. Inferring kind here (instead of forcing
   // `findings` -> code) keeps normalization idempotent on that second pass.
-  const splitMode = value.missing_change_findings !== undefined;
+  const splitMode = strictWire || value.missing_change_findings !== undefined;
 
   let codeItems;
   let missingItems;
   if (splitMode) {
     if (!Array.isArray(value.findings)) {
-      return { review: null, errors: ["findings must be an array"] };
+      errors.push("findings must be an array");
     }
     if (!Array.isArray(value.missing_change_findings)) {
-      return { review: null, errors: ["missing_change_findings must be an array"] };
+      errors.push("missing_change_findings must be an array");
     }
-    codeItems = value.findings.map((item) => forceFindingKind(item, "code"));
-    missingItems = value.missing_change_findings.map((item) => forceFindingKind(item, "missing-change"));
+    if (errors.length) {
+      return { review: null, errors };
+    }
+    codeItems = value.findings;
+    missingItems = value.missing_change_findings;
   } else {
     const rawFindings = normalizeFindingsArray(value.findings, verdict);
     if (!rawFindings) {
@@ -174,14 +226,23 @@ export function validateStructuredReview(value) {
 
   // Validate the two arrays separately, before merging, so item errors keep
   // precise paths (findings[i] / missing_change_findings[i]).
-  const codeFindings = collectStructuredFindings(codeItems, "findings", errors);
-  const missingFindings = collectStructuredFindings(missingItems, "missing_change_findings", errors);
+  const codeFindings = collectStructuredFindings(codeItems, "findings", errors, {
+    forcedKind: splitMode ? "code" : "",
+    strictWire,
+  });
+  const missingFindings = collectStructuredFindings(missingItems, "missing_change_findings", errors, {
+    forcedKind: "missing-change",
+    strictWire,
+  });
   // Merge order: code findings first, then missing-change, preserving input
   // order within each array. No dedup, no ordinals.
   const findings = [...codeFindings, ...missingFindings];
 
   if (verdict === "needs-attention" && findings.length === 0) {
     errors.push("needs-attention reviews must include at least one valid finding");
+  }
+  if (verdict === "clean" && findings.length > 0) {
+    errors.push("clean reviews must not include findings");
   }
   if (errors.length) {
     return { review: null, errors };
@@ -199,10 +260,18 @@ export function validateStructuredReview(value) {
   };
 }
 
-function collectStructuredFindings(items, prefix, errors) {
+export function validateStructuredReviewWire(value) {
+  return validateStructuredReview(value, { strictWire: true });
+}
+
+function collectStructuredFindings(items, prefix, errors, options = {}) {
   const findings = [];
   items.forEach((finding, index) => {
-    const { finding: normalized, errors: findingErrors } = normalizeStructuredFinding(finding, `${prefix}[${index}]`);
+    const { finding: normalized, errors: findingErrors } = normalizeStructuredFinding(
+      finding,
+      `${prefix}[${index}]`,
+      options,
+    );
     if (findingErrors.length) {
       errors.push(...findingErrors);
       return;
@@ -212,20 +281,11 @@ function collectStructuredFindings(items, prefix, errors) {
   return findings;
 }
 
-function forceFindingKind(item, kind) {
-  if (!item || typeof item !== "object" || Array.isArray(item)) {
-    // Leave non-objects untouched so normalizeStructuredFinding reports the
-    // precise "must be an object" error instead of a spread masking it.
-    return item;
-  }
-  return { ...item, kind };
-}
-
 export function parseStructuredReviewText(rawText) {
   return validateStructuredReviewText(rawText).review;
 }
 
-export function validateStructuredReviewText(rawText) {
+export function validateStructuredReviewText(rawText, options = {}) {
   const text = String(rawText ?? "").trim();
   if (!text) {
     return { review: null, errors: [], parsed: false };
@@ -237,7 +297,7 @@ export function validateStructuredReviewText(rawText) {
     try {
       const value = JSON.parse(candidate);
       parsed = true;
-      const validation = validateStructuredReview(value);
+      const validation = validateStructuredReview(value, options);
       if (validation.review) {
         return { ...validation, parsed: true };
       }
@@ -257,10 +317,20 @@ export function structuredReviewToFindings(review) {
   return normalized?.findings ?? [];
 }
 
-function normalizeStructuredFinding(value, prefix = "finding") {
+function normalizeStructuredFinding(value, prefix = "finding", options = {}) {
   const errors = [];
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return { finding: null, errors: [`${prefix} must be an object`] };
+  }
+  const strictWire = Boolean(options.strictWire);
+  const forcedKind = options.forcedKind || "";
+  if (strictWire) {
+    validateWireObjectFields(
+      value,
+      forcedKind === "missing-change" ? MISSING_FINDING_FIELDS : CODE_FINDING_FIELDS,
+      prefix,
+      errors,
+    );
   }
   const severity = normalizeSeverity(value.severity);
   const confidence = normalizeConfidence(value.confidence);
@@ -268,16 +338,40 @@ function normalizeStructuredFinding(value, prefix = "finding") {
   const evidence = String(value.evidence ?? "").trim();
   const impact = String(value.impact ?? "").trim();
   const recommendation = String(value.recommendation ?? "").trim();
-  const kind = normalizeFindingKind(value.kind);
+  const kind = forcedKind || normalizeFindingKind(value.kind);
   const missingChange = kind === "missing-change";
-  const anchorFile = String(value.anchor_file ?? "").trim();
+  const anchorFile = String(value.anchor_file ?? "");
   const anchorLine = normalizeLine(value.anchor_line);
-  const file = missingChange ? anchorFile : String(value.file ?? "").trim();
+  const file = missingChange ? anchorFile : String(value.file ?? "");
   const lineStart = missingChange ? anchorLine : normalizeLine(value.line_start);
   const lineEnd = missingChange ? anchorLine : normalizeLine(value.line_end);
   const expectedSymbol = String(value.expected_symbol ?? "").trim();
   const searchedFor = String(value.searched_for ?? "").trim();
   const missingChangeReason = String(value.missing_change_reason ?? "").trim();
+  if (strictWire) {
+    if (!VALID_SEVERITIES.has(String(value.severity ?? ""))) {
+      errors.push(`${prefix}.severity must be critical, high, medium, or low`);
+    }
+    if (!VALID_CONFIDENCE.has(String(value.confidence ?? ""))) {
+      errors.push(`${prefix}.confidence must be high, medium, or low`);
+    }
+    const stringFields = missingChange
+      ? ["title", "evidence", "impact", "recommendation", "anchor_file", "expected_symbol", "searched_for", "missing_change_reason"]
+      : ["title", "evidence", "impact", "recommendation", "file"];
+    for (const field of stringFields) {
+      if (typeof value[field] !== "string") {
+        errors.push(`${prefix}.${field} must be a string`);
+      }
+    }
+    const integerFields = missingChange
+      ? ["anchor_line"]
+      : ["line_start", "line_end"];
+    for (const field of integerFields) {
+      if (typeof value[field] !== "number" || !Number.isInteger(value[field])) {
+        errors.push(`${prefix}.${field} must be an integer`);
+      }
+    }
+  }
   if (!title) {
     errors.push(`${prefix}.title must be non-empty`);
   }
@@ -339,6 +433,29 @@ function normalizeStructuredFinding(value, prefix = "finding") {
     },
     errors: [],
   };
+}
+
+function validateWireObjectFields(value, allowed, prefix, errors) {
+  for (const field of Object.keys(value)) {
+    if (!allowed.has(field)) {
+      errors.push(`${prefix ? `${prefix}.` : ""}${field} is not allowed`);
+    }
+  }
+}
+
+function validateWireStringArray(value, field, errors) {
+  if (!Object.hasOwn(value, field)) {
+    return;
+  }
+  if (!Array.isArray(value[field])) {
+    errors.push(`${field} must be an array`);
+    return;
+  }
+  value[field].forEach((item, index) => {
+    if (typeof item !== "string") {
+      errors.push(`${field}[${index}] must be a string`);
+    }
+  });
 }
 
 function normalizeStringArray(value) {

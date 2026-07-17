@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -38,6 +39,9 @@ const checks = {
     error: "not authenticated",
   },
 };
+
+const reviewCapabilities = () => ({ review: true, adversarialReview: true });
+const taskCapabilities = () => ({ task: true, writeTask: true });
 
 test("selectProviders skips unavailable providers for --all", () => {
   const selected = selectProviders({
@@ -121,17 +125,157 @@ test("selectProviders includes readiness reasons when no providers are ready", (
   );
 });
 
-test("selectProviders selects up to three ready providers", () => {
+test("selectProviders keeps every ready provider without a hidden panel-size cap", () => {
   const plan = selectProviders({
-    requested: ["claude", "antigravity", "grok"],
+    requested: ["claude", "antigravity", "grok", "future"],
     checks: {
       claude: { ready: true },
       antigravity: { ready: true },
       grok: { ready: true },
+      future: { ready: true },
     },
   });
-  assert.deepEqual(plan.selected, ["claude", "antigravity", "grok"]);
+  assert.deepEqual(plan.selected, ["claude", "antigravity", "grok", "future"]);
   assert.deepEqual(plan.skipped, []);
+});
+
+test("selectProviders skips ready providers that lack the required capability", () => {
+  const plan = selectProviders({
+    requested: ["claude", "antigravity"],
+    checks: {
+      claude: { ready: true, capabilities: { writeTask: true } },
+      antigravity: { ready: true, capabilities: { writeTask: false } },
+    },
+    requiredCapability: "writeTask",
+  });
+
+  assert.deepEqual(plan.selected, ["claude"]);
+  assert.deepEqual(plan.skipped.map(({ provider, reason }) => ({ provider, reason })), [{
+    provider: "antigravity",
+    reason: "does not support write tasks",
+  }]);
+});
+
+test("selectProviders fails clearly when an explicit provider lacks the required capability", () => {
+  assert.throws(
+    () => selectProviders({
+      requested: ["claude"],
+      explicit: true,
+      checks: {
+        claude: { ready: true, capabilities: { adversarialReview: false } },
+      },
+      requiredCapability: "adversarialReview",
+    }),
+    /Provider 'claude' does not support adversarial reviews/i,
+  );
+});
+
+test("runReview shares one snapshot across first-pass and challenge runs, then disposes it", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-shared-snapshot-data-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-shared-snapshot-workspace-"));
+  const snapshots = [];
+  const fakeReview = (provider) => async (_input, options) => {
+    snapshots.push(options.snapshot);
+    const structured = {
+      verdict: "clean",
+      summary: `${provider} found no blocking issues.`,
+      findings: [],
+      assumptions: [],
+      verification_gaps: [],
+    };
+    return {
+      provider,
+      exitCode: 0,
+      rawText: JSON.stringify(structured),
+      structured,
+      stderr: "",
+      sessionId: `${provider}-session`,
+      commandLine: `${provider} fake`,
+      startedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+    };
+  };
+
+  try {
+    const output = await runReview({
+      adapters: {
+        claude: {
+          capabilities: reviewCapabilities,
+          check: async () => ({ provider: "claude", ready: true, installed: true, auth: "ok" }),
+          review: fakeReview("claude"),
+        },
+        antigravity: {
+          capabilities: reviewCapabilities,
+          check: async () => ({ provider: "antigravity", ready: true, installed: true, auth: "ok" }),
+          review: fakeReview("antigravity"),
+        },
+      },
+      providerSelection: {
+        requested: ["claude", "antigravity"],
+        explicit: false,
+      },
+      mode: "adversarial-review",
+      options: { "data-root": dataRoot },
+      focus: "",
+      workspaceRoot,
+    });
+
+    assert.equal(output.challengeResults.length, 2);
+    assert.equal(snapshots.length, 4);
+    assert.ok(snapshots[0]);
+    assert.ok(snapshots.every((snapshot) => snapshot === snapshots[0]));
+    await assert.rejects(() => access(snapshots[0].root), { code: "ENOENT" });
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("runReview applies its wall-clock timeout while the immutable snapshot is being captured", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-snapshot-timeout-data-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-snapshot-timeout-workspace-"));
+  let providerCalled = false;
+  try {
+    runGit(workspaceRoot, ["init"]);
+    runGit(workspaceRoot, ["config", "user.email", "test@example.com"]);
+    runGit(workspaceRoot, ["config", "user.name", "Test User"]);
+    await writeFile(path.join(workspaceRoot, "base.txt"), "base\n");
+    runGit(workspaceRoot, ["add", "."]);
+    runGit(workspaceRoot, ["commit", "-m", "initial"]);
+    await writeFile(path.join(workspaceRoot, ".gitattributes"), "*.slow filter=slow\n");
+    await writeFile(path.join(workspaceRoot, "slow-filter.sh"), "#!/bin/sh\nsleep 2\ncat\n");
+    await chmod(path.join(workspaceRoot, "slow-filter.sh"), 0o755);
+    runGit(workspaceRoot, ["config", "filter.slow.clean", "./slow-filter.sh"]);
+    runGit(workspaceRoot, ["config", "filter.slow.required", "true"]);
+    await writeFile(path.join(workspaceRoot, "change.slow"), "changed\n");
+
+    const startedAt = Date.now();
+    await assert.rejects(
+      () => runReview({
+        adapters: {
+          claude: {
+            capabilities: reviewCapabilities,
+            check: async () => ({ provider: "claude", ready: true, installed: true, auth: "ok" }),
+            review: async () => {
+              providerCalled = true;
+              return { exitCode: 0, rawText: "{}", stderr: "" };
+            },
+          },
+        },
+        providerSelection: { requested: ["claude"], explicit: true },
+        mode: "review",
+        options: { "data-root": dataRoot, timeout: 0.1 },
+        focus: "",
+        workspaceRoot,
+      }),
+      /timed out|timeout/i,
+    );
+    assert.equal(providerCalled, false);
+    assert(Date.now() - startedAt < 1_500, "snapshot timeout should stop the hanging Git filter promptly");
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
 });
 
 test("renderHumanResult includes failed job errors", () => {
@@ -176,6 +320,28 @@ test("checkProviders reports provider capabilities without lifecycle ownership c
     nativeInterrupt: false,
     background: "worker",
   });
+});
+
+test("checkProviders isolates a throwing provider from ready peers", async () => {
+  const output = await checkProviders({
+    broken: {
+      label: "Broken Provider",
+      capabilities: () => ({ review: true }),
+      async check() {
+        throw new Error("lookup timed out");
+      },
+    },
+    healthy: {
+      capabilities: () => ({ review: true }),
+      async check() {
+        return { provider: "healthy", ready: true, installed: true, auth: "ok" };
+      },
+    },
+  });
+
+  assert.equal(output.broken.ready, false);
+  assert.match(output.broken.error, /lookup timed out/);
+  assert.equal(output.healthy.ready, true);
 });
 
 test("setupProviders reports the same provider capabilities as readiness checks", async () => {
@@ -232,6 +398,30 @@ test("setupProviders mirrors readiness for providers without setup hooks", async
   assert.equal(output.claude.setup.ready, false);
   assert.equal(output.claude.setup.changed, false);
   assert.equal(output.claude.check.ready, false);
+});
+
+test("setupProviders isolates setup and check failures per provider", async () => {
+  const output = await setupProviders({
+    broken: {
+      async setup() {
+        throw new Error("setup exploded");
+      },
+      async check() {
+        throw new Error("check exploded");
+      },
+    },
+    healthy: {
+      async check() {
+        return { provider: "healthy", ready: true };
+      },
+    },
+  });
+
+  assert.equal(output.broken.setup.ready, false);
+  assert.match(output.broken.setup.error, /setup exploded/);
+  assert.equal(output.broken.check.ready, false);
+  assert.match(output.broken.check.error, /check exploded/);
+  assert.equal(output.healthy.check.ready, true);
 });
 
 test("normalizeProviderResult conservatively preserves raw output", () => {
@@ -527,7 +717,7 @@ test("synthesizeAdversarialResults appends attributed cross-challenge output", (
 
   assert.match(text, /## Provider Results/);
   assert.match(text, /## Cross-Challenge Results/);
-  assert.match(text, /Claude Code challenging Antigravity/);
+  assert.match(text, /Claude Code challenging Google Antigravity/);
   assert.match(text, /Challenge-confirmed issue/);
 });
 
@@ -568,8 +758,8 @@ test("synthesizeProviderResults preserves provider attribution and full finding 
   assert.match(text, /Evidence: state\.mjs writes without a lock\./);
   assert.match(text, /Impact: Concurrent live reads can fail\./);
   assert.match(text, /Recommendation: Serialize writes through the job lock\./);
-  assert.match(text, /## Antigravity/);
-  assert.match(text, /No material findings reported by Antigravity\./);
+  assert.match(text, /## Google Antigravity/);
+  assert.match(text, /No material findings reported by Google Antigravity\./);
   assert.doesNotMatch(text, /Codex should synthesize/i);
 });
 
@@ -622,6 +812,7 @@ test("runTask stores provider progress events from adapters", async () => {
   try {
     const adapters = {
       antigravity: {
+        capabilities: taskCapabilities,
         check: async () => ({
           provider: "antigravity",
           ready: true,
@@ -665,7 +856,7 @@ test("runTask stores provider progress events from adapters", async () => {
         "data-root": dataRoot,
       },
       task: "inspect only",
-      workspaceRoot: "/tmp/workspace",
+      workspaceRoot: dataRoot,
     });
 
     const run = output.job.providerRuns.antigravity;
@@ -685,6 +876,7 @@ test("runTask forwards grok-exclusive task options to adapter.task()", async () 
     let capturedOptions;
     const adapters = {
       grok: {
+        capabilities: taskCapabilities,
         check: async () => ({
           provider: "grok",
           ready: true,
@@ -721,7 +913,7 @@ test("runTask forwards grok-exclusive task options to adapter.task()", async () 
         worktree: true,
       },
       task: "inspect only",
-      workspaceRoot: "/tmp/workspace",
+      workspaceRoot: dataRoot,
     });
 
     assert.equal(capturedOptions.bestOfN, 3);
@@ -740,6 +932,7 @@ test("provider progress without usage does not clear live cumulative usage", asy
   try {
     const adapters = {
       claude: {
+        capabilities: reviewCapabilities,
         check: async () => ({
           provider: "claude",
           ready: true,
@@ -812,6 +1005,7 @@ test("runReview records orchestrator pid so concurrent status does not fail live
     let observedPid;
     const adapters = {
       claude: {
+        capabilities: reviewCapabilities,
         check: async () => ({
           provider: "claude",
           ready: true,
@@ -875,6 +1069,7 @@ test("runReview checks only requested providers", async () => {
     let antigravityChecked = false;
     const adapters = {
       claude: {
+        capabilities: reviewCapabilities,
         check: async () => ({
           provider: "claude",
           ready: true,
@@ -899,6 +1094,7 @@ test("runReview checks only requested providers", async () => {
         }),
       },
       antigravity: {
+        capabilities: reviewCapabilities,
         check: async () => {
           antigravityChecked = true;
           throw new Error("unrequested provider should not be checked");
@@ -935,7 +1131,7 @@ test("runTask checks only requested providers", async () => {
     let antigravityChecked = false;
     const adapters = {
       claude: {
-        capabilities: () => ({ writeTask: true }),
+        capabilities: taskCapabilities,
         check: async () => ({
           provider: "claude",
           ready: true,
@@ -954,7 +1150,7 @@ test("runTask checks only requested providers", async () => {
         }),
       },
       antigravity: {
-        capabilities: () => ({ writeTask: true }),
+        capabilities: taskCapabilities,
         check: async () => {
           antigravityChecked = true;
           throw new Error("unrequested provider should not be checked");
@@ -998,6 +1194,7 @@ test("runReview does not start providers for jobs already cancelled", async () =
     let providerCalled = false;
     const adapters = {
       claude: {
+        capabilities: reviewCapabilities,
         check: async () => ({
           provider: "claude",
           ready: true,
@@ -1040,6 +1237,7 @@ test("runReview marks schema-invalid provider output as invalid-output even when
   try {
     const adapters = {
       antigravity: {
+        capabilities: reviewCapabilities,
         check: async () => ({
           provider: "antigravity",
           ready: true,
@@ -1070,7 +1268,7 @@ test("runReview marks schema-invalid provider output as invalid-output even when
         "data-root": dataRoot,
       },
       focus: "",
-      workspaceRoot: "/tmp/workspace",
+      workspaceRoot: dataRoot,
     });
 
     assert.equal(output.job.status, "failed");
@@ -1086,6 +1284,7 @@ test("runReview records partial status when at least one provider returns usable
   try {
     const adapters = {
       claude: {
+        capabilities: reviewCapabilities,
         check: async () => ({
           provider: "claude",
           ready: true,
@@ -1109,6 +1308,7 @@ test("runReview records partial status when at least one provider returns usable
         }),
       },
       antigravity: {
+        capabilities: reviewCapabilities,
         check: async () => ({
           provider: "antigravity",
           ready: true,
@@ -1132,7 +1332,7 @@ test("runReview records partial status when at least one provider returns usable
         "data-root": dataRoot,
       },
       focus: "",
-      workspaceRoot: "/tmp/workspace",
+      workspaceRoot: dataRoot,
     });
 
     assert.equal(output.job.status, "partial");
@@ -1148,6 +1348,7 @@ test("runReview records provider rate limits as rate-limited partial results", a
   try {
     const adapters = {
       claude: {
+        capabilities: reviewCapabilities,
         check: async () => ({
           provider: "claude",
           ready: true,
@@ -1159,6 +1360,7 @@ test("runReview records provider rate limits as rate-limited partial results", a
         },
       },
       antigravity: {
+        capabilities: reviewCapabilities,
         check: async () => ({
           provider: "antigravity",
           ready: true,
@@ -1194,7 +1396,7 @@ test("runReview records provider rate limits as rate-limited partial results", a
         "data-root": dataRoot,
       },
       focus: "",
-      workspaceRoot: "/tmp/workspace",
+      workspaceRoot: dataRoot,
     });
 
     assert.equal(output.job.status, "partial");
@@ -1213,6 +1415,7 @@ test("runReview persists provider review configuration metadata", async () => {
   try {
     const adapters = {
       claude: {
+        capabilities: reviewCapabilities,
         check: async () => ({
           provider: "claude",
           ready: true,
@@ -1283,6 +1486,7 @@ test("runReview marks provider crashes as failed, not invalid-output", async () 
   try {
     const adapters = {
       antigravity: {
+        capabilities: reviewCapabilities,
         check: async () => ({
           provider: "antigravity",
           ready: true,
@@ -1307,7 +1511,7 @@ test("runReview marks provider crashes as failed, not invalid-output", async () 
         "data-root": dataRoot,
       },
       focus: "",
-      workspaceRoot: "/tmp/workspace",
+      workspaceRoot: dataRoot,
     });
 
     assert.equal(output.job.status, "failed");
@@ -1326,6 +1530,7 @@ test("runReview marks bare provider signal exits as failed when the run was not 
   try {
     const adapters = {
       claude: {
+        capabilities: reviewCapabilities,
         check: async () => ({
           provider: "claude",
           ready: true,
@@ -1363,7 +1568,7 @@ test("runReview marks bare provider signal exits as failed when the run was not 
         "data-root": dataRoot,
       },
       focus: "",
-      workspaceRoot: "/tmp/workspace",
+      workspaceRoot: dataRoot,
     });
 
     assert.equal(output.job.status, "failed");
@@ -1379,6 +1584,7 @@ test("runReview lets cancellation dominate provider timeout status", async () =>
   try {
     const adapters = {
       claude: {
+        capabilities: reviewCapabilities,
         check: async () => ({
           provider: "claude",
           ready: true,
@@ -1420,7 +1626,7 @@ test("runReview lets cancellation dominate provider timeout status", async () =>
         "data-root": dataRoot,
       },
       focus: "",
-      workspaceRoot: "/tmp/workspace",
+      workspaceRoot: dataRoot,
     });
 
     assert.equal(output.job.status, "cancelled");
@@ -1433,9 +1639,10 @@ test("runReview lets cancellation dominate provider timeout status", async () =>
 test("runReview does not overwrite a cancelled job when providers finish", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-review-cancel-"));
   try {
-    const workspaceRoot = "/tmp/workspace";
+    const workspaceRoot = dataRoot;
     const adapters = {
       claude: {
+        capabilities: reviewCapabilities,
         check: async () => ({
           provider: "claude",
           ready: true,
@@ -1495,6 +1702,7 @@ test("runReview does not let signal cancellation overwrite terminal completed jo
   try {
     const adapters = {
       claude: {
+        capabilities: reviewCapabilities,
         check: async () => ({
           provider: "claude",
           ready: true,
@@ -1562,6 +1770,7 @@ test("runTask passes task mode into provider adapters", async () => {
     let receivedOptions;
     const adapters = {
       antigravity: {
+        capabilities: taskCapabilities,
         check: async () => ({
           provider: "antigravity",
           ready: true,
@@ -1596,7 +1805,7 @@ test("runTask passes task mode into provider adapters", async () => {
         timeout: "60",
       },
       task: "inspect only",
-      workspaceRoot: "/tmp/workspace",
+      workspaceRoot: dataRoot,
     });
 
     assert.equal(receivedInput.mode, "task");
@@ -1801,7 +2010,7 @@ test("runTask persists and supplies a context packet to providers", async () => 
     let receivedInput;
     const adapters = {
       claude: {
-        capabilities: () => ({ writeTask: true }),
+        capabilities: taskCapabilities,
         check: async () => ({
           provider: "claude",
           ready: true,
@@ -1844,6 +2053,62 @@ test("runTask persists and supplies a context packet to providers", async () => 
     assert.match(receivedInput.prompt, /# Supermodels Context Packet/);
     assert.match(receivedInput.prompt, /summarize lifecycle risks/);
     assert.match(receivedInput.prompt, /maintainable context handoff/);
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("runTask does not apply strict review-snapshot gates to a live native task", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-task-live-context-"));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-task-live-workspace-"));
+  try {
+    runGit(workspaceRoot, ["init"]);
+    runGit(workspaceRoot, ["config", "user.email", "test@example.com"]);
+    runGit(workspaceRoot, ["config", "user.name", "Test User"]);
+    await writeFile(path.join(workspaceRoot, "hidden.txt"), "base\n");
+    runGit(workspaceRoot, ["add", "."]);
+    runGit(workspaceRoot, ["commit", "-m", "base"]);
+    runGit(workspaceRoot, ["update-index", "--assume-unchanged", "hidden.txt"]);
+    let taskCalled = false;
+    const adapters = {
+      claude: {
+        capabilities: taskCapabilities,
+        check: async () => ({
+          provider: "claude",
+          ready: true,
+          installed: true,
+          auth: "ok",
+          path: "fake-claude",
+        }),
+        task: async () => {
+          taskCalled = true;
+          return {
+            exitCode: 0,
+            rawText: "done",
+            stderr: "",
+            sessionId: "",
+            commandLine: "fake-claude",
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+          };
+        },
+      },
+    };
+
+    const output = await runTask({
+      adapters,
+      providerSelection: { requested: ["claude"], explicit: true },
+      options: { "data-root": dataRoot },
+      task: "inspect the live workspace",
+      workspaceRoot,
+    });
+
+    assert.equal(taskCalled, true);
+    assert.equal(output.job.status, "completed");
+    const packet = JSON.parse(await readFile(output.job.contextPacket.jsonPath, "utf8"));
+    assert.equal(packet.evidence.git.scope, "live-task-workspace");
+    assert.match(packet.evidence.git.diffSummary, /provider must inspect the workspace directly/i);
   } finally {
     await rm(dataRoot, { recursive: true, force: true });
     await rm(workspaceRoot, { recursive: true, force: true });
@@ -1897,9 +2162,10 @@ test("runTask rejects invalid timeout before creating a job", async () => {
 test("runTask does not overwrite a cancelled job when providers finish", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-task-cancel-"));
   try {
-    const workspaceRoot = "/tmp/workspace";
+    const workspaceRoot = dataRoot;
     const adapters = {
       antigravity: {
+        capabilities: taskCapabilities,
         check: async () => ({
           provider: "antigravity",
           ready: true,
@@ -1953,6 +2219,7 @@ test("runTask marks foreground jobs failed when an internal state write fails", 
   try {
     const adapters = {
       claude: {
+        capabilities: taskCapabilities,
         check: async () => ({
           provider: "claude",
           ready: true,
@@ -2015,6 +2282,14 @@ function inconclusiveReview(summary) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function runGit(cwd, args) {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  if (result.status !== 0) {
+    throw new Error(`git ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
+  }
+  return result.stdout;
 }
 
 test("providerRunStatus maps provider-reported cancellation to a non-success status", () => {

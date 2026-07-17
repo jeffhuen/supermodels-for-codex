@@ -26,6 +26,16 @@ test("run controller records cancellation synchronously and notifies listeners o
   assert.deepEqual(events, [["SIGINT", true, "SIGINT", true]]);
 });
 
+test("run controller exposes cancellation as an AbortSignal", () => {
+  const controller = createRunController();
+
+  assert.equal(controller.abortSignal.aborted, false);
+  controller.cancel("SIGTERM");
+
+  assert.equal(controller.abortSignal.aborted, true);
+  assert.match(String(controller.abortSignal.reason), /cancelled/i);
+});
+
 test("signal timing constants keep cancel escalation after provider cleanup", () => {
   assert(PROVIDER_SIGKILL_MS > 0);
   assert(CANCEL_GRACE_MS >= PROVIDER_SIGKILL_MS);

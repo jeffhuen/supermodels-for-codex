@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { runReview } from "../scripts/lib/runtime.mjs";
 import { createJob, createState, readJob } from "../scripts/lib/state.mjs";
+import { challengeRunId } from "../scripts/providers/registry.mjs";
 
 test("runReview executes two ready providers and stores independent artifacts", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-review-"));
@@ -68,21 +69,23 @@ test("runReview adversarial mode cross-challenges usable first-pass provider out
       workspaceRoot,
     });
 
+    const claudeChallenge = challengeRunId("claude", ["antigravity"]);
+    const antigravityChallenge = challengeRunId("antigravity", ["claude"]);
     assert.deepEqual(output.selected, ["claude", "antigravity"]);
     assert.deepEqual(Object.keys(output.job.providerRuns).sort(), [
       "antigravity",
-      "antigravity-challenge-claude",
+      antigravityChallenge,
       "claude",
-      "claude-challenge-antigravity",
-    ]);
+      claudeChallenge,
+    ].sort());
     assert.equal(output.challengeResults.length, 2);
-    assert.equal(output.job.providerRuns["claude-challenge-antigravity"].phase, "cross-challenge");
-    assert.equal(output.job.providerRuns["claude-challenge-antigravity"].sourceProvider, "claude");
-    assert.deepEqual(output.job.providerRuns["claude-challenge-antigravity"].challengeTargets, ["antigravity"]);
-    assert.match(output.job.providerRuns["claude-challenge-antigravity"].rawResultPath, /provider-claude-challenge-antigravity\.raw\.txt/);
-    assert.match(output.job.providerRuns["antigravity-challenge-claude"].rawResultPath, /provider-antigravity-challenge-claude\.raw\.txt/);
+    assert.equal(output.job.providerRuns[claudeChallenge].phase, "cross-challenge");
+    assert.equal(output.job.providerRuns[claudeChallenge].sourceProvider, "claude");
+    assert.deepEqual(output.job.providerRuns[claudeChallenge].challengeTargets, ["antigravity"]);
+    assert.match(output.job.providerRuns[claudeChallenge].rawResultPath, new RegExp(`provider-${claudeChallenge}\\.raw\\.txt`));
+    assert.match(output.job.providerRuns[antigravityChallenge].rawResultPath, new RegExp(`provider-${antigravityChallenge}\\.raw\\.txt`));
     assert.match(output.synthesis, /Cross-Challenge Results/);
-    assert.match(output.synthesis, /Claude Code challenging Antigravity/);
+    assert.match(output.synthesis, /Claude Code challenging Google Antigravity/);
     assert.match(output.synthesis, /Antigravity challenging Claude Code/);
     assert(calls.every((call) => /session context: challenge workflow was just committed/.test(call.prompt)));
     assert(calls.some((call) => /Peer Reviews To Challenge/.test(call.prompt)));
@@ -122,7 +125,7 @@ test("runReview adversarial mode targets both peers when three providers cross-c
     assert.equal(output.challengeResults.length, 3);
     for (const challenger of ["claude", "antigravity", "grok"]) {
       const peers = ["claude", "antigravity", "grok"].filter((provider) => provider !== challenger);
-      const runId = `${challenger}-challenge-${peers.join("-")}`;
+      const runId = challengeRunId(challenger, peers);
       assert.equal(output.job.providerRuns[runId].challengeTargets.length, 2);
       assert.deepEqual(output.job.providerRuns[runId].challengeTargets.slice().sort(), peers.slice().sort());
     }
@@ -171,6 +174,7 @@ test("runReview persists and supplies a context packet to providers", async () =
 
 function fakeAdapter(provider, rawText, expectedFocus = "focus on data loss", calls = null) {
   return {
+    capabilities: () => ({ review: true, adversarialReview: true }),
     check: async () => ({
       provider,
       ready: true,
@@ -243,6 +247,7 @@ test("runReview records provider progress before every provider has finished", a
     const adapters = {
       claude: fakeAdapter("claude", "High: fast claude finding", "progress test"),
       antigravity: {
+        capabilities: () => ({ review: true, adversarialReview: true }),
         check: async () => ({
           provider: "antigravity",
           ready: true,
@@ -317,6 +322,7 @@ test("runReview records provider subprocess pid while provider is running", asyn
     });
     const adapters = {
       claude: {
+        capabilities: () => ({ review: true, adversarialReview: true }),
         check: async () => ({
           provider: "claude",
           ready: true,

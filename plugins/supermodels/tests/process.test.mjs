@@ -1,11 +1,27 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { createRunController } from "../scripts/lib/run-control.mjs";
-import { runCommand, signalProcessTree } from "../scripts/lib/process.mjs";
+import { findExecutable, runCommand, signalProcessTree } from "../scripts/lib/process.mjs";
+
+test("findExecutable returns only regular executable files", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-executable-probe-"));
+  const directoryName = `directory-provider-${process.pid}`;
+  const fileName = `file-provider-${process.pid}`;
+  try {
+    await mkdir(path.join(tempDir, directoryName), { mode: 0o755 });
+    await writeFile(path.join(tempDir, fileName), "probe\n", { mode: 0o755 });
+    const env = { ...process.env, PATH: tempDir };
+
+    assert.equal(await findExecutable(directoryName, { env }), "");
+    assert.equal(await findExecutable(fileName, { env }), path.join(tempDir, fileName));
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
 
 test("runCommand handles stdin pipe errors when child exits early", async () => {
   const result = await runCommand({
@@ -116,6 +132,26 @@ test("runCommand forwards controller cancellation without exiting the parent", {
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
+});
+
+test("runCommand forwards AbortSignal cancellation to the subprocess", { skip: process.platform === "win32" }, async () => {
+  const abort = new AbortController();
+  const command = runCommand({
+    bin: process.execPath,
+    args: ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"],
+  }, {
+    timeoutMs: 10_000,
+    signalKillMs: 0,
+    signal: abort.signal,
+  });
+
+  await sleep(50);
+  abort.abort(new Error("deadline"));
+  const result = await command;
+
+  assert.equal(result.exitCode, null);
+  assert.equal(result.signal, "SIGKILL");
+  assert.equal(result.timedOut, false);
 });
 
 function sleep(ms) {

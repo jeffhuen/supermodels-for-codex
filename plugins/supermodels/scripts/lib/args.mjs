@@ -1,12 +1,6 @@
-export const PROVIDER_IDS = Object.freeze(["claude", "antigravity", "grok"]);
+import { PROVIDER_IDS, resolveProviderId } from "../providers/registry.mjs";
 
-const PROVIDER_ALIASES = Object.freeze({
-  agy: "antigravity",
-  antigravity: "antigravity",
-  claude: "claude",
-  "claude-code": "claude",
-  grok: "grok",
-});
+export { PROVIDER_IDS };
 
 export function parseArgs(argv, config = {}) {
   const valueOptions = new Set(config.valueOptions ?? []);
@@ -167,7 +161,6 @@ export function parseRuntimeArgs(argv) {
       "model",
       "provider",
       "resume",
-      "scope",
       "timeout",
     ],
     aliasMap: {
@@ -233,9 +226,9 @@ export function resolveProviderIds(options = {}, config = {}) {
 
   const requested = [];
   for (const raw of requestedRaw) {
-    const normalized = PROVIDER_ALIASES[raw.toLowerCase()];
+    const normalized = resolveProviderId(raw);
     if (!normalized) {
-      throw new Error(`Unsupported provider '${raw}'. Supported providers: claude, antigravity, grok.`);
+      throw new Error(`Unsupported provider '${raw}'. Supported providers: ${PROVIDER_IDS.join(", ")}.`);
     }
     if (!requested.includes(normalized)) {
       requested.push(normalized);

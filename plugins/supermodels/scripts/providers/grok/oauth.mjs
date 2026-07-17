@@ -1,6 +1,9 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+
+import { throwIfAborted } from "../../lib/abort.mjs";
+import { runCommand } from "../../lib/process.mjs";
 
 const REFRESH_SAFETY_MS = 300_000;
 const DEFAULT_ISSUER = "https://auth.x.ai";
@@ -13,34 +16,35 @@ export class GrokCredentials {
     this.cache = null;
   }
 
-  async accessToken() {
-    const creds = await this.load();
+  async accessToken(options = {}) {
+    const creds = await this.load(false, options);
     if (creds.expiresAt - this.now() <= REFRESH_SAFETY_MS) {
-      return (await this.refresh(creds)).accessToken;
+      return (await this.refresh(creds, options)).accessToken;
     }
     return creds.accessToken;
   }
 
-  async forceRefresh() {
-    return (await this.refresh(await this.load(true))).accessToken;
+  async forceRefresh(options = {}) {
+    return (await this.refresh(await this.load(true, options), options)).accessToken;
   }
 
   forceReload() {
     this.cache = null;
   }
 
-  async identity() {
-    const creds = await this.load();
+  async identity(options = {}) {
+    const creds = await this.load(false, options);
     return { userId: creds.userId, email: creds.email };
   }
 
-  async load(force = false) {
+  async load(force = false, options = {}) {
+    throwIfAborted(options.signal);
     if (this.cache && !force) {
       return this.cache;
     }
     let raw;
     try {
-      raw = await readFile(this.authPath, "utf8");
+      raw = await readFile(this.authPath, { encoding: "utf8", signal: options.signal });
     } catch (error) {
       throw new Error(`Grok auth is missing or unreadable at ${this.authPath}. Run \`grok login\`. (${error?.message ?? error})`);
     }
@@ -73,7 +77,8 @@ export class GrokCredentials {
     return this.cache;
   }
 
-  async refresh(creds) {
+  async refresh(creds, options = {}) {
+    throwIfAborted(options.signal);
     const tokenUrl = `${creds.issuer.replace(/\/$/, "")}/oauth2/token`;
     const body = new URLSearchParams({
       grant_type: "refresh_token",
@@ -84,6 +89,7 @@ export class GrokCredentials {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: body.toString(),
+      signal: options.signal,
     });
     if (!response.ok) {
       throw new Error(`Grok token refresh failed (${response.status}). Run \`grok login\` to re-authenticate.`);
@@ -103,17 +109,25 @@ export class GrokCredentials {
       expires_at: new Date(expiresAt).toISOString(),
     };
     const envelope = { ...creds.envelope, [creds.entryKey]: entry };
-    await this.persist(envelope);
+    throwIfAborted(options.signal);
+    await this.persist(envelope, options);
     this.cache = { ...creds, envelope, accessToken, refreshToken, expiresAt };
     return this.cache;
   }
 
-  async persist(envelope) {
+  async persist(envelope, options = {}) {
+    throwIfAborted(options.signal);
     const payload = `${JSON.stringify(envelope, null, 2)}\n`;
     await mkdir(path.dirname(this.authPath), { recursive: true });
     const tempPath = `${this.authPath}.supermodels-${process.pid}.tmp`;
-    await writeFile(tempPath, payload, { mode: 0o600 });
-    await rename(tempPath, this.authPath);
+    try {
+      throwIfAborted(options.signal);
+      await writeFile(tempPath, payload, { mode: 0o600, signal: options.signal });
+      throwIfAborted(options.signal);
+      await rename(tempPath, this.authPath);
+    } finally {
+      await rm(tempPath, { force: true }).catch(() => {});
+    }
   }
 }
 
@@ -127,13 +141,41 @@ export function defaultGrokAuthPath() {
 export async function readGrokClientVersion(options = {}) {
   const versionPath = options.versionPath
     ?? path.join(path.dirname(options.authPath ?? defaultGrokAuthPath()), "version.json");
+  throwIfAborted(options.signal);
+  const timeoutMs = options.timeoutMs ?? 5_000;
+  const result = await runCommand({
+    bin: process.execPath,
+    args: ["-e", GROK_VERSION_READ_SCRIPT, versionPath],
+  }, {
+    timeoutMs,
+    signal: options.signal,
+  });
+  throwIfAborted(options.signal);
+  if (result.timedOut) {
+    throw new Error(`Grok client version read timed out after ${timeoutMs}ms.`);
+  }
+  if (result.exitCode !== 0 || !result.stdout) {
+    return "";
+  }
   try {
-    const parsed = JSON.parse(await readFile(versionPath, "utf8"));
+    const parsed = JSON.parse(result.stdout);
     return stringValue(parsed.version) || stringValue(parsed.stable_version);
   } catch {
     return "";
   }
 }
+
+const GROK_VERSION_READ_SCRIPT = String.raw`
+const fs = require("node:fs");
+const filePath = process.argv[1];
+try {
+  const stat = fs.statSync(filePath);
+  if (!stat.isFile() || stat.size > 65536) process.exit(2);
+  process.stdout.write(fs.readFileSync(filePath, "utf8"));
+} catch {
+  process.exit(1);
+}
+`;
 
 function selectAuthEntry(envelope) {
   const entries = Object.entries(envelope).filter(([, value]) =>

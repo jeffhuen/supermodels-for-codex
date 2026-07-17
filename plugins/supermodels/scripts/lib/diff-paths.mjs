@@ -1,5 +1,5 @@
 export function parseDiffGitPathTokens(value) {
-  const text = String(value ?? "").trim();
+  const text = String(value ?? "");
   const separated = splitUnquotedDiffGitSides(text);
   if (separated) {
     return separated;
@@ -31,7 +31,7 @@ export function parseDiffGitPathTokens(value) {
 }
 
 export function parseUnifiedDiffHeaderPath(value) {
-  const text = String(value ?? "").trimEnd();
+  const text = String(value ?? "");
   if (text.startsWith("\"")) {
     return parseDiffGitPathTokens(text)[0] ?? "";
   }
@@ -52,13 +52,13 @@ function splitUnquotedDiffGitSides(value) {
     return null;
   }
   const matchingCandidate = candidates.find((separatorIndex) => {
-    const oldPath = value.slice(0, separatorIndex).trim();
-    const newPath = value.slice(separatorIndex + 1).trim();
+    const oldPath = value.slice(0, separatorIndex);
+    const newPath = value.slice(separatorIndex + 1);
     return stripGitSidePrefix(oldPath) === stripGitSidePrefix(newPath);
   });
   const separatorIndex = matchingCandidate ?? candidates.at(-1);
-  const oldPath = value.slice(0, separatorIndex).trim();
-  const newPath = value.slice(separatorIndex + 1).trim();
+  const oldPath = value.slice(0, separatorIndex);
+  const newPath = value.slice(separatorIndex + 1);
   return oldPath && newPath ? [oldPath, newPath] : null;
 }
 

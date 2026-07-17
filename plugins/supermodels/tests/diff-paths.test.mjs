@@ -20,6 +20,14 @@ test("parseDiffGitPathTokens handles unquoted paths containing space b slash", (
   );
 });
 
+test("diff path parsers preserve trailing whitespace in unquoted Git paths", () => {
+  assert.deepEqual(
+    parseDiffGitPathTokens("a/tail  b/tail "),
+    ["a/tail ", "b/tail "],
+  );
+  assert.equal(parseUnifiedDiffHeaderPath("b/tail "), "b/tail ");
+});
+
 test("parseUnifiedDiffHeaderPath decodes named Git escapes in fallback quoted paths", () => {
   assert.equal(
     parseUnifiedDiffHeaderPath('"a/dir\\tname/caf\\303\\251.mjs"'),

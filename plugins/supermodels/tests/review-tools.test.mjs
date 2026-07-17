@@ -6,104 +6,22 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { collectGitContext } from "../scripts/lib/git.mjs";
+import { collectGitContext, createReviewSnapshot } from "../scripts/lib/git.mjs";
 import {
   COVERAGE_LEDGER_RESERVE,
   boundReadFileResult,
   createReviewTools,
+  createSnapshotReviewTools,
   lastNumberedLine,
-  truncateObject,
 } from "../scripts/lib/review-tools.mjs";
 
 const execFileAsync = promisify(execFile);
 
-test("truncateObject flags diffTruncated only when the diff itself is shortened, not when snippets overflow", () => {
-  const smallDiff = "diff --git a/x b/x\n@@ -1 +1 @@\n+one changed line\n";
-  // Context exceeds the cap because of a huge file snippet, but the diff is tiny.
-  const overByCoverage = truncateObject(
-    { diff: smallDiff, fileSnippets: [{ path: "x", content: "S".repeat(8000) }] },
-    1200,
+test("createSnapshotReviewTools fails closed without an immutable snapshot", () => {
+  assert.throws(
+    () => createSnapshotReviewTools({ workspaceRoot: process.cwd() }),
+    /immutable review snapshot/i,
   );
-  assert.equal(overByCoverage.truncated, true, "context is truncated (snippets overflow the cap)");
-  assert.equal(overByCoverage.diffTruncated, false, "but the diff itself was not shortened");
-  assert.equal(overByCoverage.diff, smallDiff, "diff is byte-identical to the input");
-
-  // A genuinely oversized diff IS flagged as diffTruncated.
-  const bigDiff = "D".repeat(8000);
-  const overByDiff = truncateObject({ diff: bigDiff, fileSnippets: [] }, 1200);
-  assert.equal(overByDiff.diffTruncated, true, "an oversized diff is flagged as diffTruncated");
-  assert.ok(overByDiff.diff.length < bigDiff.length, "the diff was actually shortened");
-});
-
-test("truncateObject preserves the full diff when dropping snippets alone brings the payload under the cap", () => {
-  const cap = 4000;
-  const diff = `diff --git a/x b/x\n@@ -1,120 +1,120 @@\n${"+a changed line of code\n".repeat(120)}`;
-  // The diff is over 55% of the cap (where the old order truncated it) but under
-  // the full cap, so after dropping the oversized snippet it fits whole.
-  assert.ok(Buffer.byteLength(diff, "utf8") > cap * 0.55, "diff exceeds the old 55% pre-trim bound");
-  assert.ok(Buffer.byteLength(diff, "utf8") < cap, "but the full diff fits under the cap");
-  const result = truncateObject({ diff, fileSnippets: [{ path: "big", content: "S".repeat(9000) }] }, cap);
-  assert.equal(result.truncated, true, "context is truncated (the snippet overflowed)");
-  assert.equal(result.diffTruncated, false, "the full diff fits after dropping snippets, so it is not truncated");
-  assert.equal(result.diff, diff, "the full diff is preserved");
-});
-
-test("truncateObject bounds the changedFiles array and keeps the payload under the cap while preserving a fitting diff", () => {
-  const cap = 8000;
-  const diff = `diff --git a/x b/x\n@@ -1,120 +1,120 @@\n${"+a changed line of code\n".repeat(120)}`;
-  const changedFiles = Array.from({ length: 2000 }, (_, i) => ({ status: "??", path: `untracked/file-${i}.txt` }));
-  const result = truncateObject({ ok: true, diff, changedFiles, fileSnippets: [] }, cap);
-  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= cap, "serialized payload stays within the cap");
-  assert.ok(result.changedFiles.length < 2000, "excess changedFiles entries are dropped");
-  assert.ok(result.changedFilesOmitted > 0, "the omitted count is recorded");
-  assert.equal(result.diffTruncated, false, "the fitting diff is not truncated");
-  assert.equal(result.diff, diff, "the full diff is preserved (coverage stays enabled)");
-  // No over-drop: the kept set fills the budget — appending several more entries
-  // would exceed the cap, proving it did not stop at a small fraction.
-  const padded = {
-    ...result,
-    changedFiles: [
-      ...result.changedFiles,
-      ...Array.from({ length: 5 }, (_, i) => ({ status: "??", path: `untracked/extra-${i}.txt` })),
-    ],
-  };
-  assert.ok(
-    Buffer.byteLength(JSON.stringify(padded), "utf8") > cap,
-    "appending more entries exceeds the cap — the budget was filled (no over-drop)",
-  );
-});
-
-test("truncateObject gives the coverage-critical diff strict priority over the changed-files list", () => {
-  const cap = 6000;
-  // The diff ALONE exceeds the cap, so it must be trimmed. It has strict priority:
-  // it fills the budget and the lower-priority file list yields entirely (no fixed
-  // reserve carving bytes out of the diff), with the omitted count still reported.
-  const diff = "D".repeat(9000);
-  const changedFiles = Array.from({ length: 40 }, (_, i) => ({ status: "M", path: `src/mod-${i}.ts` }));
-  const result = truncateObject({ ok: true, diff, changedFiles, fileSnippets: [] }, cap);
-  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= cap, "serialized payload stays within the hard cap");
-  assert.equal(result.diffTruncated, true, "the oversized diff was trimmed");
-  assert.ok(Buffer.byteLength(result.diff, "utf8") > cap * 0.8, "the diff fills the budget (strict priority)");
-  assert.equal(result.changedFiles.length, 0, "the lower-priority file list yields to the diff");
-  assert.equal(result.changedFilesOmitted, 40, "every omitted file is still counted");
-});
-
-test("truncateObject sheds a few files, not the diff, when a payload is only a little over", () => {
-  // A small overflow should drop a handful of changed-file entries and leave the
-  // coverage-critical diff untouched — the old 15% reserve trimmed ~18 KB of diff
-  // to keep files even when dropping a few entries would have sufficed.
-  const cap = 20_000;
-  const diff = "D".repeat(10_000);
-  const changedFiles = Array.from({ length: 260 }, (_, i) => ({ status: "M", path: `src/module-${i}.ts` }));
-  const full = { ok: true, diff, changedFiles, fileSnippets: [] };
-  const overBy = Buffer.byteLength(JSON.stringify(full), "utf8") - cap;
-  assert.ok(overBy > 0, "the payload is over the cap");
-  const result = truncateObject(full, cap);
-  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= cap, "serialized payload is within the cap");
-  assert.equal(result.diff, diff, "the diff is untouched (only the file list was reduced)");
-  assert.equal(result.diffTruncated, false, "the diff was not trimmed");
-  assert.ok(result.changedFilesOmitted > 0, "some files were dropped to fit");
-  assert.ok(result.changedFiles.length >= 260 * 0.9, `kept only ${result.changedFiles.length}/260 — dropped far more than the overflow required`);
 });
 
 test("lastNumberedLine returns the last visible line number, or NaN when there is none", () => {
@@ -135,6 +53,31 @@ test("boundReadFileResult drops whole content lines and keeps end_line consisten
   assert.equal(bounded.end_line, lastVisible, "end_line matches the last visible content line");
   // Whole lines only — the last line is complete, never a mid-line byte cut.
   assert.match(contentLines[contentLines.length - 1], /^\d+: const value = \d+;$/);
+});
+
+test("read_file drops an oversized source line instead of exposing a creditable numbered prefix", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-partial-line-"));
+  try {
+    await writeFile(path.join(workspace, "huge.js"), `${"x".repeat(20_000)}\n`, "utf8");
+    const tools = createReviewTools({
+      workspaceRoot: workspace,
+      maxFileBytes: 128,
+      maxToolBytes: 20_000,
+    });
+
+    const result = await tools.execute("read_file", {
+      path: "huge.js",
+      start_line: 1,
+      end_line: 1,
+    });
+
+    assert.equal(result.truncated, true);
+    assert.equal(result.content, "", "no partial `1:` line is exposed as if it were complete");
+    assert.equal(result.end_line, 0, "the honest range ends before the unread oversized line");
+    assert.ok(Number.isNaN(lastNumberedLine(result.content)));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
 });
 
 test("read_file reserves ledger headroom so result plus a max coverage ledger stays within the cap", async () => {
@@ -172,58 +115,6 @@ test("read_file reserves ledger headroom so result plus a max coverage ledger st
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
-});
-
-test("truncateObject enforces the hard cap when only the diff must be trimmed, and detects it by content", () => {
-  const cap = 400;
-  const diff = "x".repeat(2000); // far larger than the cap, no snippets/changedFiles to reclaim
-  const result = truncateObject({ diff }, cap);
-  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= cap, "serialized payload stays within the hard cap");
-  assert.equal(result.diffTruncated, true, "the trimmed diff is flagged (content comparison)");
-  assert.notEqual(result.diff, diff, "the diff content was changed");
-});
-
-test("truncateObject never loops forever and stays hard-capped even for a pathological tiny cap", () => {
-  // Cap below the truncation-marker size: the diff cannot shrink to fit, so it is
-  // dropped to empty rather than looping forever; the loop terminates.
-  const result = truncateObject({ diff: "x".repeat(50) }, 8);
-  assert.equal(result.diffTruncated, true, "the diff was truncated/dropped");
-  assert.equal(result.diff, "", "an unfittable diff is dropped to empty");
-});
-
-test("truncateObject trims an oversized diff by only the bytes required, not a coarse fraction", () => {
-  // A diff whose payload lands just over the cap should lose ~the overflow, not
-  // ~20%+ (the old 0.8 step compounded by truncateText's geometric shrink turned
-  // a 1-byte overflow into a ~30% cut).
-  const cap = 120_000;
-  const base = Buffer.byteLength(JSON.stringify({ ok: true, diff: "", truncated: true, diffTruncated: false }), "utf8");
-  const diffBytes = cap - base + 200; // 200 bytes over the cap
-  const diff = "d".repeat(diffBytes);
-  const result = truncateObject({ ok: true, diff }, cap);
-  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= cap, "serialized payload is within the cap");
-  assert.equal(result.diffTruncated, true, "the diff was trimmed");
-  // Minimal reclaim: at most a small multiple of the 200-byte overflow is lost.
-  const kept = Buffer.byteLength(result.diff, "utf8");
-  assert.ok(kept >= diffBytes - 1000, `diff kept ${kept} of ${diffBytes} — reclaimed far more than required`);
-});
-
-test("truncateObject trims snippets by only the bytes required, not a fixed 35%/n fraction", () => {
-  // A payload a few hundred bytes over the cap should shave a few hundred bytes
-  // off the snippets — not crush every snippet to 35%/n of the whole cap.
-  const cap = 120_000;
-  const snippetContent = "s".repeat(20_000);
-  const fileSnippets = Array.from({ length: 5 }, (_, i) => ({ path: `f${i}.js`, content: snippetContent, truncated: false }));
-  const totalSnippetBytes = 5 * 20_000;
-  // diff sized so the whole payload is ~500 bytes over the cap.
-  const base = Buffer.byteLength(JSON.stringify({ ok: true, diff: "", fileSnippets, truncated: true, diffTruncated: false }), "utf8");
-  const diff = "d".repeat(cap - base + 500);
-  const result = truncateObject({ ok: true, diff, fileSnippets }, cap);
-  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= cap, "serialized payload is within the cap");
-  assert.equal(result.diff, diff, "the fitting diff is preserved (only snippets were reclaimed)");
-  const keptSnippetBytes = result.fileSnippets.reduce((sum, s) => sum + Buffer.byteLength(s.content, "utf8"), 0);
-  // The old 35%/n rule would cap each of 5 snippets at 0.35*cap/5 = 8400 bytes
-  // (42000 total). Minimal reclaim keeps far more.
-  assert.ok(keptSnippetBytes > totalSnippetBytes - 5000, `kept ${keptSnippetBytes} of ${totalSnippetBytes} snippet bytes — over-dropped`);
 });
 
 test("read_file returns numbered bounded slices inside workspace", async () => {
@@ -292,7 +183,7 @@ test("read_file can read later line ranges from large files without prefix-only 
   }
 });
 
-test("read_file returns a bounded prefix for a large newline-free line", async () => {
+test("read_file refuses to present a partial large newline-free line as complete", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-tools-long-line-"));
   try {
     await mkdir(path.join(workspace, "src"));
@@ -307,8 +198,8 @@ test("read_file returns a bounded prefix for a large newline-free line", async (
 
     assert.equal(result.ok, true);
     assert.equal(result.truncated, true);
-    assert.match(result.content, /^1: x+/);
-    assert(result.content.length > 10);
+    assert.equal(result.content, "");
+    assert.equal(result.end_line, 0);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -427,6 +318,34 @@ test("get_review_context decodes Git-quoted UTF-8 changed file paths", async () 
       return snippet.path === "café.txt" && snippet.content.includes("1: new");
     }));
   } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("snapshot review tools preserve trailing whitespace in changed paths", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-context-trailing-path-"));
+  let snapshot;
+  try {
+    await runGit(workspace, ["init"]);
+    await runGit(workspace, ["config", "user.email", "test@example.com"]);
+    await runGit(workspace, ["config", "user.name", "Test User"]);
+    const trailingPath = "tail ";
+    await writeFile(path.join(workspace, trailingPath), "old\n", "utf8");
+    await runGit(workspace, ["add", "."]);
+    await runGit(workspace, ["commit", "-m", "initial"]);
+    await writeFile(path.join(workspace, trailingPath), "new\n", "utf8");
+    snapshot = await createReviewSnapshot({ workspaceRoot: workspace });
+    const tools = createSnapshotReviewTools({ workspaceRoot: workspace, snapshot });
+
+    const changed = await tools.execute("list_changed_files");
+    const read = await tools.execute("read_file", { path: trailingPath, start_line: 1, end_line: 1 });
+
+    assert(changed.changedFiles.some((file) => file.path === trailingPath));
+    assert.equal(read.ok, true);
+    assert.equal(read.path, trailingPath);
+    assert.equal(read.content, "1: new");
+  } finally {
+    await snapshot?.dispose();
     await rm(workspace, { recursive: true, force: true });
   }
 });
@@ -691,6 +610,105 @@ test("get_review_context surfaces git status failures instead of returning incom
       /git status failed/i,
     );
   } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("get_review_context and get_diff page one immutable diff losslessly with single-use interoperable cursors", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-tools-pages-"));
+  let snapshot;
+  try {
+    await runGit(workspace, ["init"]);
+    await runGit(workspace, ["config", "user.email", "test@example.com"]);
+    await runGit(workspace, ["config", "user.name", "Test User"]);
+    await writeFile(path.join(workspace, "large.mjs"), "export const before = true;\n", "utf8");
+    await runGit(workspace, ["add", "."]);
+    await runGit(workspace, ["commit", "-m", "initial"]);
+    const changed = Array.from(
+      { length: 2500 },
+      (_, index) => `export const value${index} = ${JSON.stringify(`line-${index}-\\\"`)};`,
+    ).join("\n");
+    await writeFile(path.join(workspace, "large.mjs"), `${changed}\n`, "utf8");
+
+    snapshot = await createReviewSnapshot({ workspaceRoot: workspace });
+    const tools = createReviewTools({ snapshot, maxToolBytes: 9_500, maxFileBytes: 2_000 });
+    const first = await tools.execute("get_review_context");
+    assert.equal(first.ok, true);
+    assert.equal(first.complete, false);
+    assert.equal(typeof first.next_cursor, "string");
+
+    let rebuilt = first.diff;
+    const firstCursor = first.next_cursor;
+    let cursor = firstCursor;
+    let last;
+    while (cursor) {
+      last = await tools.execute("get_diff", { cursor });
+      assert.ok(Buffer.byteLength(JSON.stringify(last), "utf8") <= 9_500 - COVERAGE_LEDGER_RESERVE);
+      rebuilt += last.diff;
+      cursor = last.next_cursor;
+    }
+
+    assert.equal(last.complete, true);
+    assert.equal(rebuilt, snapshot.context.diff);
+    await assert.rejects(() => tools.execute("get_diff", { cursor: firstCursor }), /invalid|expired|used/i);
+
+    await writeFile(path.join(workspace, "large.mjs"), "live mutation after snapshot\n", "utf8");
+    await writeFile(path.join(workspace, "late.mjs"), "late file\n", "utf8");
+    const read = await tools.execute("read_file", { path: "large.mjs", start_line: 1, end_line: 1 });
+    const searchResult = await tools.execute("search", { query: "value2499" });
+    const listed = await tools.execute("list_files", { query: "late.mjs" });
+    assert.match(read.content, /value0/);
+    assert.match(searchResult.output, /value2499/);
+    assert.deepEqual(listed.files, []);
+  } finally {
+    await snapshot?.dispose();
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("list_changed_files pages every NUL-safe changed path and rejects wrong-kind cursors", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "supermodels-review-tools-file-pages-"));
+  let snapshot;
+  try {
+    await runGit(workspace, ["init"]);
+    await runGit(workspace, ["config", "user.email", "test@example.com"]);
+    await runGit(workspace, ["config", "user.name", "Test User"]);
+    await writeFile(path.join(workspace, "README.md"), "base\n", "utf8");
+    await runGit(workspace, ["add", "."]);
+    await runGit(workspace, ["commit", "-m", "initial"]);
+    await mkdir(path.join(workspace, "nested"));
+    for (let index = 0; index < 180; index += 1) {
+      await writeFile(path.join(workspace, "nested", `file-${String(index).padStart(3, "0")}-${"x".repeat(30)}.txt`), `${index}\n`);
+    }
+    await writeFile(path.join(workspace, "nested", "line\nname.txt"), "odd\n");
+
+    snapshot = await createReviewSnapshot({ workspaceRoot: workspace });
+    const maxToolBytes = 8_900;
+    const tools = createReviewTools({ snapshot, maxToolBytes });
+    const paths = [];
+    let cursor;
+    let firstDiffCursor;
+    do {
+      const page = await tools.execute("list_changed_files", cursor ? { cursor } : {});
+      assert.ok(Buffer.byteLength(JSON.stringify(page), "utf8") <= maxToolBytes);
+      paths.push(...page.changedFiles.map((file) => file.path));
+      cursor = page.next_cursor;
+      if (!firstDiffCursor) {
+        const diffPage = await tools.execute("get_diff");
+        firstDiffCursor = diffPage.next_cursor;
+      }
+    } while (cursor);
+
+    assert.deepEqual(paths, snapshot.changedFiles.map((file) => file.path));
+    assert(paths.includes("nested/line\nname.txt"));
+    await assert.rejects(
+      () => tools.execute("list_changed_files", { cursor: firstDiffCursor }),
+      /invalid|wrong|cursor/i,
+    );
+    const intendedPage = await tools.execute("get_diff", { cursor: firstDiffCursor });
+    assert.equal(intendedPage.ok, true, "a wrong-kind attempt must not consume the valid diff cursor");
+  } finally {
+    await snapshot?.dispose();
     await rm(workspace, { recursive: true, force: true });
   }
 });

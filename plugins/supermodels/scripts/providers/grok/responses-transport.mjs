@@ -1,4 +1,5 @@
 import { readGrokClientVersion } from "./oauth.mjs";
+import { awaitAbortable, throwIfAborted } from "../../lib/abort.mjs";
 
 const DEFAULT_RESPONSES_URL = "https://cli-chat-proxy.grok.com/v1/responses";
 const DEFAULT_MAX_RETRIES = 3;
@@ -39,6 +40,7 @@ export function toGrokResponsesRequest(body = {}) {
 }
 
 export function collectGrokResponse(payload = {}) {
+  const completion = grokCompletion(payload);
   const content = [];
   const toolCalls = [];
   for (const item of payload.output ?? []) {
@@ -60,7 +62,7 @@ export function collectGrokResponse(payload = {}) {
     // "reasoning" items (and any other unrecognized item types) are never
     // round-tripped back to the caller.
   }
-  if (!content.length && !toolCalls.length) {
+  if (!content.length && !toolCalls.length && (completion.status === "complete" || !payload.status)) {
     throw new Error("Empty Grok response: no output content or tool calls.");
   }
   return {
@@ -69,8 +71,21 @@ export function collectGrokResponse(payload = {}) {
     text: content.filter((item) => item.type === "text").map((item) => item.text).join(""),
     usage: payload.usage,
     model: payload.model ?? "",
-    stop_reason: toolCalls.length ? "tool_use" : "end_turn",
+    stop_reason: completion.status === "complete"
+      ? (toolCalls.length ? "tool_use" : "end_turn")
+      : completion.reason,
+    completion,
   };
+}
+
+function grokCompletion(payload) {
+  const status = String(payload?.status ?? "").trim();
+  if (status === "completed") {
+    return { status: "complete", reason: "completed" };
+  }
+  const reason = String(payload?.incomplete_details?.reason ?? status).trim()
+    || "missing-response-status";
+  return { status: "incomplete", reason };
 }
 
 export function parseResponsesSseLines(lines) {
@@ -90,7 +105,7 @@ export function parseResponsesSseLines(lines) {
     } catch {
       continue;
     }
-    if (event?.type === "response.completed") {
+    if (["response.completed", "response.incomplete", "response.failed"].includes(event?.type)) {
       finalResponse = event.response ?? null;
     }
   }
@@ -128,17 +143,23 @@ export class GrokOAuthResponsesTransport {
     const nextOptions = { ...options, deadline };
     const signal = combineAbortSignals(options.signal, remaining);
     try {
-      const clientVersion = await this.resolveClientVersion();
-      const token = tokenOverride ?? await this.credentials.accessToken();
+      const clientVersion = await this.resolveClientVersion(signal.signal);
+      const token = tokenOverride ?? await awaitAbortable(
+        () => this.credentials.accessToken({ signal: signal.signal }),
+        signal.signal,
+      );
       const response = await this.fetchImpl(this.url, {
         method: "POST",
-        headers: await this.buildHeaders(token, clientVersion),
+        headers: await this.buildHeaders(token, clientVersion, signal.signal),
         body: JSON.stringify({ ...toGrokResponsesRequest(body), stream: true }),
         signal: signal.signal,
       });
       if (response.status === 401) {
         if (!refreshed) {
-          const refreshedToken = await this.credentials.forceRefresh();
+          const refreshedToken = await awaitAbortable(
+            () => this.credentials.forceRefresh({ signal: signal.signal }),
+            signal.signal,
+          );
           return await this.request(body, nextOptions, true, refreshedToken);
         }
         this.credentials.forceReload?.();
@@ -178,16 +199,16 @@ export class GrokOAuthResponsesTransport {
     }
   }
 
-  async resolveClientVersion() {
+  async resolveClientVersion(signal) {
     if (typeof this.clientVersion === "string" && this.clientVersion) {
       return this.clientVersion;
     }
-    const resolved = await readGrokClientVersion();
+    const resolved = await readGrokClientVersion({ signal });
     this.clientVersion = resolved || "0.0.0";
     return this.clientVersion;
   }
 
-  async buildHeaders(token, clientVersion) {
+  async buildHeaders(token, clientVersion, signal) {
     const headers = {
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
@@ -199,7 +220,10 @@ export class GrokOAuthResponsesTransport {
       "user-agent": `grok-shell/${clientVersion} (${grokPlatformName()}; ${grokArchName()})`,
     };
     try {
-      const identity = await this.credentials.identity();
+      const identity = await awaitAbortable(
+        () => this.credentials.identity({ signal }),
+        signal,
+      );
       if (identity?.userId) {
         headers["x-userid"] = identity.userId;
       }
@@ -207,6 +231,7 @@ export class GrokOAuthResponsesTransport {
         headers["x-email"] = identity.email;
       }
     } catch {
+      throwIfAborted(signal);
       // identity() failures must not fail the request; omit the identity headers.
     }
     return headers;
@@ -272,7 +297,6 @@ function combineAbortSignals(parentSignal, timeoutMs) {
       controller.abort(new Error("Request timed out."));
     }
   }, timeoutMs);
-  timer.unref?.();
   return {
     signal: controller.signal,
     cleanup() {

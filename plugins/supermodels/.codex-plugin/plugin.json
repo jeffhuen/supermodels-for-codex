@@ -1,6 +1,6 @@
 {
   "name": "supermodels",
-  "version": "0.2.10",
+  "version": "0.3.0",
   "description": "Call Claude Code, Google Antigravity, and Grok Build from Codex for independent code review and task delegation.",
   "author": {
     "name": "Jeff Huen",
@@ -21,7 +21,7 @@
   "interface": {
     "displayName": "Supermodels",
     "shortDescription": "Use external coding agents as adversarial reviewers from Codex.",
-    "longDescription": "Supermodels lets Codex ask Claude Code, Google Antigravity, and Grok Build for independent reviews through a shared read-only tool loop, or delegate bounded tasks through their native CLIs while preserving local provider auth and artifacts.",
+    "longDescription": "Supermodels lets Codex ask Claude Code, Google Antigravity, and Grok Build for independent reviews over one immutable snapshot with losslessly paginated diff and changed-file evidence, or delegate bounded tasks through their native CLIs while preserving local provider auth and artifacts.",
     "developerName": "Jeff Huen",
     "category": "Developer Tools",
     "capabilities": [

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -178,12 +179,33 @@ test("collectClaudeMessageEvents preserves streamed tool calls and text", () => 
     },
     { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "}" } },
     { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 8 } },
+    { type: "message_stop" },
   ]);
 
   assert.equal(result.text, "Inspecting diff.");
   assert.equal(result.model, "claude-sonnet-4-6");
   assert.deepEqual(result.tool_calls, [{ id: "toolu_1", name: "read_file", input: { path: "runtime.mjs" } }]);
   assert.deepEqual(result.usage, { input_tokens: 10, output_tokens: 8 });
+  assert.deepEqual(result.completion, { status: "complete", reason: "tool_use" });
+});
+
+test("collectClaudeMessageEvents reports max-token and missing terminal reasons as incomplete", () => {
+  const maxTokens = collectClaudeMessageEvents([
+    { type: "content_block_start", index: 0, content_block: { type: "text", text: "partial" } },
+    { type: "message_delta", delta: { stop_reason: "max_tokens" } },
+  ]);
+  assert.deepEqual(maxTokens.completion, { status: "incomplete", reason: "max_tokens" });
+
+  const missing = collectClaudeMessageEvents([
+    { type: "content_block_start", index: 0, content_block: { type: "text", text: "partial" } },
+  ]);
+  assert.deepEqual(missing.completion, { status: "incomplete", reason: "missing-stop-reason" });
+
+  const missingMessageStop = collectClaudeMessageEvents([
+    { type: "content_block_start", index: 0, content_block: { type: "text", text: "apparently done" } },
+    { type: "message_delta", delta: { stop_reason: "end_turn" } },
+  ]);
+  assert.deepEqual(missingMessageStop.completion, { status: "incomplete", reason: "missing-message-stop" });
 });
 
 test("collectClaudeMessageEvents preserves thinking blocks for tool turns", () => {
@@ -685,6 +707,24 @@ test("toCodeAssistRequest hardens AGY tool history with ids and synthetic signat
   }]);
 });
 
+test("toCodeAssistRequest resolves repeated fallback tool IDs against the nearest preceding turn", () => {
+  const request = toCodeAssistRequest({
+    messages: [
+      { role: "user", content: [{ type: "text", text: "review" }] },
+      { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "get_diff", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "{\"ok\":true}" }] },
+      { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "read_file", input: { path: "a.mjs" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "{\"ok\":true}" }] },
+    ],
+  });
+
+  const responses = request.contents
+    .flatMap((content) => content.parts)
+    .filter((part) => part.functionResponse)
+    .map((part) => part.functionResponse.name);
+  assert.deepEqual(responses, ["get_diff", "read_file"]);
+});
+
 test("toCodeAssistRequest coalesces adjacent same-role turns for Gemini history", () => {
   const request = toCodeAssistRequest({
     messages: [
@@ -849,6 +889,18 @@ test("collectAntigravityResponse parses function calls, text, and usage", () => 
     output_tokens: 5,
     total_tokens: 15,
   });
+  assert.deepEqual(result.completion, { status: "complete", reason: "STOP" });
+});
+
+test("collectAntigravityResponse reports MAX_TOKENS as incomplete even when a submit tool call survived", () => {
+  const result = collectAntigravityResponse({
+    candidates: [{
+      content: { parts: [{ functionCall: { id: "submit-1", name: "submit_review", args: {} } }] },
+      finishReason: "MAX_TOKENS",
+    }],
+  });
+  assert.deepEqual(result.completion, { status: "incomplete", reason: "MAX_TOKENS" });
+  assert.equal(result.tool_calls[0].name, "submit_review");
 });
 
 test("collectAntigravityResponse rejects empty stopped responses without tool calls", () => {
@@ -1461,6 +1513,20 @@ test("readGrokClientVersion reads version.json", async () => {
   }
 });
 
+test("readGrokClientVersion refuses a non-regular version source without hanging", { skip: process.platform === "win32" }, async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "supermodels-grok-version-fifo-"));
+  const fifo = path.join(dir, "version.json");
+  try {
+    const created = spawnSync("mkfifo", [fifo]);
+    assert.equal(created.status, 0, created.stderr?.toString() || "mkfifo failed");
+    const startedAt = Date.now();
+    assert.equal(await readGrokClientVersion({ versionPath: fifo, timeoutMs: 40 }), "");
+    assert.ok(Date.now() - startedAt < 1_000, "version FIFO should not outlive its deadline");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("toGrokResponsesRequest translates Anthropic body to Responses shape", () => {
   const request = toGrokResponsesRequest({
     model: "grok-4.5",
@@ -1501,6 +1567,7 @@ test("toGrokResponsesRequest translates Anthropic body to Responses shape", () =
 
 test("collectGrokResponse maps output items to the Messages shape", () => {
   const result = collectGrokResponse({
+    status: "completed",
     model: "grok-4.5",
     output: [
       { type: "reasoning", summary: [] },
@@ -1512,11 +1579,27 @@ test("collectGrokResponse maps output items to the Messages shape", () => {
   assert.deepEqual(result.tool_calls, [{ id: "call-9", name: "read_file", input: { path: "b.mjs" } }]);
   assert.equal(result.text, "Looking.");
   assert.equal(result.stop_reason, "tool_use");
+  assert.deepEqual(result.completion, { status: "complete", reason: "completed" });
   assert.equal(result.usage.total_tokens, 15);
   assert.deepEqual(result.content, [
     { type: "text", text: "Looking." },
     { type: "tool_use", id: "call-9", name: "read_file", input: { path: "b.mjs" } },
   ]);
+});
+
+test("collectGrokResponse preserves incomplete status instead of synthesizing a clean terminal reason", () => {
+  const result = collectGrokResponse({
+    status: "incomplete",
+    incomplete_details: { reason: "max_output_tokens" },
+    output: [{
+      type: "function_call",
+      call_id: "submit-1",
+      name: "submit_review",
+      arguments: "{}",
+    }],
+  });
+  assert.deepEqual(result.completion, { status: "incomplete", reason: "max_output_tokens" });
+  assert.equal(result.stop_reason, "max_output_tokens");
 });
 
 test("collectGrokResponse throws on empty output", () => {
@@ -1533,6 +1616,13 @@ test("parseResponsesSseLines returns the response.completed payload", () => {
   ];
   assert.deepEqual(parseResponsesSseLines(lines), finalResponse);
   assert.equal(parseResponsesSseLines(['data: {"type":"response.output_text.delta"}']), null);
+});
+
+test("parseResponsesSseLines preserves incomplete terminal payloads", () => {
+  const finalResponse = { status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: [] };
+  assert.deepEqual(parseResponsesSseLines([
+    `data: ${JSON.stringify({ type: "response.incomplete", response: finalResponse })}`,
+  ]), finalResponse);
 });
 
 function grokTransportFixture({ responses }) {
@@ -1558,6 +1648,7 @@ function grokTransportFixture({ responses }) {
 }
 
 const OK_RESPONSE = JSON.stringify({
+  status: "completed",
   model: "grok-4.5",
   output: [{ type: "message", content: [{ type: "output_text", text: "done" }] }],
   usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
@@ -1650,6 +1741,29 @@ test("GrokOAuthResponsesTransport preserves one deadline across retries", async 
   assert.equal(calls, 1);
 });
 
+test("AntigravityCodeAssistTransport preserves one deadline across retries", async () => {
+  let calls = 0;
+  let clock = 1000;
+  const transport = new AntigravityCodeAssistTransport({
+    credentials: { accessToken: async () => "t", forceRefresh: async () => "t", forceReload() {} },
+    projectId: "project-1",
+    rateLimiter: noRateLimit,
+    retryBaseDelayMs: 1,
+    retryMinDelayMs: 0,
+    now: () => clock,
+    fetchImpl: async () => {
+      calls += 1;
+      clock += 500;
+      return new Response("busy", { status: 503 });
+    },
+  });
+  await assert.rejects(
+    () => transport.messages({ model: "gemini", max_tokens: 10, messages: [], tools: [] }, { timeoutMs: 400 }),
+    /overall deadline/,
+  );
+  assert.equal(calls, 1);
+});
+
 test("ClaudeOAuthMessagesTransport preserves one deadline across retries", async () => {
   let calls = 0;
   let clock = 1000;
@@ -1669,4 +1783,55 @@ test("ClaudeOAuthMessagesTransport preserves one deadline across retries", async
     /overall deadline/,
   );
   assert.equal(calls, 1);
+});
+
+test("direct transports abort credential access that hangs past the request deadline", async (t) => {
+  const hangingCredentials = {
+    accessToken: async () => await new Promise(() => {}),
+    forceRefresh: async () => await new Promise(() => {}),
+    forceReload() {},
+    identity: async () => ({ userId: "", email: "" }),
+  };
+  const cases = [
+    {
+      name: "claude",
+      transport: new ClaudeOAuthMessagesTransport({
+        credentials: hangingCredentials,
+        url: "https://api.test/v1/messages",
+        fetchImpl: async () => { throw new Error("fetch must not run"); },
+      }),
+      body: { model: "claude", max_tokens: 10, messages: [] },
+    },
+    {
+      name: "grok",
+      transport: new GrokOAuthResponsesTransport({
+        credentials: hangingCredentials,
+        clientVersion: "0.2.101",
+        url: "https://proxy.test/v1/responses",
+        fetchImpl: async () => { throw new Error("fetch must not run"); },
+      }),
+      body: { model: "grok-4.5", max_tokens: 10, messages: [] },
+    },
+    {
+      name: "antigravity",
+      transport: new AntigravityCodeAssistTransport({
+        credentials: hangingCredentials,
+        projectId: "project-1",
+        rateLimiter: noRateLimit,
+        fetchImpl: async () => { throw new Error("fetch must not run"); },
+      }),
+      body: { model: "gemini", max_tokens: 10, messages: [], tools: [] },
+    },
+  ];
+
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const started = Date.now();
+      await assert.rejects(
+        () => scenario.transport.messages(scenario.body, { timeoutMs: 40 }),
+        /timed out|aborted/i,
+      );
+      assert(Date.now() - started < 500, "credential wait must be bounded by the transport deadline");
+    });
+  }
 });

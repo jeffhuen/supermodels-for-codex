@@ -112,12 +112,13 @@ export async function listJobs(state) {
 export async function writeProviderResult(state, jobId, result) {
   const safeJobId = validateJobId(jobId);
   const provider = result.provider;
+  const artifactKey = providerArtifactKey(provider);
   const runDir = path.join(state.runsDir, safeJobId);
   await ensurePrivateDir(runDir);
 
-  const rawResultPath = path.join(runDir, `provider-${provider}.raw.txt`);
-  const normalizedResultPath = path.join(runDir, `provider-${provider}.normalized.json`);
-  const stderrPath = path.join(runDir, `provider-${provider}.stderr.log`);
+  const rawResultPath = path.join(runDir, `provider-${artifactKey}.raw.txt`);
+  const normalizedResultPath = path.join(runDir, `provider-${artifactKey}.normalized.json`);
+  const stderrPath = path.join(runDir, `provider-${artifactKey}.stderr.log`);
   const normalized = {
     ...(result.normalized ?? {}),
     provider,
@@ -162,6 +163,16 @@ export async function writeProviderResult(state, jobId, result) {
       providerRuns,
     };
   });
+}
+
+function providerArtifactKey(provider) {
+  const value = String(provider ?? "provider");
+  const safe = value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "provider";
+  if (safe === value && Buffer.byteLength(safe, "utf8") <= 100) {
+    return safe;
+  }
+  const hash = crypto.createHash("sha256").update(value).digest("hex").slice(0, 16);
+  return `${safe.slice(0, 48)}-${hash}`;
 }
 
 export async function initializeProviderRuns(state, jobId, providers) {

@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { awaitAbortable, throwIfAborted } from "../../lib/abort.mjs";
+
 const execFileAsync = promisify(execFile);
 
 const DEFAULT_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -31,27 +33,28 @@ export class ClaudeCodeCredentials {
     this.cache = null;
   }
 
-  async accessToken() {
-    const creds = await this.load();
+  async accessToken(options = {}) {
+    const creds = await this.load(false, options);
     if (creds.expiresAt - this.now() <= REFRESH_SAFETY_MS) {
-      return (await this.refresh(creds)).accessToken;
+      return (await this.refresh(creds, options)).accessToken;
     }
     return creds.accessToken;
   }
 
-  async forceRefresh() {
-    return (await this.refresh(await this.load(true))).accessToken;
+  async forceRefresh(options = {}) {
+    return (await this.refresh(await this.load(true, options), options)).accessToken;
   }
 
   forceReload() {
     this.cache = null;
   }
 
-  async load(force = false) {
+  async load(force = false, options = {}) {
+    throwIfAborted(options.signal);
     if (this.cache && !force) {
       return this.cache;
     }
-    const envelope = await this.readEnvelope();
+    const envelope = await this.readEnvelope(options);
     const oauth = envelope.claudeAiOauth;
     if (!oauth || typeof oauth !== "object") {
       throw new Error("Claude Code credentials are missing claudeAiOauth.");
@@ -73,7 +76,8 @@ export class ClaudeCodeCredentials {
     return this.cache;
   }
 
-  async refresh(creds) {
+  async refresh(creds, options = {}) {
+    throwIfAborted(options.signal);
     const requestedScopes = creds.scopes.length ? creds.scopes : DEFAULT_SCOPES;
     const response = await this.fetchImpl(TOKEN_URL, {
       method: "POST",
@@ -84,6 +88,7 @@ export class ClaudeCodeCredentials {
         refresh_token: creds.refreshToken,
         scope: requestedScopes.join(" "),
       }),
+      signal: options.signal,
     });
     if (!response.ok) {
       throw new Error(`Claude Code token refresh failed: ${response.status} ${await response.text()}`);
@@ -109,7 +114,8 @@ export class ClaudeCodeCredentials {
         clientId: creds.clientId || DEFAULT_CLIENT_ID,
       },
     };
-    await this.writeEnvelope(envelope);
+    throwIfAborted(options.signal);
+    await this.writeEnvelope(envelope, options);
     this.cache = {
       envelope,
       accessToken,
@@ -121,10 +127,11 @@ export class ClaudeCodeCredentials {
     return this.cache;
   }
 
-  async readEnvelope() {
+  async readEnvelope(options = {}) {
+    throwIfAborted(options.signal);
     const raw = this.useKeychain()
-      ? await this.readKeychain()
-      : await readFile(this.credentialsPath, "utf8");
+      ? await this.readKeychain(options)
+      : await readFile(this.credentialsPath, { encoding: "utf8", signal: options.signal });
     const parsed = parseCredentialPayload(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("Claude Code credentials are not a JSON object.");
@@ -132,19 +139,21 @@ export class ClaudeCodeCredentials {
     return parsed;
   }
 
-  async writeEnvelope(envelope) {
+  async writeEnvelope(envelope, options = {}) {
+    throwIfAborted(options.signal);
     const payload = `${JSON.stringify(envelope, null, 2)}\n`;
     if (this.useKeychain()) {
-      await this.writeKeychain(payload);
+      await this.writeKeychain(payload, options);
       return;
     }
     await mkdir(path.dirname(this.credentialsPath), { recursive: true });
-    await writeFile(this.credentialsPath, payload, { mode: 0o600 });
+    throwIfAborted(options.signal);
+    await writeFile(this.credentialsPath, payload, { mode: 0o600, signal: options.signal });
   }
 
-  async readKeychain() {
+  async readKeychain(options = {}) {
     if (this.keychainReader) {
-      return await this.keychainReader();
+      return await awaitAbortable(() => this.keychainReader(options), options.signal);
     }
     const { stdout } = await execFileAsync("security", [
       "find-generic-password",
@@ -153,14 +162,14 @@ export class ClaudeCodeCredentials {
       "-a",
       this.user,
       "-w",
-    ], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+    ], { timeout: 10_000, maxBuffer: 1024 * 1024, signal: options.signal });
     return stdout.trim();
   }
 
-  async writeKeychain(payload) {
+  async writeKeychain(payload, options = {}) {
     const hexPayload = Buffer.from(payload, "utf8").toString("hex");
     if (this.keychainWriter) {
-      await this.keychainWriter(hexPayload);
+      await awaitAbortable(() => this.keychainWriter(hexPayload, options), options.signal);
       return;
     }
     await execFileAsync("security", [
@@ -172,7 +181,7 @@ export class ClaudeCodeCredentials {
       this.user,
       "-X",
       hexPayload,
-    ], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+    ], { timeout: 10_000, maxBuffer: 1024 * 1024, signal: options.signal });
   }
 
   useKeychain() {

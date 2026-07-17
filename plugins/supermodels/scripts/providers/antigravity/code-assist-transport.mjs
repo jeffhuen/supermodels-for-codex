@@ -1,5 +1,7 @@
 import { randomBytes } from "node:crypto";
 
+import { awaitAbortable } from "../../lib/abort.mjs";
+
 // This is the Cloud Code Assist endpoint used by the AGY/Gemini CLI family.
 // It looks like a staging hostname, but the OAuth token from the native CLI is
 // scoped for this v1internal service.
@@ -52,11 +54,18 @@ export class AntigravityCodeAssistTransport {
   }
 
   async request(body, options, refreshed) {
-    const timeoutMs = options.timeoutMs ?? 600_000;
-    const signal = combineAbortSignals(options.signal, timeoutMs);
+    // One absolute deadline for the whole call: auth refresh, discovery, rate
+    // limiting, and retries all draw down the same timeout budget.
+    const deadline = options.deadline ?? this.now() + (options.timeoutMs ?? 600_000);
+    const remaining = deadline - this.now();
+    if (remaining <= 0) {
+      throw new Error("Antigravity Code Assist request exceeded its overall deadline before completing.");
+    }
+    const nextOptions = { ...options, deadline };
+    const signal = combineAbortSignals(options.signal, remaining);
     try {
       const request = toCodeAssistRequest(body);
-      const project = await this.projectId({ signal: signal.signal, timeoutMs });
+      const project = await this.projectId({ signal: signal.signal, timeoutMs: remaining });
       const envelope = {
         model: mapAntigravityModel(body.model),
         userAgent: "supermodels-antigravity",
@@ -68,7 +77,10 @@ export class AntigravityCodeAssistTransport {
       const response = await this.fetchImpl(`${this.baseUrl}/v1internal:streamGenerateContent?alt=sse`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${await this.credentials.accessToken()}`,
+          Authorization: `Bearer ${await awaitAbortable(
+            () => this.credentials.accessToken({ signal: signal.signal }),
+            signal.signal,
+          )}`,
           "User-Agent": USER_AGENT,
           "x-goog-api-client": API_CLIENT,
           "client-metadata": CLIENT_METADATA,
@@ -79,8 +91,8 @@ export class AntigravityCodeAssistTransport {
         signal: signal.signal,
       });
       if (response.status === 401 && !refreshed) {
-        await refreshCredentials(this.credentials);
-        return await this.request(body, options, true);
+        await refreshCredentials(this.credentials, signal.signal);
+        return await this.request(body, nextOptions, true);
       }
       if (!response.ok) {
         const bodyText = await response.text();
@@ -90,7 +102,7 @@ export class AntigravityCodeAssistTransport {
         if (retry) {
           await sleep(retry.delayMs, signal.signal);
           return await this.request(body, {
-            ...options,
+            ...nextOptions,
             retryAttempt: attempt + 1,
             retryStartedAt,
           }, refreshed);
@@ -158,7 +170,10 @@ export class AntigravityCodeAssistTransport {
     const response = await this.fetchImpl(`${this.baseUrl}/${path}`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${await this.credentials.accessToken()}`,
+        Authorization: `Bearer ${await awaitAbortable(
+          () => this.credentials.accessToken({ signal: options.signal }),
+          options.signal,
+        )}`,
         "User-Agent": USER_AGENT,
         "x-goog-api-client": API_CLIENT,
         "client-metadata": CLIENT_METADATA,
@@ -169,7 +184,7 @@ export class AntigravityCodeAssistTransport {
       signal: options.signal,
     });
     if (response.status === 401 && !refreshed) {
-      await refreshCredentials(this.credentials);
+      await refreshCredentials(this.credentials, options.signal);
       return await this.postJson(path, body, options, true);
     }
     if (!response.ok) {
@@ -265,6 +280,7 @@ function thinkingBudgetFrom(body) {
 
 export function collectAntigravityResponse(body = {}, options = {}) {
   const candidate = (body.candidates ?? [{}])[0] ?? {};
+  const completion = antigravityCompletion(candidate.finishReason);
   const parts = candidate.content?.parts ?? [];
   const content = [];
   const toolCalls = [];
@@ -305,7 +321,7 @@ export function collectAntigravityResponse(body = {}, options = {}) {
   if (options.validate !== false) {
     validateAntigravityResponse({
       hasToolCall: toolCalls.length > 0,
-      finishReason: candidate.finishReason ?? null,
+      completion,
       text,
     });
   }
@@ -316,6 +332,7 @@ export function collectAntigravityResponse(body = {}, options = {}) {
     usage: toUsage(body.usageMetadata ?? {}),
     model: "",
     stop_reason: candidate.finishReason ?? null,
+    completion,
   };
 }
 
@@ -342,7 +359,8 @@ export function mapToolChoiceToFunctionConfig(toolChoice) {
 
 function messagesToContents(messages) {
   const contents = [];
-  for (const message of messages) {
+  for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
+    const message = messages[messageIndex];
     if (message.role === "assistant") {
       const parts = [];
       let firstFunctionCallSeen = false;
@@ -378,7 +396,7 @@ function messagesToContents(messages) {
         parts: toolResults.map((block) => ({
           functionResponse: {
             ...(block.tool_use_id ? { id: block.tool_use_id } : {}),
-            name: block.name || toolNameForResult(messages, block.tool_use_id),
+            name: block.name || toolNameForResult(messages, block.tool_use_id, messageIndex),
             response: parseToolResponse(block.content),
           },
         })),
@@ -606,27 +624,33 @@ function mergeCodeAssistChunks(chunks) {
   };
 }
 
-function validateAntigravityResponse({ hasToolCall, finishReason, text }) {
-  if (hasToolCall) {
+function antigravityCompletion(finishReason) {
+  const reason = typeof finishReason === "string" && finishReason
+    ? finishReason
+    : "missing-finish-reason";
+  return {
+    status: reason === "STOP" ? "complete" : "incomplete",
+    reason,
+  };
+}
+
+function validateAntigravityResponse({ hasToolCall, completion, text }) {
+  if (completion.status !== "complete" || hasToolCall) {
     return;
-  }
-  if (!finishReason) {
-    throw new Error("Antigravity response ended without a finish reason.");
-  }
-  if (finishReason === "MALFORMED_FUNCTION_CALL") {
-    throw new Error("Antigravity response ended with malformed function call.");
-  }
-  if (finishReason === "UNEXPECTED_TOOL_CALL") {
-    throw new Error("Antigravity response ended with unexpected tool call.");
   }
   if (!String(text ?? "").trim()) {
     throw new Error("Antigravity response ended with empty response text.");
   }
 }
 
-function toolNameForResult(messages, toolUseId) {
-  for (const message of messages) {
-    for (const block of message.content ?? []) {
+function toolNameForResult(messages, toolUseId, beforeIndex = messages.length) {
+  // Some Code Assist responses omit call IDs, so the transport synthesizes
+  // call_1, call_2 per turn. Resolve a result against the nearest preceding
+  // assistant call, not the first same-ID call in the entire conversation.
+  for (let messageIndex = beforeIndex - 1; messageIndex >= 0; messageIndex -= 1) {
+    const blocks = messages[messageIndex].content ?? [];
+    for (let blockIndex = blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
+      const block = blocks[blockIndex];
       if (block.type === "tool_use" && block.id === toolUseId) {
         return block.name || "tool";
       }
@@ -852,9 +876,9 @@ function throwIfAborted(signal) {
   }
 }
 
-async function refreshCredentials(credentials) {
+async function refreshCredentials(credentials, signal) {
   if (credentials.forceRefresh) {
-    await credentials.forceRefresh();
+    await awaitAbortable(() => credentials.forceRefresh({ signal }), signal);
     return;
   }
   credentials.forceReload?.();
@@ -876,7 +900,6 @@ function combineAbortSignals(parentSignal, timeoutMs) {
       controller.abort(new Error("Request timed out."));
     }
   }, timeoutMs);
-  timer.unref?.();
   return {
     signal: controller.signal,
     cleanup() {

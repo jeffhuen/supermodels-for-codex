@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.3.0
+
+### Added
+
+- Reviews now run against one immutable snapshot captured and source-revalidated before the first provider starts. The same snapshot, base commit, diff, files, and untracked content are shared by every blind pass and cross-challenge; repository tools cannot drift to later working-tree edits. Snapshot creation uses private Git objects/index state, preserves actual working content (including LFS-style filtered files and symlinks), and runs Git clean filters only against a discardable staging copy so delayed filter children cannot mutate delivered evidence. It fails closed on source changes during capture, unresolved index entries, present `assume-unchanged`/manual `skip-worktree` entries, changed/dirty submodules, private-tree filter mutations, Git failures, or `--base` outside a Git worktree; absent sparse-checkout entries remain supported. Copying, hashing, filters, Git children, and tree walks share one cancellation/timeout signal, with a 20-minute default snapshot bound when `--timeout` is omitted.
+- `get_diff`, `get_review_context`, and `list_changed_files` now use opaque, snapshot-bound pagination. The per-response byte cap is a page size rather than an information-loss boundary: providers must follow every diff `next_cursor`, and the optional changed-file discovery pages also reconstruct the immutable file list exactly.
+- Providers are registered through one static provider registry (`id`, aliases, label, factory) with capability-aware selection. Each adapter owns its flat review policy (reasoning, token budget, strict submission, caching, forced-tool support, backstop, system instructions, and audit metadata), so adding another built-in provider no longer requires provider-ID branches in the shared review harness.
+
+### Changed
+
+- A review can be conclusive only after every immutable diff page is consumed and every readable/new-side high-risk hunk is fully covered by delivered `read_file` ranges. Pure deletions are proved from the complete diff and deleted-line citation verification because deleted source cannot be read from the snapshot tree. One-line overlap no longer credits an entire readable hunk. Files transformed by Git clean filters require complete raw-file inspection; modified/deleted filtered evidence carries an explicit non-invertible-mapping gap instead of claiming a lossless clean review. If the exact required page or source range is attempted but unavailable, only an `inconclusive` verdict is accepted and Supermodels appends the precise missing cursor/file/range and error; skipped pages, wrong cursors, and unattempted reads remain fail-closed.
+- Provider completion is normalized at each transport boundary and enforced before any submitted review is accepted. Claude `max_tokens`, missing stop reasons, or missing terminal `message_stop`; Antigravity non-`STOP` finishes; and Grok incomplete/failed/missing response status now produce `inconclusive`. A partial clean submission can no longer pass merely because a tool call survived truncation, and evidence returned by sibling tools cannot justify a submission authored in the same model turn.
+- Provider wire output is validated strictly for exact fields and primitive types across tool submissions and natural JSON finals. Contradictory `clean` results with findings and coerced values such as string line numbers are rejected, while the existing normalized internal review shape remains backward-compatible.
+- Each provider review phase now uses one wall-clock budget across all of its model rounds, transport retries/refreshes, project discovery, repository tools, citation verification, and subprocess-backed searches. Readiness credential probes are separately bounded, awaited work is abortable, and all three direct transports preserve one absolute per-call deadline across retries.
+- Ready providers are selected by the capability required for the requested operation (`review`, `adversarialReview`, `task`, or `writeTask`), with no hidden three-provider slice.
+- Removed the unused `--scope` CLI surface. Reviews have one explicit scope contract: the working tree, optionally compared with `--base <ref>`.
+
+### Fixed
+
+- Git discovery now checks every command exit status, uses full untracked discovery and NUL-delimited status/name parsing, and surfaces failures instead of silently returning an empty or partial review context.
+- Oversized single source lines expose no partial numbered line and therefore cannot earn high-risk coverage. Finding verification now proves every cited current or deleted line, and deleted-line evidence uses the full immutable diff rather than a truncated page.
+- Snapshot creation no longer renormalizes unchanged tracked files, base-revision attributes work on older Git versions without `check-attr --source`, and live source/HEAD/index state (including hidden index flags and submodules) is revalidated before acceptance. Sparse exclusions are proved with Git's `check-rules` support and fail closed when that proof is unavailable; deleted gitlinks, forced diff color, renamed filtered files, delimiter-containing paths, and trailing-whitespace paths retain exact evidence. Pagination avoids repeatedly serializing the entire remaining giant diff/file list.
+- Provider readiness is isolated per adapter and fail-closed: one broken provider no longer aborts healthy peers, executable discovery runs in a bounded killable probe and accepts only regular executable files, every native CLI must pass its version sanity check, and OAuth/version-cache reads are bounded. Setup no longer runs Antigravity readiness twice or ignores an injected credential source.
+- Review, credential, and direct-transport deadline timers remain referenced until their awaited operation settles. A handle-less hung promise can no longer let the CLI exit before its timeout fires.
+
 ## v0.2.10
 
 ### Fixed

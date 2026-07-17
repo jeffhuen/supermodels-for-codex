@@ -1,6 +1,6 @@
 ---
 name: adversarial-review
-description: Get a stricter, adversarial code review through Supermodels — Claude Code, Antigravity, and Grok Build each do a blind first pass, then challenge each other's findings — attacking unsupported claims, missed bugs, weak evidence, wrong severities, and over-engineered fixes — so only findings that survive cross-examination are reported. Use when the user wants to pressure-test or red-team a change, is about to ship something risky, distrusts an earlier review, or asks to "tear it apart" or find everything wrong with a diff. Best with at least two providers ready so they can actually cross-examine. For a plain independent review use review; for a single scoped investigation use task.
+description: Get a stricter, adversarial code review through Supermodels — Claude Code, Antigravity, and Grok Build each do a blind first pass, then challenge each other's findings by attacking unsupported claims, missed bugs, weak evidence, wrong severities, and over-engineered fixes. The result preserves the original passes and appends the challenge findings so support and contradiction remain visible. Use when the user wants to pressure-test or red-team a change, is about to ship something risky, distrusts an earlier review, or asks to "tear it apart" or find everything wrong with a diff. Best with at least two providers ready so they can actually cross-examine. For a plain independent review use review; for a single scoped investigation use task.
 ---
 
 # Supermodels Adversarial Review
