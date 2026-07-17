@@ -135,7 +135,7 @@ export async function runReviewAgent(options = {}) {
         role: "user",
         content: [{
           type: "text",
-          text: preloadedEvidenceMessage(preloaded),
+          text: preloadedEvidenceMessage(preloaded, Number(tools?.maxToolBytes) || Number.POSITIVE_INFINITY),
         }],
       });
     }
@@ -1461,12 +1461,29 @@ function forcedToolInstruction(name) {
   };
 }
 
-function preloadedEvidenceMessage(preloaded) {
-  return [
-    "Codex preloaded the following repository evidence before the provider call. Treat it as tool output and ground the review in it. You may call additional repository tools if this evidence is insufficient.",
-    "",
-    JSON.stringify({ preloaded }, null, 2),
-  ].join("\n");
+function preloadedEvidenceMessage(preloaded, maxBytes = Number.POSITIVE_INFINITY) {
+  const header = "Codex preloaded the following repository evidence before the provider call. Treat it as tool output and ground the review in it. You may call additional repository tools if this evidence is insufficient.";
+  // Compact, never pretty-printed: indentation multiplies the size (up to ~2.4x on
+  // structure-heavy evidence) with no parsing benefit and would break the cap.
+  const build = (items) => `${header}\n\n${JSON.stringify({ preloaded: items })}`;
+  if (Buffer.byteLength(build(preloaded), "utf8") <= maxBytes) {
+    return build(preloaded);
+  }
+  // The model-visible preload exceeds the cap: bound each embedded result to a
+  // share of the budget (after the fixed header/envelope) so the whole MESSAGE
+  // fits, not just the tool result the dispatcher already capped. Coverage is
+  // unaffected — the hunk ledger was already built from the full diff, and reads
+  // (not the embedded diff) credit coverage.
+  const envelope = Buffer.byteLength(
+    build(preloaded.map((entry) => ({ tool: entry.tool, result: null }))),
+    "utf8",
+  );
+  const perResult = Math.max(0, Math.floor((maxBytes - envelope) / Math.max(1, preloaded.length)));
+  const bounded = preloaded.map((entry) => ({
+    tool: entry.tool,
+    result: enforceSerializedCap({ ...entry.result }, perResult),
+  }));
+  return build(bounded);
 }
 
 function cloneMessages(messages) {
