@@ -1,17 +1,15 @@
 import { readFileSync } from "node:fs";
-import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { commandLine, findExecutable, runCommand } from "../../lib/process.mjs";
+import { withAbortTimeout } from "../../lib/abort.mjs";
 import { runReviewAgent } from "../../lib/review-agent.mjs";
-import { createReviewTools } from "../../lib/review-tools.mjs";
+import { createSnapshotReviewTools } from "../../lib/review-tools.mjs";
 import { AntigravityCodeAssistTransport } from "./code-assist-transport.mjs";
-import {
-  AntigravityCredentials,
-  defaultAntigravityCredentialsPath,
-} from "./oauth.mjs";
+import { AntigravityCredentials } from "./oauth.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MODEL_CONFIG = JSON.parse(readFileSync(path.join(__dirname, "model-aliases.json"), "utf8"));
@@ -22,13 +20,27 @@ const DEFAULT_REVIEW_MODEL = process.env.SUPERMODELS_ANTIGRAVITY_REVIEW_MODEL
 const DEFAULT_CODE_ASSIST_REVIEW_MODEL = process.env.SUPERMODELS_ANTIGRAVITY_CODE_ASSIST_MODEL
   || MODEL_CONFIG.defaultReviewModel
   || "Gemini 3.5 Flash (High)";
+const REVIEW_MAX_TOKENS = 64_000;
+const DEFAULT_THINKING_BUDGET = -1;
+const POST_EVIDENCE_INSPECTION_ROUNDS = 4;
+const REVIEW_SYSTEM_INSTRUCTIONS = Object.freeze([Object.freeze({
+  type: "text",
+  text: "You are Antigravity reviewing for Codex. Use broad systems judgment, but ground every claim in inspected repository evidence.",
+})]);
 
 const CANONICAL_MODELS = new Set(Object.values(MODEL_ALIASES));
 
+export const providerDefinition = Object.freeze({
+  id: "antigravity",
+  aliases: Object.freeze(["agy"]),
+  label: "Google Antigravity",
+  create: createAntigravityAdapter,
+});
+
 export function createAntigravityAdapter(factoryOptions = {}) {
   return {
-    id: "antigravity",
-    label: "Google Antigravity",
+    id: providerDefinition.id,
+    label: providerDefinition.label,
     capabilities: () => ({
       review: true,
       adversarialReview: true,
@@ -39,19 +51,31 @@ export function createAntigravityAdapter(factoryOptions = {}) {
       background: "worker",
     }),
     check: (options) => check(options, factoryOptions),
-    setup,
     review: (input, options) => runAntigravityReview(input, options, factoryOptions),
     task: runAntigravityPrompt,
   };
 }
 
-export async function setup(options = {}) {
-  const status = await check(options);
+export function resolveAntigravityReviewPolicy(options = {}) {
+  const parsedBudget = Number(options.thinkingBudget ?? DEFAULT_THINKING_BUDGET);
+  const mode = options.mode ?? "review";
+  const reasoningOptions = Number.isFinite(parsedBudget)
+    ? { thinkingBudget: parsedBudget }
+    : {};
   return {
-    ready: status.ready,
-    changed: false,
-    source: "cli",
-    error: status.error,
+    maxTokens: options.maxTokens ?? REVIEW_MAX_TOKENS,
+    reasoningOptions,
+    strictSubmit: false,
+    cacheControl: false,
+    allowForcedToolChoice: true,
+    forceAfterSatisfiedRounds: options.forceAfterSatisfiedRounds
+      ?? (mode === "review"
+        ? POST_EVIDENCE_INSPECTION_ROUNDS
+        : Number.POSITIVE_INFINITY),
+    systemInstructions: REVIEW_SYSTEM_INSTRUCTIONS,
+    auditMetadata: {
+      thinkingBudget: reasoningOptions.thinkingBudget ?? null,
+    },
   };
 }
 
@@ -71,6 +95,18 @@ export async function check(options = {}, factoryOptions = {}) {
   }
 
   const version = await runCommand({ bin: binPath, args: ["--version"] }, { timeoutMs: 5000 });
+  if (version.exitCode !== 0 || version.timedOut) {
+    return {
+      provider: "antigravity",
+      label: "Google Antigravity",
+      ready: false,
+      installed: true,
+      path: binPath,
+      version: "unknown",
+      auth: "missing",
+      error: `Antigravity CLI is installed but \`agy --version\` failed: ${version.stderr || version.stdout || "no version output"}`,
+    };
+  }
   const auth = await antigravityAuthStatus(options, factoryOptions);
   const ready = auth !== "missing";
 
@@ -200,12 +236,20 @@ async function runAntigravityReview(input, options = {}, factoryOptions = {}) {
       baseUrl: factoryOptions.baseUrl,
     });
   const tools = factoryOptions.reviewTools
-    ?? createReviewTools({
+    ?? createSnapshotReviewTools({
       workspaceRoot: options.cwd,
+      snapshot: options.snapshot,
       scope: input.context?.scope,
       baseRef: input.context?.baseRef,
       controller: options.controller,
     });
+  const reviewPolicy = resolveAntigravityReviewPolicy({
+    mode: input.mode,
+    thinkingBudget: options.thinkingBudget ?? factoryOptions.thinkingBudget,
+    maxTokens: options.maxTokens ?? factoryOptions.maxTokens,
+    forceAfterSatisfiedRounds: options.forceAfterSatisfiedRounds
+      ?? factoryOptions.forceAfterSatisfiedRounds,
+  });
   const structured = await runReviewAgent({
     provider: "antigravity",
     transport,
@@ -214,9 +258,9 @@ async function runAntigravityReview(input, options = {}, factoryOptions = {}) {
     focus: input.focus,
     mode: input.mode,
     model,
+    reviewPolicy,
     maxRounds: factoryOptions.maxRounds,
     forceAfterRounds: factoryOptions.forceAfterRounds,
-    forceAfterSatisfiedRounds: factoryOptions.forceAfterSatisfiedRounds,
     forceInspectionTools: factoryOptions.forceInspectionTools,
     preloadTools: factoryOptions.preloadTools ?? ["get_review_context"],
     timeoutMs: options.timeoutMs ?? 20 * 60 * 1000,
@@ -292,30 +336,23 @@ async function writePromptFile(prompt, options = {}) {
 
 async function antigravityAuthStatus(options = {}, factoryOptions = {}) {
   const env = options.env ?? process.env;
-  if (await hasAntigravityOauthToken(env)) {
-    return await canLoadAntigravityCredentials(env, factoryOptions) ? "local-oauth" : "missing";
-  }
-  return "missing";
-}
-
-async function hasAntigravityOauthToken(env) {
-  const candidate = defaultAntigravityCredentialsPath(env);
-  const info = await stat(candidate).catch(() => null);
-  if (info?.isFile()) {
-    return true;
-  }
-  if (process.platform === "darwin" && (!env.HOME || env.HOME === process.env.HOME)) {
-    return true;
-  }
-  return false;
+  return await canLoadAntigravityCredentials(env, {
+    ...factoryOptions,
+    credentialTimeoutMs: options.credentialTimeoutMs ?? factoryOptions.credentialTimeoutMs,
+  }) ? "local-oauth" : "missing";
 }
 
 async function canLoadAntigravityCredentials(env, factoryOptions = {}) {
   try {
-    await new AntigravityCredentials({
+    const credentials = factoryOptions.credentials ?? new AntigravityCredentials({
       ...(factoryOptions.credentialsOptions ?? {}),
       env,
-    }).accessToken();
+    });
+    await withAbortTimeout(
+      (signal) => credentials.accessToken({ signal }),
+      factoryOptions.credentialTimeoutMs ?? 10_000,
+      "Antigravity credential readiness check",
+    );
     return true;
   } catch {
     return false;

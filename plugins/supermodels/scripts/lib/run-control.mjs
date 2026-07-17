@@ -10,6 +10,7 @@ export function createRunController() {
   let signal = null;
   let cancelledAt = null;
   const listeners = new Set();
+  const abortController = new AbortController();
 
   return {
     get cancelled() {
@@ -21,6 +22,9 @@ export function createRunController() {
     get cancelledAt() {
       return cancelledAt;
     },
+    get abortSignal() {
+      return abortController.signal;
+    },
     cancel(nextSignal) {
       if (cancelled) {
         return false;
@@ -28,6 +32,7 @@ export function createRunController() {
       cancelled = true;
       signal = nextSignal;
       cancelledAt = new Date().toISOString();
+      abortController.abort(new Error(`Run cancelled by ${nextSignal || "request"}.`));
       for (const listener of [...listeners]) {
         try {
           listener(nextSignal);

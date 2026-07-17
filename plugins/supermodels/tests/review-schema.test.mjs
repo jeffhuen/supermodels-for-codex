@@ -6,6 +6,7 @@ import {
   structuredReviewInstructions,
   REVIEW_RESULT_SCHEMA,
   validateStructuredReview,
+  validateStructuredReviewWire,
 } from "../scripts/lib/review-schema.mjs";
 
 test("normalizeStructuredReview rejects findings with missing location or evidence fields", () => {
@@ -177,6 +178,67 @@ test("REVIEW_RESULT_SCHEMA still accepts a well-formed two-array review after th
   assert.ok(ok.review, JSON.stringify(ok.errors));
 });
 
+test("validateStructuredReviewWire enforces the strict provider wire without weakening internal normalization", () => {
+  const missing = validateStructuredReviewWire({
+    verdict: "clean",
+    summary: "Missing the second findings array.",
+    findings: [],
+    assumptions: [],
+    verification_gaps: [],
+  });
+  assert.equal(missing.review, null);
+  assert.match(missing.errors.join("\n"), /missing_change_findings is required/);
+
+  const extra = validateStructuredReviewWire({
+    ...newWireReview({ verdict: "clean" }),
+    unexpected: true,
+  });
+  assert.equal(extra.review, null);
+  assert.match(extra.errors.join("\n"), /unexpected is not allowed/);
+
+  const invalidEnum = validateStructuredReviewWire(newWireReview({
+    findings: [{ ...codeFinding("bad enums"), severity: "severe", confidence: "certain" }],
+  }));
+  assert.equal(invalidEnum.review, null);
+  assert.match(invalidEnum.errors.join("\n"), /severity must be critical, high, medium, or low/);
+  assert.match(invalidEnum.errors.join("\n"), /confidence must be high, medium, or low/);
+
+  // Internal normalization stays backward-compatible and idempotent.
+  assert.ok(normalizeStructuredReview({
+    verdict: "clean",
+    summary: "Legacy internal shape.",
+    findings: [],
+    assumptions: [],
+    verification_gaps: [],
+  }));
+});
+
+test("validateStructuredReviewWire rejects extra finding fields", () => {
+  const { review, errors } = validateStructuredReviewWire(newWireReview({
+    findings: [{ ...codeFinding("extra"), kind: "code" }],
+  }));
+  assert.equal(review, null);
+  assert.match(errors.join("\n"), /findings\[0\]\.kind is not allowed/);
+});
+
+test("validateStructuredReviewWire rejects coerced schema primitives", () => {
+  const numericString = validateStructuredReviewWire(newWireReview({
+    findings: [{ ...codeFinding("string line"), line_start: "10" }],
+  }));
+  assert.equal(numericString.review, null);
+  assert.match(numericString.errors.join("\n"), /line_start must be an integer/);
+
+  const booleanLine = validateStructuredReviewWire(newWireReview({
+    findings: [{ ...codeFinding("boolean line"), line_start: true }],
+  }));
+  assert.equal(booleanLine.review, null);
+  assert.match(booleanLine.errors.join("\n"), /line_start must be an integer/);
+
+  const paddedVerdict = validateStructuredReviewWire(newWireReview({ verdict: " clean " }));
+  assert.equal(paddedVerdict.review, null);
+  assert.match(paddedVerdict.errors.join("\n"), /exact schema enum string/);
+});
+
 test("validateStructuredReview accepts a clean new-wire review with both arrays empty", () => {
   const { review, errors } = validateStructuredReview({
     verdict: "clean",
@@ -314,6 +376,16 @@ test("validateStructuredReview rejects needs-attention with both arrays empty", 
 
   assert.equal(review, null);
   assert.deepEqual(errors, ["needs-attention reviews must include at least one valid finding"]);
+});
+
+test("validateStructuredReview rejects contradictory clean reviews with findings", () => {
+  const { review, errors } = validateStructuredReviewWire(newWireReview({
+    verdict: "clean",
+    findings: [codeFinding("contradictory finding")],
+  }));
+
+  assert.equal(review, null);
+  assert.match(errors.join("\n"), /clean reviews must not include findings/);
 });
 
 test("validateStructuredReview keeps the findings[i] path for a bad code finding", () => {

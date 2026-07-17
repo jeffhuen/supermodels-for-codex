@@ -5,8 +5,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { commandLine, findExecutable, runCommand } from "../../lib/process.mjs";
+import { withAbortTimeout } from "../../lib/abort.mjs";
 import { runReviewAgent } from "../../lib/review-agent.mjs";
-import { createReviewTools } from "../../lib/review-tools.mjs";
+import { createSnapshotReviewTools } from "../../lib/review-tools.mjs";
 import {
   REVIEW_RESULT_SCHEMA,
   parseStructuredReviewText,
@@ -24,11 +25,27 @@ const DEFAULTS = JSON.parse(readFileSync(path.join(__dirname, "defaults.json"), 
 const DEFAULT_MODEL = process.env.SUPERMODELS_CLAUDE_MODEL || DEFAULTS.defaultModel;
 const DEFAULT_EFFORT = process.env.SUPERMODELS_CLAUDE_EFFORT || DEFAULTS.defaultEffort;
 const READ_ONLY_TOOLS = "Read,Grep,Glob,LS";
+const REVIEW_MAX_TOKENS = 128_000;
+const DEFAULT_REVIEW_THINKING = Object.freeze({ type: "adaptive", display: "summarized" });
+const REVIEW_SYSTEM_INSTRUCTIONS = Object.freeze([
+  Object.freeze({ type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." }),
+  Object.freeze({
+    type: "text",
+    text: "You are Claude Code reviewing for Codex. Be concrete, skeptical, and evidence-driven.",
+  }),
+]);
+
+export const providerDefinition = Object.freeze({
+  id: "claude",
+  aliases: Object.freeze(["claude-code"]),
+  label: "Claude Code",
+  create: createClaudeAdapter,
+});
 
 export function createClaudeAdapter(factoryOptions = {}) {
   return {
-    id: "claude",
-    label: "Claude Code",
+    id: providerDefinition.id,
+    label: providerDefinition.label,
     capabilities: () => ({
       review: true,
       adversarialReview: true,
@@ -41,6 +58,30 @@ export function createClaudeAdapter(factoryOptions = {}) {
     check: (options) => check(options, factoryOptions),
     review: (input, options) => runClaudeReview(input, options, factoryOptions),
     task: runClaudePrompt,
+  };
+}
+
+export function resolveClaudeReviewPolicy(options = {}) {
+  const thinking = options.thinking === undefined
+    ? DEFAULT_REVIEW_THINKING
+    : options.thinking;
+  const requestedEffort = options.effort ?? DEFAULT_EFFORT;
+  const effort = requestedEffort === "cli-default" ? null : requestedEffort;
+  return {
+    maxTokens: options.maxTokens ?? REVIEW_MAX_TOKENS,
+    reasoningOptions: {
+      ...(thinking ? { thinking } : {}),
+      ...(effort ? { output_config: { effort } } : {}),
+    },
+    strictSubmit: true,
+    cacheControl: true,
+    allowForcedToolChoice: !thinking,
+    forceAfterSatisfiedRounds: options.forceAfterSatisfiedRounds ?? Number.POSITIVE_INFINITY,
+    systemInstructions: REVIEW_SYSTEM_INSTRUCTIONS,
+    auditMetadata: {
+      thinking: thinking ?? null,
+      effort: effort ?? "",
+    },
   };
 }
 
@@ -62,14 +103,26 @@ export async function check(options = {}, factoryOptions = {}) {
   const version = await runCommand({ bin: binPath, args: ["--version"] }, { timeoutMs: 5000 });
   const auth = await runCommand({ bin: binPath, args: ["auth", "status"] }, { timeoutMs: 5000 });
   const authInfo = parseClaudeAuth(auth.stdout);
-  const cliReady = auth.exitCode === 0 && authInfo.loggedIn !== false;
+  const cliReady = version.exitCode === 0
+    && !version.timedOut
+    && auth.exitCode === 0
+    && !auth.timedOut
+    && authInfo.loggedIn !== false;
   let ready = cliReady;
-  let error = cliReady ? "" : "Claude Code is installed but not authenticated.";
+  let error = cliReady
+    ? ""
+    : version.exitCode !== 0 || version.timedOut
+      ? `Claude Code is installed but \`claude --version\` failed: ${version.stderr || version.stdout || "no version output"}`
+      : "Claude Code is installed but not authenticated.";
   if (cliReady) {
     try {
       const credentials = factoryOptions.credentials
         ?? new ClaudeCodeCredentials(factoryOptions.credentialsOptions ?? {});
-      await credentials.accessToken();
+      await withAbortTimeout(
+        (signal) => credentials.accessToken({ signal }),
+        options.credentialTimeoutMs ?? 10_000,
+        "Claude credential readiness check",
+      );
     } catch (directAuthError) {
       ready = false;
       error = [
@@ -330,12 +383,20 @@ async function runClaudeReview(input, options = {}, factoryOptions = {}) {
       fetchImpl: factoryOptions.fetchImpl,
     });
   const tools = factoryOptions.reviewTools
-    ?? createReviewTools({
+    ?? createSnapshotReviewTools({
       workspaceRoot: options.cwd,
+      snapshot: options.snapshot,
       scope: input.context?.scope,
       baseRef: input.context?.baseRef,
       controller: options.controller,
     });
+  const reviewPolicy = resolveClaudeReviewPolicy({
+    effort,
+    thinking: options.thinking !== undefined ? options.thinking : factoryOptions.thinking,
+    maxTokens: options.maxTokens ?? factoryOptions.maxTokens,
+    forceAfterSatisfiedRounds: options.forceAfterSatisfiedRounds
+      ?? factoryOptions.forceAfterSatisfiedRounds,
+  });
   const structured = await runReviewAgent({
     provider: "claude",
     transport,
@@ -344,10 +405,9 @@ async function runClaudeReview(input, options = {}, factoryOptions = {}) {
     focus: input.focus,
     mode: input.mode,
     model,
-    effort,
+    reviewPolicy,
     maxRounds: factoryOptions.maxRounds,
     forceAfterRounds: factoryOptions.forceAfterRounds,
-    forceAfterSatisfiedRounds: factoryOptions.forceAfterSatisfiedRounds,
     forceInspectionTools: factoryOptions.forceInspectionTools,
     preloadTools: factoryOptions.preloadTools ?? ["get_review_context"],
     timeoutMs: options.timeoutMs ?? 20 * 60 * 1000,

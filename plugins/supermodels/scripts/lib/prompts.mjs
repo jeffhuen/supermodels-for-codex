@@ -11,7 +11,7 @@ const MAX_PROMPT_DIFF_BYTES = 200_000;
 
 export async function renderReviewPrompt(input) {
   const charter = await readPrompt("review-charter.md");
-  const override = await readPrompt(path.join("provider-overrides", `${input.providerId}.md`));
+  const override = await readOptionalPrompt(path.join("provider-overrides", `${input.providerId}.md`));
   const modeLabel = input.mode === "adversarial-review" ? "Adversarial review" : "Code review";
   const focus = input.focus?.trim() || "No extra user focus was provided.";
   const contextBrief = input.contextBrief?.trim();
@@ -73,7 +73,7 @@ export async function renderReviewPrompt(input) {
 
 export async function renderChallengePrompt(input) {
   const charter = await readPrompt("review-charter.md");
-  const override = await readPrompt(path.join("provider-overrides", `${input.challengerId}.md`));
+  const override = await readOptionalPrompt(path.join("provider-overrides", `${input.challengerId}.md`));
   const focus = input.focus?.trim() || "No extra user focus was provided.";
   const contextBrief = input.contextBrief?.trim();
   const context = input.context ?? {};
@@ -173,6 +173,17 @@ export async function renderTaskPrompt(input) {
 
 export async function readPrompt(relativePath) {
   return await readFile(path.join(PLUGIN_ROOT, "prompts", relativePath), "utf8");
+}
+
+async function readOptionalPrompt(relativePath) {
+  try {
+    return await readPrompt(relativePath);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return "";
+    }
+    throw error;
+  }
 }
 
 function renderPrefixedBlock(value) {

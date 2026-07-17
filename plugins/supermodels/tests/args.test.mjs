@@ -61,6 +61,13 @@ test("parseRuntimeArgs accepts live review mode", () => {
   assert.equal(parsed.options["context-file"], "brief.md");
 });
 
+test("parseRuntimeArgs rejects the removed --scope option", () => {
+  assert.throws(
+    () => parseRuntimeArgs(["review", "--scope", "branch"]),
+    /unknown option --scope/i,
+  );
+});
+
 test("resolveProviderIds accepts claude, antigravity, and grok", () => {
   assert.deepEqual(resolveProviderIds({ provider: "claude, antigravity, grok" }), {
     explicit: true,
@@ -73,6 +80,10 @@ test("resolveProviderIds accepts claude, antigravity, and grok", () => {
   assert.deepEqual(resolveProviderIds({ all: true }), {
     explicit: false,
     requested: ["claude", "antigravity", "grok"],
+  });
+  assert.deepEqual(resolveProviderIds({ provider: "CLAUDE-CODE,agy" }), {
+    explicit: true,
+    requested: ["claude", "antigravity"],
   });
 });
 

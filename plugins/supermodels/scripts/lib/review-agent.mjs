@@ -1,8 +1,9 @@
 import {
   REVIEW_RESULT_SCHEMA,
   validateStructuredReviewText,
-  validateStructuredReview,
+  validateStructuredReviewWire,
 } from "./review-schema.mjs";
+import path from "node:path";
 import {
   parseDiffGitPathTokens,
   parseUnifiedDiffHeaderPath,
@@ -15,13 +16,7 @@ const DEFAULT_REVIEW_POLICY = Object.freeze({
   forceAfterRounds: Number.POSITIVE_INFINITY,
   forceAfterSatisfiedRounds: Number.POSITIVE_INFINITY,
   maxNoToolContinuationRounds: 4,
-  claudeMaxTokens: 128_000,
-  antigravityMaxTokens: 64_000,
-  grokMaxTokens: 64_000,
-  grokEffort: "high",
-  claudeThinking: Object.freeze({ type: "adaptive", display: "summarized" }),
-  claudeEffort: null,
-  antigravityThinkingBudget: -1,
+  maxTokens: 64_000,
   maxReviewCorrectionAttempts: 1,
   maxInspectionRefusals: 4,
   minInspection: Object.freeze({
@@ -32,7 +27,6 @@ const DEFAULT_REVIEW_POLICY = Object.freeze({
   }),
   forceInspectionTools: false,
 });
-const POST_EVIDENCE_INSPECTION_ROUNDS = 4;
 const MAX_FINDING_LOCATION_LINES = 200;
 const MAX_COVERAGE_GAPS = 12;
 export const COVERAGE_TRUNCATED_GAP = "Supermodels: high-risk hunk coverage enforcement was disabled because the review-tool diff was truncated; some changed hunks may not have been inspected. Re-run with a narrower --base scope or smaller diff to restore coverage checks.";
@@ -53,11 +47,11 @@ export async function runReviewAgent(options = {}) {
     timeoutMs,
     onEvent,
   } = options;
-  const maxTokens = options.maxTokens ?? providerMaxTokens(provider);
+  const reviewPolicy = resolveReviewPolicy(options, provider);
+  const maxTokens = reviewPolicy.maxTokens;
   const maxRounds = options.maxRounds ?? DEFAULT_REVIEW_POLICY.maxRounds;
   const forceAfterRounds = options.forceAfterRounds ?? DEFAULT_REVIEW_POLICY.forceAfterRounds;
-  const forceAfterSatisfiedRounds = options.forceAfterSatisfiedRounds
-    ?? providerForceAfterSatisfiedRounds(provider, mode);
+  const forceAfterSatisfiedRounds = reviewPolicy.forceAfterSatisfiedRounds;
   const minInspection = {
     ...DEFAULT_REVIEW_POLICY.minInspection,
     ...(options.minInspection ?? {}),
@@ -76,7 +70,8 @@ export async function runReviewAgent(options = {}) {
     throw new Error("runReviewAgent requires tools with execute(name, input, options).");
   }
 
-  const abort = createAbort(controller);
+  const reviewStartedAt = Date.now();
+  const abort = createAbort(controller, { timeoutMs, provider });
   const messages = [{
     role: "user",
     content: [{ type: "text", text: initialPrompt({ provider, brief, focus, mode }) }],
@@ -84,46 +79,58 @@ export async function runReviewAgent(options = {}) {
   const toolUsage = {};
   const inspection = {
     diff: false,
+    diffComplete: false,
+    diffPages: 0,
+    nextDiffCursor: "",
+    lastDiffCursor: "",
     fileOrSearch: false,
     explicitFileOrSearchToolCalls: 0,
     explicitFileOrSearchTargets: [],
     explicitFileOrSearchTargetSet: new Set(),
     readRanges: [],
+    diffPageInputSet: new Set(),
+    evidenceFailures: {
+      diff: [],
+      reads: [],
+    },
     coverage: createCoverageState(),
   };
+  seedSnapshotCoverage(inspection, tools.reviewDiff, tools.reviewFilteredFiles);
   const schemas = [
     ...(tools.schemas ?? []),
-    submitReviewToolSchema({ strict: providerStrictSubmit(provider) }),
+    submitReviewToolSchema({ strict: reviewPolicy.strictSubmit }),
   ];
-  const reviewStartedAt = Date.now();
+  const ensureWithinDeadline = () => remainingReviewTimeoutMs(timeoutMs, reviewStartedAt, provider);
   let inspectionSatisfiedAtRound = null;
   let cumulativeUsage = null;
   let structuredConversionRequested = false;
   let noToolContinuationRounds = 0;
   let reviewCorrectionAttempts = 0;
   let inspectionRefusals = 0;
-  const reasoningOptions = providerReasoningOptions(provider, options);
+  const reasoningOptions = reviewPolicy.reasoningOptions;
 
   try {
     if (preloadTools.length) {
       const preloaded = [];
+      const inspectionBeforePreload = cloneInspectionState(inspection);
       for (const name of preloadTools) {
         throwIfCancelled(controller);
         let result;
         try {
-          result = await tools.execute(name, {}, {
+          result = await abortable(() => tools.execute(name, {}, {
             controller,
             signal: abort.signal,
-          });
+            preload: true,
+          }), abort.signal);
         } catch (error) {
           result = {
             ok: false,
             error: error?.message || String(error),
           };
         }
+        ensureWithinDeadline();
         throwIfCancelled(controller);
         toolUsage[name] = (toolUsage[name] ?? 0) + 1;
-        updateInspection(inspection, name, result);
         preloaded.push({ tool: name, result });
         onEvent?.({
           type: "tool_call",
@@ -131,11 +138,21 @@ export async function runReviewAgent(options = {}) {
           at: new Date().toISOString(),
         });
       }
+      for (const entry of preloaded) {
+        updateInspection(inspection, entry.tool, entry.result, {});
+      }
+      const preparedPreload = preloadedEvidenceMessage(
+        preloaded,
+        Number(tools?.maxToolBytes) || Number.POSITIVE_INFINITY,
+      );
+      if (!preparedPreload.delivered) {
+        restoreInspectionState(inspection, inspectionBeforePreload);
+      }
       messages.push({
         role: "user",
         content: [{
           type: "text",
-          text: preloadedEvidenceMessage(preloaded, Number(tools?.maxToolBytes) || Number.POSITIVE_INFINITY),
+          text: preparedPreload.text,
         }],
       });
     }
@@ -176,7 +193,7 @@ export async function runReviewAgent(options = {}) {
           ? { type: "tool", name: "submit_review" }
           : null;
       const requestMessages = cloneMessages(messages);
-      const forcedToolChoice = toolChoice && supportsForcedToolChoice(provider, reasoningOptions)
+      const forcedToolChoice = toolChoice && reviewPolicy.allowForcedToolChoice
         ? toolChoice
         : null;
       if (shouldForceSubmit) {
@@ -193,20 +210,21 @@ export async function runReviewAgent(options = {}) {
       let requestBody = {
         model,
         max_tokens: maxTokens,
-        system: providerSystemInstructions(provider),
+        system: reviewPolicy.systemInstructions,
         messages: requestMessages,
         tools: schemas,
         ...reasoningOptions,
         ...(forcedToolChoice ? { tool_choice: forcedToolChoice } : {}),
       };
-      if (providerCacheControl(provider)) {
+      if (reviewPolicy.cacheControl) {
         requestBody = withReviewCacheBreakpoints(requestBody, stablePrefixEnd);
       }
-      const response = await transport.messages(requestBody, {
+      const response = await abortable(() => transport.messages(requestBody, {
         signal: abort.signal,
         timeoutMs: remainingReviewTimeoutMs(timeoutMs, reviewStartedAt, provider),
         onEvent,
-      });
+      }), abort.signal);
+      ensureWithinDeadline();
       cumulativeUsage = mergeUsage(cumulativeUsage, response.usage);
       if (response.usage) {
         onEvent?.({
@@ -218,6 +236,17 @@ export async function runReviewAgent(options = {}) {
       }
       throwIfCancelled(controller);
 
+      if (response?.completion?.status !== "complete") {
+        return inconclusiveIncompleteProviderResponse(response?.completion, {
+          toolUsage,
+          rounds: round,
+          usage: cumulativeUsage,
+          provider,
+          model,
+          reviewPolicy,
+        });
+      }
+
       if (Array.isArray(response.content) && response.content.length) {
         messages.push({ role: "assistant", content: response.content });
       } else if (response.text) {
@@ -227,14 +256,16 @@ export async function runReviewAgent(options = {}) {
       const toolCalls = response.tool_calls ?? [];
       if (!toolCalls.length) {
         const finalText = responseText(response);
-        const naturalReviewValidation = validateStructuredReviewText(finalText);
+        const naturalReviewValidation = validateStructuredReviewText(finalText, { strictWire: true });
         const naturalReview = naturalReviewValidation.review;
         if (naturalReview) {
           const accepted = await acceptStructuredReview(naturalReview, inspection, minInspection, {
             tools,
             controller,
             abort,
+            ensureWithinDeadline,
           });
+          ensureWithinDeadline();
           if (accepted.done) {
             return {
               ...accepted.review,
@@ -244,8 +275,7 @@ export async function runReviewAgent(options = {}) {
               reviewConfig: reviewConfigMetadata({
                 provider,
                 model,
-                maxTokens,
-                reasoningOptions,
+                reviewPolicy,
                 rounds: round,
                 toolUsage,
               }),
@@ -259,8 +289,7 @@ export async function runReviewAgent(options = {}) {
               usage: cumulativeUsage,
               provider,
               model,
-              maxTokens,
-              reasoningOptions,
+              reviewPolicy,
             });
           }
           if (countsAsReviewCorrection) {
@@ -274,9 +303,8 @@ export async function runReviewAgent(options = {}) {
                 usage: cumulativeUsage,
                 provider,
                 model,
-                maxTokens,
-                reasoningOptions,
-              });
+                reviewPolicy,
+              }, inspection, minInspection);
             }
           }
           messages.push({
@@ -298,9 +326,8 @@ export async function runReviewAgent(options = {}) {
               usage: cumulativeUsage,
               provider,
               model,
-              maxTokens,
-              reasoningOptions,
-            });
+              reviewPolicy,
+            }, inspection, minInspection);
           }
           reviewCorrectionAttempts += 1;
           messages.push({
@@ -323,8 +350,7 @@ export async function runReviewAgent(options = {}) {
               reviewConfig: reviewConfigMetadata({
                 provider,
                 model,
-                maxTokens,
-                reasoningOptions,
+                reviewPolicy,
                 rounds: round,
                 toolUsage,
               }),
@@ -355,6 +381,33 @@ export async function runReviewAgent(options = {}) {
 
       const submitCall = toolCalls.find((call) => call.name === "submit_review");
       if (submitCall) {
+        // The assistant formulated this verdict before any sibling tool result
+        // existed. Validate it against the inspection state at turn start;
+        // sibling calls can advance a later turn but never retroactively justify
+        // a clean or conclusive result in this one.
+        const submitted = await handleSubmittedReview(submitCall, inspection, minInspection, {
+          tools,
+          controller,
+          abort,
+          ensureWithinDeadline,
+        });
+        ensureWithinDeadline();
+        if (submitted.done) {
+          return {
+            ...submitted.review,
+            toolUsage,
+            rounds: round,
+            usage: cumulativeUsage,
+            reviewConfig: reviewConfigMetadata({
+              provider,
+              model,
+              reviewPolicy,
+              rounds: round,
+              toolUsage,
+            }),
+          };
+        }
+
         const executedResults = new Map();
         const inspectionBeforeTools = inspectionProgressKey(inspection);
         for (const call of toolCalls) {
@@ -370,32 +423,12 @@ export async function runReviewAgent(options = {}) {
             toolUsage,
             onEvent,
             provider,
+            ensureWithinDeadline,
           }));
         }
-        if (inspectionProgressKey(inspection) !== inspectionBeforeTools) {
+        const inspectionAdvanced = inspectionProgressKey(inspection) !== inspectionBeforeTools;
+        if (inspectionAdvanced) {
           inspectionRefusals = 0;
-        }
-
-        const submitted = await handleSubmittedReview(submitCall, inspection, minInspection, {
-          tools,
-          controller,
-          abort,
-        });
-        if (submitted.done) {
-          return {
-            ...submitted.review,
-            toolUsage,
-            rounds: round,
-            usage: cumulativeUsage,
-            reviewConfig: reviewConfigMetadata({
-              provider,
-              model,
-              maxTokens,
-              reasoningOptions,
-              rounds: round,
-              toolUsage,
-            }),
-          };
         }
         const countsAsReviewCorrection = consumesReviewCorrection(submitted.error);
         if (countsAsReviewCorrection && reviewCorrectionAttempts >= maxReviewCorrectionAttempts) {
@@ -405,13 +438,12 @@ export async function runReviewAgent(options = {}) {
             usage: cumulativeUsage,
             provider,
             model,
-            maxTokens,
-            reasoningOptions,
+            reviewPolicy,
           });
         }
         if (countsAsReviewCorrection) {
           reviewCorrectionAttempts += 1;
-        } else if (consumesInspectionRefusal(submitted.error)) {
+        } else if (consumesInspectionRefusal(submitted.error) && !inspectionAdvanced) {
           inspectionRefusals += 1;
           if (inspectionRefusals >= maxInspectionRefusals) {
             return inconclusiveRepeatedInspectionRefusals(submitted.error, {
@@ -420,9 +452,8 @@ export async function runReviewAgent(options = {}) {
               usage: cumulativeUsage,
               provider,
               model,
-              maxTokens,
-              reasoningOptions,
-            });
+              reviewPolicy,
+            }, inspection, minInspection);
           }
         }
 
@@ -457,6 +488,7 @@ export async function runReviewAgent(options = {}) {
           toolUsage,
           onEvent,
           provider,
+          ensureWithinDeadline,
         }));
       }
 
@@ -483,19 +515,30 @@ function syncReadFileEndLine(result) {
   }
 }
 
-async function executeToolCall({ call, tools, controller, abort, inspection, toolUsage, onEvent, provider }) {
+async function executeToolCall({
+  call,
+  tools,
+  controller,
+  abort,
+  inspection,
+  toolUsage,
+  onEvent,
+  provider,
+  ensureWithinDeadline,
+}) {
   let result;
   try {
-    result = await tools.execute(call.name, call.input ?? {}, {
+    result = await abortable(() => tools.execute(call.name, call.input ?? {}, {
       controller,
       signal: abort.signal,
-    });
+    }), abort.signal);
   } catch (error) {
     result = {
       ok: false,
       error: error?.message || String(error),
     };
   }
+  ensureWithinDeadline?.();
   throwIfCancelled(controller);
   toolUsage[call.name] = (toolUsage[call.name] ?? 0) + 1;
   const cap = Number(tools?.maxToolBytes);
@@ -531,73 +574,39 @@ async function executeToolCall({ call, tools, controller, abort, inspection, too
   };
 }
 
-function providerReasoningOptions(provider, options = {}) {
-  if (provider === "claude") {
-    const thinking = options.thinking ?? DEFAULT_REVIEW_POLICY.claudeThinking;
-    const requestedEffort = options.effort ?? DEFAULT_REVIEW_POLICY.claudeEffort;
-    const effort = requestedEffort === "cli-default" ? null : requestedEffort;
-    return {
-      ...(thinking ? { thinking } : {}),
-      ...(effort ? { output_config: { effort } } : {}),
-    };
-  }
-  if (provider === "antigravity") {
-    const budget = options.thinkingBudget ?? DEFAULT_REVIEW_POLICY.antigravityThinkingBudget;
-    const parsed = Number(budget);
-    return Number.isFinite(parsed) ? { thinkingBudget: parsed } : {};
-  }
-  if (provider === "grok") {
-    const requested = options.effort ?? DEFAULT_REVIEW_POLICY.grokEffort;
-    const effort = requested === "cli-default" ? null : requested;
-    return effort ? { reasoning_effort: effort } : {};
-  }
-  return {};
+function resolveReviewPolicy(options, provider) {
+  const supplied = options.reviewPolicy && typeof options.reviewPolicy === "object"
+    ? options.reviewPolicy
+    : {};
+  return {
+    maxTokens: options.maxTokens ?? supplied.maxTokens ?? DEFAULT_REVIEW_POLICY.maxTokens,
+    reasoningOptions: supplied.reasoningOptions && typeof supplied.reasoningOptions === "object"
+      ? { ...supplied.reasoningOptions }
+      : {},
+    strictSubmit: supplied.strictSubmit === true,
+    cacheControl: supplied.cacheControl === true,
+    allowForcedToolChoice: supplied.allowForcedToolChoice !== false,
+    forceAfterSatisfiedRounds: options.forceAfterSatisfiedRounds
+      ?? supplied.forceAfterSatisfiedRounds
+      ?? DEFAULT_REVIEW_POLICY.forceAfterSatisfiedRounds,
+    systemInstructions: Array.isArray(supplied.systemInstructions)
+      ? supplied.systemInstructions.map((block) => ({ ...block }))
+      : genericSystemInstructions(provider),
+    auditMetadata: supplied.auditMetadata && typeof supplied.auditMetadata === "object"
+      ? { ...supplied.auditMetadata }
+      : {},
+  };
 }
 
-function reviewConfigMetadata({ provider, model, maxTokens, reasoningOptions, rounds, toolUsage }) {
-  const config = {
+function reviewConfigMetadata({ provider, model, reviewPolicy, rounds, toolUsage }) {
+  return {
+    ...reviewPolicy.auditMetadata,
     provider,
     model: model ?? "",
-    maxTokens,
+    maxTokens: reviewPolicy.maxTokens,
     rounds,
     toolUsage: { ...(toolUsage ?? {}) },
   };
-  if (provider === "claude") {
-    config.thinking = reasoningOptions.thinking ?? null;
-    config.effort = reasoningOptions.output_config?.effort ?? "";
-  }
-  if (provider === "antigravity") {
-    config.thinkingBudget = reasoningOptions.thinkingBudget ?? null;
-  }
-  if (provider === "grok") {
-    config.effort = reasoningOptions.reasoning_effort ?? "";
-  }
-  return config;
-}
-
-function supportsForcedToolChoice(provider, reasoningOptions = {}) {
-  return !(provider === "claude" && reasoningOptions.thinking);
-}
-
-function providerMaxTokens(provider) {
-  if (provider === "claude") {
-    return DEFAULT_REVIEW_POLICY.claudeMaxTokens;
-  }
-  if (provider === "antigravity") {
-    return DEFAULT_REVIEW_POLICY.antigravityMaxTokens;
-  }
-  if (provider === "grok") {
-    return DEFAULT_REVIEW_POLICY.grokMaxTokens;
-  }
-  return DEFAULT_REVIEW_POLICY.antigravityMaxTokens;
-}
-
-function providerStrictSubmit(provider) {
-  return provider === "claude";
-}
-
-function providerCacheControl(provider) {
-  return provider === "claude";
 }
 
 // Annotate a cloned request with up to three cache_control breakpoints:
@@ -646,22 +655,6 @@ function withReviewCacheBreakpoints(request, stablePrefixEnd = 1) {
     messages[index] = { ...messages[index], content: copy };
   }
   return { ...request, system, messages };
-}
-
-function providerForceAfterSatisfiedRounds(provider, mode) {
-  if (provider === "antigravity" && mode === "review") {
-    // Gemini/AGY can keep inspecting after enough evidence. Leave several
-    // model-led rounds after the gate, then ask for the structured verdict.
-    return POST_EVIDENCE_INSPECTION_ROUNDS;
-  }
-  if (provider === "grok") {
-    // grok-4.5 keeps inspecting on large diffs and, without a bound, has run
-    // 10+ rounds and ~1.5M tokens in a single first pass (and again in the
-    // challenge phase). Cap both first-pass and adversarial runs with the same
-    // post-evidence backstop so a review can't exhaust the subscription.
-    return POST_EVIDENCE_INSPECTION_ROUNDS;
-  }
-  return DEFAULT_REVIEW_POLICY.forceAfterSatisfiedRounds;
 }
 
 function remainingReviewTimeoutMs(timeoutMs, startedAt, provider) {
@@ -713,7 +706,7 @@ function formatUsageSummary(usage) {
 }
 
 async function handleSubmittedReview(call, inspection, minInspection, verification) {
-  const validation = validateStructuredReview(call.input);
+  const validation = validateStructuredReviewWire(call.input);
   const normalized = validation.review;
   if (!normalized) {
     const error = structuredReviewValidationError(validation.errors);
@@ -763,30 +756,47 @@ function structuredReviewValidationError(errors) {
 
 async function acceptStructuredReview(review, inspection, minInspection, verification = {}) {
   const visibleInspection = visibleInspectionState(inspection);
-  if (!inspectionSatisfied(inspection, minInspection)) {
+  const explicitlyInconclusive = review.verdict === "inconclusive";
+  const coverageGaps = allCoverageGapsForInspection(inspection);
+  const diffUnavailable = requiredDiffIsUnavailable(inspection, minInspection);
+  const coverageUnavailable = coverageGaps.length > 0
+    && coverageGaps.every((hunk) => hunkIsUnavailable(inspection, hunk));
+  const hasInherentEvidenceGap = diffUnavailable || coverageUnavailable;
+  const everyCoreGapIsUnavailable = (
+    (!minInspection.diff || inspection.diffComplete || diffUnavailable)
+    && (coverageGaps.length === 0 || coverageUnavailable)
+  );
+  const mayConcludeWithGap = explicitlyInconclusive
+    && hasInherentEvidenceGap
+    && everyCoreGapIsUnavailable;
+  if (!mayConcludeWithGap && !inspectionSatisfied(inspection, minInspection)) {
     const requiredExplicitCalls = Number(minInspection.explicitFileOrSearchToolCalls ?? 0);
     return {
       done: false,
       error: {
         ok: false,
         correction_kind: "inspection",
-        error: requiredExplicitCalls > 0
-          ? `submit_review refused: inspect the diff and use read_file or search on at least ${requiredExplicitCalls} relevant files/search targets before submitting final findings.`
-          : "submit_review refused: inspect the diff and at least one relevant file or search result before submitting final findings.",
+        error: minInspection.diff && !inspection.diffComplete
+          ? "submit_review refused: consume every immutable diff page before submitting. Call get_diff with the last next_cursor until complete is true."
+          : requiredExplicitCalls > 0
+            ? `submit_review refused: inspect the diff and use read_file or search on at least ${requiredExplicitCalls} relevant files/search targets before submitting final findings.`
+            : "submit_review refused: inspect the diff and at least one relevant file or search result before submitting final findings.",
         inspection: visibleInspection,
       },
     };
   }
-  const coverageGaps = coverageGapsForInspection(inspection);
-  if (coverageGaps.length) {
+  if (!mayConcludeWithGap && coverageGaps.length) {
+    const actionableCoverageGaps = coverageGapsForInspection(inspection);
     return {
       done: false,
       error: {
         ok: false,
         correction_kind: "inspection",
-        error: "submit_review refused: inspect each high-risk changed hunk with read_file before submitting final findings.",
+        error: coverageUnavailable
+          ? "submit_review refused: required high-risk source evidence could not be read. Return verdict inconclusive and preserve the exact verification gaps."
+          : "submit_review refused: inspect each high-risk changed hunk with read_file before submitting final findings.",
         inspection: visibleInspection,
-        coverage_gaps: coverageGaps,
+        coverage_gaps: actionableCoverageGaps,
       },
     };
   }
@@ -816,7 +826,73 @@ async function acceptStructuredReview(review, inspection, minInspection, verific
       },
     };
   }
-  return { done: true, review: withCoverageVerificationGaps(review, inspection) };
+  return { done: true, review: qualifyReviewEvidence(review, inspection, minInspection) };
+}
+
+function qualifyReviewEvidence(review, inspection, required = {}) {
+  const qualified = withInspectionVerificationGaps(
+    withCoverageVerificationGaps(review, inspection),
+    inspection,
+    required,
+  );
+  return qualified.verdict === "clean" && qualified.verification_gaps.length
+    ? { ...qualified, verdict: "inconclusive" }
+    : qualified;
+}
+
+function withInspectionVerificationGaps(review, inspection, required) {
+  const gaps = [...(Array.isArray(review.verification_gaps) ? review.verification_gaps : [])];
+  const append = (gap) => {
+    if (gap && !gaps.includes(gap)) {
+      gaps.push(gap);
+    }
+  };
+  if (required.diff && !inspection.diffComplete) {
+    const pageCount = Number(inspection.diffPages ?? 0);
+    const nextCursor = String(inspection.nextDiffCursor ?? "");
+    append(
+      `Supermodels: immutable diff inspection is incomplete after ${pageCount} consumed ${pageCount === 1 ? "page" : "pages"}; not every immutable diff page was available or consumed${nextCursor ? ` (next_cursor: ${nextCursor})` : ""}.`,
+    );
+    const expectedCursor = inspection.diff ? String(inspection.nextDiffCursor ?? "") : "";
+    for (const failure of matchingRequiredDiffFailures(inspection, expectedCursor)) {
+      append(
+        `Supermodels: immutable diff page${failure.cursor ? ` at cursor ${failure.cursor}` : " one"} could not be read (${failure.reason}).`,
+      );
+    }
+  }
+  if (required.fileOrSearch && !inspection.fileOrSearch) {
+    append("Supermodels: no readable file content or matching repository search evidence was available for explicit inspection.");
+  }
+  const requiredTargets = Number(required.explicitFileOrSearchToolCalls ?? 0);
+  const inspectedTargets = distinctInspectionCount(inspection);
+  if (inspectedTargets < requiredTargets) {
+    append(`Supermodels: explicit repository inspection covered ${inspectedTargets} of ${requiredTargets} required distinct file/search targets.`);
+  }
+  for (const hunk of allCoverageGapsForInspection(inspection)) {
+    append(
+      `Supermodels: high-risk hunk was not fully inspected with read_file: ${hunk.file}:${hunk.line_start}-${hunk.line_end} (${hunk.reason}).`,
+    );
+    for (const failure of (inspection.evidenceFailures?.reads ?? []).filter((entry) =>
+      entry.file === hunk.file
+      && entry.end >= hunk.line_start
+      && entry.start <= hunk.line_end
+    )) {
+      append(
+        `Supermodels: read_file could not deliver ${failure.file}:${failure.start}-${failure.end} (${failure.reason}).`,
+      );
+    }
+  }
+  for (const filtered of inspection.coverage?.filteredFiles ?? []) {
+    if (filtered.status === "A") {
+      continue;
+    }
+    append(
+      `Supermodels: ${filtered.path} uses Git clean filter '${filtered.filter}'; the canonical diff cannot be losslessly mapped to the raw model-visible ${filtered.status === "D" ? "deleted" : "working-tree"} representation.`,
+    );
+  }
+  return gaps.length === (review.verification_gaps?.length ?? 0)
+    ? review
+    : { ...review, verification_gaps: gaps };
 }
 
 function withCoverageVerificationGaps(review, inspection) {
@@ -831,7 +907,12 @@ function withCoverageVerificationGaps(review, inspection) {
   return { ...review, verification_gaps: [...gaps, COVERAGE_TRUNCATED_GAP] };
 }
 
-async function verifyFindingLocations(review, { tools, controller, abort } = {}) {
+async function verifyFindingLocations(review, {
+  tools,
+  controller,
+  abort,
+  ensureWithinDeadline,
+} = {}) {
   if (!Array.isArray(review.findings) || review.findings.length === 0) {
     return [];
   }
@@ -846,23 +927,33 @@ async function verifyFindingLocations(review, { tools, controller, abort } = {})
       return diffInfo;
     }
     diffLoaded = true;
+    if (typeof tools.reviewDiff === "string") {
+      diffInfo = { text: tools.reviewDiff, truncated: false };
+      return diffInfo;
+    }
     try {
-      const result = await tools.execute("get_diff", {}, {
+      const result = await abortable(() => tools.execute("get_diff", {}, {
         controller,
         signal: abort?.signal,
-      });
+      }), abort?.signal);
+      ensureWithinDeadline?.();
       diffInfo = {
         text: result?.ok ? String(result.diff ?? "") : "",
-        truncated: Boolean(result?.ok && result?.truncated),
+        truncated: Boolean(result?.ok && (
+          result.diffTruncated
+          ?? result.truncated
+          ?? (Object.hasOwn(result, "complete") && !result.complete)
+        )),
       };
     } catch {
+      ensureWithinDeadline?.();
       diffInfo = { text: "", truncated: false };
     }
     throwIfCancelled(controller);
     return diffInfo;
   };
   for (const finding of review.findings) {
-    const file = String(finding.file ?? "").trim();
+    const file = String(finding.file ?? "");
     const start = Number(finding.line_start);
     const end = Number(finding.line_end);
     if (!file || !Number.isInteger(start) || !Number.isInteger(end) || start <= 0 || end < start) {
@@ -888,22 +979,24 @@ async function verifyFindingLocations(review, { tools, controller, abort } = {})
     const requestedEnd = end;
     let result;
     try {
-      result = await tools.execute("read_file", {
+      result = await abortable(() => tools.execute("read_file", {
         path: file,
         start_line: start,
         end_line: requestedEnd,
       }, {
         controller,
         signal: abort?.signal,
-      });
+      }), abort?.signal);
+      ensureWithinDeadline?.();
     } catch (error) {
+      ensureWithinDeadline?.();
       result = {
         ok: false,
         error: error?.message || String(error),
       };
     }
     throwIfCancelled(controller);
-    const returnedPath = String(result?.path ?? "").trim();
+    const returnedPath = String(result?.path ?? "");
     if (!result?.ok) {
       errors.push({
         title: finding.title || "(untitled)",
@@ -924,18 +1017,11 @@ async function verifyFindingLocations(review, { tools, controller, abort } = {})
       });
       continue;
     }
-    const returnedEnd = Number(result?.end_line ?? requestedEnd);
-    const hasCurrentLineContent = String(result.content ?? "").trim()
-      && Number.isInteger(returnedEnd)
-      && returnedEnd >= start;
-    if (hasCurrentLineContent) {
+    if (numberedContentCoversRange(result?.content, start, end)) {
       continue;
     }
     const diff = await getDiffInfo();
     if (!diffHasDeletedLineCoverage(diff.text, file, start, end)) {
-      if (diff.truncated) {
-        continue;
-      }
       errors.push({
         title: finding.title || "(untitled)",
         file,
@@ -949,14 +1035,14 @@ async function verifyFindingLocations(review, { tools, controller, abort } = {})
 }
 
 function comparableReviewPath(value) {
-  return String(value ?? "")
-    .trim()
-    .replace(/\\/g, "/")
+  const exact = String(value ?? "");
+  return (path.sep === "\\" ? exact.replace(/\\/g, "/") : exact)
     .replace(/^\.\/+/, "");
 }
 
 function diffHasDeletedLineCoverage(diffText, file, start, end) {
   const target = comparableReviewPath(file);
+  const deletedLines = new Set();
   let currentFileMatches = false;
   let pendingOldPath = "";
   let oldLine = null;
@@ -999,7 +1085,7 @@ function diffHasDeletedLineCoverage(diffText, file, start, end) {
     }
     if (line.startsWith("-")) {
       if (oldLine >= start && oldLine <= end) {
-        return true;
+        deletedLines.add(oldLine);
       }
       oldLine += 1;
       continue;
@@ -1013,7 +1099,27 @@ function diffHasDeletedLineCoverage(diffText, file, start, end) {
       newLine += 1;
     }
   }
-  return false;
+  for (let line = start; line <= end; line += 1) {
+    if (!deletedLines.has(line)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function numberedContentCoversRange(content, start, end) {
+  const delivered = new Set();
+  const regex = /(?:^|\n)(\d+):/g;
+  let match;
+  while ((match = regex.exec(String(content ?? ""))) !== null) {
+    delivered.add(Number(match[1]));
+  }
+  for (let line = start; line <= end; line += 1) {
+    if (!delivered.has(line)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function normalizeDiffPath(value) {
@@ -1024,23 +1130,66 @@ function createCoverageState() {
   return {
     enabled: false,
     diffTruncated: false,
+    snapshotWide: false,
     highRiskHunks: [],
+    filteredFiles: [],
     coveredHunkIds: new Set(),
+    readRanges: [],
   };
+}
+
+function seedSnapshotCoverage(inspection, reviewDiff, filteredFiles = []) {
+  if (typeof reviewDiff !== "string") {
+    return;
+  }
+  inspection.coverage = coverageLedgerFromDiff(reviewDiff);
+  inspection.coverage.snapshotWide = true;
+  for (const filtered of filteredFiles) {
+    const file = comparableReviewPath(filtered?.path);
+    const lineCount = Number(filtered?.lineCount ?? 0);
+    if (!file || !Number.isInteger(lineCount) || lineCount < 0) {
+      continue;
+    }
+    const normalized = {
+      path: file,
+      status: String(filtered.status ?? "M"),
+      filter: String(filtered.filter ?? "unknown"),
+      lineCount,
+    };
+    inspection.coverage.filteredFiles.push(normalized);
+    inspection.coverage.highRiskHunks.push({
+      id: `filtered:${file}:1-${Math.max(1, lineCount)}`,
+      file,
+      line_start: 1,
+      line_end: Math.max(1, lineCount),
+      reason: lineCount > 0
+        ? `Git clean filter '${normalized.filter}' changes diff-to-file line mapping; inspect the complete ${lineCount}-line model-visible file`
+        : `Git clean filter '${normalized.filter}' leaves no readable current lines; verify the unavailable filtered evidence`,
+    });
+  }
 }
 
 function updateCoverageFromDiff(inspection, result) {
   const diff = String(result?.diff ?? "");
-  if (!result?.ok || !diff.trim()) {
+  if (!result?.ok) {
+    return;
+  }
+  if (inspection.coverage?.snapshotWide) {
+    result.coverage_ledger = boundCoverageLedger(visibleCoverageState(inspection.coverage));
+    return;
+  }
+  if (!diff.trim()) {
     return;
   }
   const previousCovered = inspection.coverage?.coveredHunkIds ?? new Set();
   const coverage = coverageLedgerFromDiff(diff, {
-    // Prefer the diff-specific truncation signal (get_review_context sets it via
-    // truncateObject); fall back to `result.truncated` for get_diff, where the
-    // diff is the only payload so the flags coincide. This keeps snippet-only
-    // truncation from falsely disabling high-risk hunk coverage.
-    truncated: Boolean(result.diffTruncated ?? result.truncated),
+    // Paginated tools report incomplete evidence with `complete:false`; retain
+    // legacy truncation flags for compatibility with custom tool implementations.
+    truncated: Boolean(
+      result.diffTruncated
+      ?? result.truncated
+      ?? (Object.hasOwn(result, "complete") && !result.complete)
+    ),
     previousCovered,
   });
   inspection.coverage = coverage;
@@ -1078,28 +1227,90 @@ function markCoverageRange(coverage, range) {
   if (!coverage?.enabled || !coverage.highRiskHunks.length) {
     return;
   }
+  coverage.readRanges ??= [];
+  coverage.readRanges.push(range);
   for (const hunk of coverage.highRiskHunks) {
-    if (hunk.file === range.file && rangesOverlap(range.start, range.end, hunk.line_start, hunk.line_end)) {
+    if (hunk.file === range.file && rangesFullyCoverHunk(coverage.readRanges, hunk)) {
       coverage.coveredHunkIds.add(hunk.id);
     }
   }
 }
 
+function rangesFullyCoverHunk(ranges, hunk) {
+  let nextLine = hunk.line_start;
+  const relevant = ranges
+    .filter((range) => range.file === hunk.file && range.end >= hunk.line_start && range.start <= hunk.line_end)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+  for (const range of relevant) {
+    if (range.start > nextLine) {
+      return false;
+    }
+    nextLine = Math.max(nextLine, range.end + 1);
+    if (nextLine > hunk.line_end) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function coverageGapsForInspection(inspection) {
+  // Failed ranges remain real server-side coverage gaps, but once a provider has
+  // actually attempted and proved a hunk unavailable, stop repeating that hunk
+  // in the bounded actionable hint list. This lets later gaps surface even when
+  // there are more than MAX_COVERAGE_GAPS; acceptance still evaluates the full
+  // unfiltered set through allCoverageGapsForInspection().
+  return allCoverageGapsForInspection(inspection)
+    .filter((hunk) => !hunkIsUnavailable(inspection, hunk))
+    .slice(0, MAX_COVERAGE_GAPS);
+}
+
+function allCoverageGapsForInspection(inspection) {
   const coverage = inspection.coverage;
   if (!coverage?.enabled) {
     return [];
   }
   return coverage.highRiskHunks
     .filter((hunk) => !coverage.coveredHunkIds.has(hunk.id))
-    .slice(0, MAX_COVERAGE_GAPS)
     .map(({ id: _id, ...hunk }) => hunk);
+}
+
+function requiredDiffIsUnavailable(inspection, required) {
+  if (!required.diff || inspection.diffComplete) {
+    return false;
+  }
+  const expectedCursor = inspection.diff ? String(inspection.nextDiffCursor ?? "") : "";
+  return matchingRequiredDiffFailures(inspection, expectedCursor).length > 0;
+}
+
+function matchingRequiredDiffFailures(inspection, expectedCursor) {
+  return (inspection.evidenceFailures?.diff ?? []).filter((failure) =>
+    failure.cursor === expectedCursor
+    || (
+      !expectedCursor
+      && failure.missingContinuation === true
+      && failure.afterCursor === String(inspection.lastDiffCursor ?? "")
+    )
+  );
+}
+
+function hunkIsUnavailable(inspection, hunk) {
+  const failures = (inspection.evidenceFailures?.reads ?? [])
+    .filter((failure) => failure.file === hunk.file);
+  if (!failures.some((failure) =>
+    failure.end >= hunk.line_start && failure.start <= hunk.line_end
+  )) {
+    return false;
+  }
+  return rangesFullyCoverHunk([
+    ...(inspection.coverage?.readRanges ?? []),
+    ...failures,
+  ], hunk);
 }
 
 // Keep the attached coverage_ledger within its reserved headroom by dropping
 // trailing hint hunks if a pathological path/reason list would exceed it. Dropping
 // hints never weakens the gate: coverage is enforced server-side from the full
-// hunk set (coverageGapsForInspection), not from what the ledger displays.
+// hunk set (allCoverageGapsForInspection), not from what the ledger displays.
 function boundCoverageLedger(ledger) {
   // Budget the FULL serialized attachment — the `,"coverage_ledger":` envelope key
   // plus the value — not just the value, so attaching it to a result already bounded
@@ -1225,19 +1436,15 @@ function highRiskHunkReason(file, changedText) {
   return match ? `changed text matches '${match[0]}'` : "";
 }
 
-function rangesOverlap(startA, endA, startB, endB) {
-  return startA <= endB && startB <= endA;
-}
-
 function inspectionSatisfied(inspection, required) {
   const requiredExplicitCalls = Number(required.explicitFileOrSearchToolCalls ?? 0);
-  return (!required.diff || inspection.diff)
+  return (!required.diff || (inspection.diff && inspection.diffComplete))
     && (!required.fileOrSearch || inspection.fileOrSearch)
     && distinctInspectionCount(inspection) >= requiredExplicitCalls;
 }
 
 function nextForcedInspectionTool(inspection, required) {
-  if (required.diff && !inspection.diff) {
+  if (required.diff && (!inspection.diff || !inspection.diffComplete)) {
     return "get_diff";
   }
   if (required.fileOrSearch && !inspection.fileOrSearch) {
@@ -1251,20 +1458,26 @@ function nextForcedInspectionTool(inspection, required) {
 
 function updateInspection(inspection, name, result, input = {}) {
   if (!result?.ok) {
+    recordEvidenceFailure(inspection, name, result, input);
     return;
   }
   if (name === "get_review_context") {
-    inspection.diff ||= Boolean(result.diff || result.diffSummary);
-    updateCoverageFromDiff(inspection, result);
+    if (markDiffPageInspected(inspection, result, input)) {
+      updateCoverageFromDiff(inspection, result);
+      recordUnavailableDiffContinuation(inspection, result, input);
+    }
     return;
   }
   if (name === "get_diff") {
-    inspection.diff = true;
-    updateCoverageFromDiff(inspection, result);
+    if (markDiffPageInspected(inspection, result, input)) {
+      updateCoverageFromDiff(inspection, result);
+      recordUnavailableDiffContinuation(inspection, result, input);
+    }
   }
   if (["read_file", "search"].includes(name)) {
     const target = inspectionTargetKey(name, result, input);
     if (!target || !resultHasInspectionContent(name, result)) {
+      recordEvidenceFailure(inspection, name, result, input);
       return;
     }
     inspection.fileOrSearch = true;
@@ -1275,8 +1488,132 @@ function updateInspection(inspection, name, result, input = {}) {
     }
     if (name === "read_file") {
       markCoverageFromRead(inspection, result, input);
+      recordUnreadableReadTail(inspection, result, input);
     }
   }
+}
+
+function recordUnavailableDiffContinuation(inspection, result, input) {
+  if (inspection.diffComplete || inspection.nextDiffCursor) {
+    return;
+  }
+  recordDiffFailure(inspection, String(input.cursor ?? ""), "tool returned complete:false without a next_cursor", {
+    missingContinuation: true,
+    afterCursor: String(input.cursor ?? ""),
+  });
+}
+
+function recordEvidenceFailure(inspection, name, result, input = {}) {
+  if (["get_diff", "get_review_context"].includes(name)) {
+    const cursor = String(input.cursor ?? "");
+    const expectedCursor = inspection.diff ? String(inspection.nextDiffCursor ?? "") : "";
+    if ((!inspection.diff && cursor) || (inspection.diff && cursor !== expectedCursor)) {
+      return;
+    }
+    recordDiffFailure(inspection, cursor, result?.error || "tool did not return readable diff evidence");
+    return;
+  }
+  if (name !== "read_file") {
+    return;
+  }
+  const range = requestedReadRange(result, input);
+  if (!range) {
+    return;
+  }
+  recordReadFailure(
+    inspection,
+    range,
+    result?.error || (result?.truncated
+      ? "tool could not return one complete source line within its byte limit"
+      : "tool returned no readable source lines"),
+  );
+}
+
+function recordUnreadableReadTail(inspection, result, input = {}) {
+  const requested = requestedReadRange(result, input);
+  if (!requested) {
+    return;
+  }
+  const visibleEnd = lastNumberedLine(result.content);
+  if (Number.isFinite(visibleEnd) && visibleEnd >= requested.end) {
+    return;
+  }
+  if (!result?.truncated && input.end_line === undefined) {
+    return;
+  }
+  const missingStart = Number.isFinite(visibleEnd)
+    ? Math.max(requested.start, visibleEnd + 1)
+    : requested.start;
+  recordReadFailure(inspection, {
+    ...requested,
+    start: missingStart,
+  }, result?.truncated
+    ? "tool could not return the remaining complete source lines within its byte limit"
+    : "source ended before the requested evidence range");
+}
+
+function requestedReadRange(result, input) {
+  const file = comparableReviewPath(result?.path ?? input.path);
+  const startValue = Number(input.start_line ?? result?.start_line ?? 1);
+  const start = Number.isInteger(startValue) && startValue > 0 ? startValue : 1;
+  const endValue = Number(input.end_line ?? (start + 199));
+  const normalizedEnd = Number.isInteger(endValue) && endValue > 0 ? endValue : start + 199;
+  const requestedEnd = Math.max(start, normalizedEnd);
+  const end = Math.min(requestedEnd, start + 199);
+  return file ? { file, start, end } : null;
+}
+
+function recordDiffFailure(inspection, cursor, reason, details = {}) {
+  inspection.evidenceFailures ??= { diff: [], reads: [] };
+  const normalized = {
+    cursor: String(cursor ?? ""),
+    reason: String(reason || "unknown error"),
+    ...details,
+  };
+  if (!(inspection.evidenceFailures.diff ?? []).some((failure) =>
+    failure.cursor === normalized.cursor && failure.reason === normalized.reason
+  )) {
+    inspection.evidenceFailures.diff.push(normalized);
+  }
+}
+
+function recordReadFailure(inspection, range, reason) {
+  inspection.evidenceFailures ??= { diff: [], reads: [] };
+  const normalized = { ...range, reason: String(reason || "unknown error") };
+  if (!(inspection.evidenceFailures.reads ?? []).some((failure) =>
+    failure.file === normalized.file
+    && failure.start === normalized.start
+    && failure.end === normalized.end
+    && failure.reason === normalized.reason
+  )) {
+    inspection.evidenceFailures.reads.push(normalized);
+  }
+}
+
+function markDiffPageInspected(inspection, result, input = {}) {
+  const cursor = String(input.cursor ?? "");
+  inspection.diffPageInputSet ??= new Set();
+  if (inspection.diffPageInputSet.has(cursor)) {
+    return false;
+  }
+  if (inspection.diff && cursor !== String(inspection.nextDiffCursor ?? "")) {
+    return false;
+  }
+  if (!inspection.diff && cursor) {
+    return false;
+  }
+  inspection.diffPageInputSet.add(cursor);
+  inspection.lastDiffCursor = cursor;
+  inspection.diff = true;
+  inspection.diffPages = Number(inspection.diffPages ?? 0) + 1;
+  const declaredComplete = Object.hasOwn(result, "complete");
+  inspection.diffComplete = declaredComplete
+    ? result.complete === true
+    : !Boolean(result.diffTruncated ?? result.truncated);
+  inspection.nextDiffCursor = inspection.diffComplete
+    ? ""
+    : String(result.next_cursor ?? "");
+  return true;
 }
 
 function cleanInspectionSatisfied(inspection, required) {
@@ -1293,15 +1630,50 @@ function distinctInspectionCount(inspection) {
 function visibleInspectionState(inspection) {
   return {
     diff: Boolean(inspection.diff),
+    diffComplete: Boolean(inspection.diffComplete),
+    diffPages: Number(inspection.diffPages ?? 0),
+    nextDiffCursor: inspection.nextDiffCursor ?? "",
     fileOrSearch: Boolean(inspection.fileOrSearch),
     explicitFileOrSearchToolCalls: distinctInspectionCount(inspection),
     explicitFileOrSearchTargets: inspection.explicitFileOrSearchTargets ?? [],
+    evidenceFailures: {
+      diff: (inspection.evidenceFailures?.diff ?? []).map((failure) => ({ ...failure })),
+      reads: (inspection.evidenceFailures?.reads ?? []).map((failure) => ({ ...failure })),
+    },
     coverage: visibleCoverageState(inspection.coverage),
   };
 }
 
 function inspectionProgressKey(inspection) {
   return JSON.stringify(visibleInspectionState(inspection));
+}
+
+function cloneInspectionState(inspection) {
+  return {
+    ...inspection,
+    explicitFileOrSearchTargets: [...(inspection.explicitFileOrSearchTargets ?? [])],
+    explicitFileOrSearchTargetSet: new Set(inspection.explicitFileOrSearchTargetSet ?? []),
+    readRanges: (inspection.readRanges ?? []).map((range) => ({ ...range })),
+    diffPageInputSet: new Set(inspection.diffPageInputSet ?? []),
+    evidenceFailures: {
+      diff: (inspection.evidenceFailures?.diff ?? []).map((failure) => ({ ...failure })),
+      reads: (inspection.evidenceFailures?.reads ?? []).map((failure) => ({ ...failure })),
+    },
+    coverage: {
+      ...inspection.coverage,
+      highRiskHunks: (inspection.coverage?.highRiskHunks ?? []).map((hunk) => ({ ...hunk })),
+      filteredFiles: (inspection.coverage?.filteredFiles ?? []).map((file) => ({ ...file })),
+      coveredHunkIds: new Set(inspection.coverage?.coveredHunkIds ?? []),
+      readRanges: (inspection.coverage?.readRanges ?? []).map((range) => ({ ...range })),
+    },
+  };
+}
+
+function restoreInspectionState(inspection, saved) {
+  for (const key of Object.keys(inspection)) {
+    delete inspection[key];
+  }
+  Object.assign(inspection, saved);
 }
 
 function resultHasInspectionContent(name, result) {
@@ -1320,7 +1692,7 @@ function resultHasInspectionContent(name, result) {
 
 function inspectionTargetKey(name, result, input) {
   if (name === "read_file") {
-    const filePath = String(result.path ?? input.path ?? "").trim();
+    const filePath = String(result.path ?? input.path ?? "");
     if (!filePath) {
       return "";
     }
@@ -1349,9 +1721,10 @@ function initialPrompt({ provider, brief, focus, mode }) {
   const briefText = brief?.trim() || "";
   const focusText = focus?.trim() || "";
   const lines = [
-    `Perform a serious ${modeLabel} of the current workspace as ${provider}.`,
+    `Perform a serious ${modeLabel} of the immutable review snapshot as ${provider}.`,
     "",
-    "You have read-only repository tools. Use them. Do not submit a final review until you have inspected the diff and used read_file or search on at least two relevant files/search targets.",
+    "You have read-only repository tools. Use them. Do not submit a final review until you have consumed every diff page and used read_file or search on at least two relevant files/search targets.",
+    "When get_diff or get_review_context returns complete:false, call get_diff with its opaque next_cursor. Repeat until complete:true; skipping a page makes the review inconclusive.",
     "If get_diff or get_review_context returns a coverage_ledger with missingHighRiskHunks, use read_file on each listed file/line range before submitting.",
     "If you intend to return verdict clean, you must first use read_file or search on at least two relevant files/search targets. A shallow clean verdict will be rejected.",
     "",
@@ -1365,7 +1738,7 @@ function initialPrompt({ provider, brief, focus, mode }) {
     "- Severity rubric: critical means security breach, data loss, irreversible corruption, or production outage; high means likely user-visible regression, broken workflow, or serious correctness issue; medium means plausible bug or bounded edge case; low means maintainability, test, or documentation gap.",
     "",
     "Suggested flow:",
-    "1. Start from the preloaded review context when present, otherwise call get_review_context.",
+    "1. Start from the preloaded review context when present, otherwise call get_review_context; follow next_cursor until the immutable diff is complete.",
     "2. Search/read the most relevant files and tests if the preloaded snippets are insufficient.",
     "3. Read every high-risk hunk named by coverage_ledger.",
     "4. Cross-check findings against tests or adjacent code.",
@@ -1389,25 +1762,7 @@ function initialPrompt({ provider, brief, focus, mode }) {
   return lines.join("\n");
 }
 
-function providerSystemInstructions(provider) {
-  if (provider === "claude") {
-    return [
-      { type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
-      { type: "text", text: "You are Claude Code reviewing for Codex. Be concrete, skeptical, and evidence-driven." },
-    ];
-  }
-  if (provider === "antigravity") {
-    return [{
-      type: "text",
-      text: "You are Antigravity reviewing for Codex. Use broad systems judgment, but ground every claim in inspected repository evidence.",
-    }];
-  }
-  if (provider === "grok") {
-    return [{
-      type: "text",
-      text: "You are Grok Build reviewing for Codex. Be direct and adversarial toward the diff, but ground every claim in inspected repository evidence.",
-    }];
-  }
+function genericSystemInstructions(provider) {
   return [{
     type: "text",
     text: `You are ${provider} reviewing for Codex. Make every claim concrete and falsifiable.`,
@@ -1419,7 +1774,7 @@ function finalInstruction() {
     role: "user",
     content: [{
       type: "text",
-      text: "Submit the final structured review with the evidence you have. If coverage_ledger still has missingHighRiskHunks, read those hunks before submitting. If you found no concrete bugs but have not used read_file or search on at least two relevant files/search targets, return verdict inconclusive and explain the remaining verification gaps instead of clean.",
+      text: "Submit the final structured review only after every diff page reports complete:true. If coverage_ledger still has missingHighRiskHunks, read those hunks before submitting. If you found no concrete bugs but have not used read_file or search on at least two relevant files/search targets, return verdict inconclusive and explain the remaining verification gaps instead of clean.",
     }],
   };
 }
@@ -1467,7 +1822,22 @@ function preloadedEvidenceMessage(preloaded, maxBytes = Number.POSITIVE_INFINITY
   // structure-heavy evidence) with no parsing benefit and would break the cap.
   const build = (items) => `${header}\n\n${JSON.stringify({ preloaded: items })}`;
   if (Buffer.byteLength(build(preloaded), "utf8") <= maxBytes) {
-    return build(preloaded);
+    return { text: build(preloaded), delivered: true };
+  }
+  const containsImmutableDiffPage = preloaded.some((entry) =>
+    ["get_diff", "get_review_context"].includes(entry.tool)
+    && typeof entry.result?.diff === "string"
+  );
+  if (containsImmutableDiffPage) {
+    return {
+      delivered: false,
+      text: [
+        header,
+        "",
+        "The attempted immutable-diff preload was discarded because its assembled message exceeded the model-visible byte cap.",
+        "Call get_review_context without a cursor to start again from page one, then follow every returned next_cursor until complete:true.",
+      ].join("\n"),
+    };
   }
   // The model-visible preload exceeds the cap: bound each embedded result to a
   // share of the budget (after the fixed header/envelope) so the whole MESSAGE
@@ -1483,7 +1853,7 @@ function preloadedEvidenceMessage(preloaded, maxBytes = Number.POSITIVE_INFINITY
     tool: entry.tool,
     result: enforceSerializedCap({ ...entry.result }, perResult),
   }));
-  return build(bounded);
+  return { text: build(bounded), delivered: true };
 }
 
 function cloneMessages(messages) {
@@ -1539,17 +1909,16 @@ function inconclusiveRejectedStructuredReview(error, metadata) {
     reviewConfig: reviewConfigMetadata({
       provider: metadata.provider,
       model: metadata.model,
-      maxTokens: metadata.maxTokens,
-      reasoningOptions: metadata.reasoningOptions,
+      reviewPolicy: metadata.reviewPolicy,
       rounds: metadata.rounds,
       toolUsage: metadata.toolUsage,
     }),
   };
 }
 
-function inconclusiveRepeatedInspectionRefusals(error, metadata) {
+function inconclusiveRepeatedInspectionRefusals(error, metadata, inspection, required) {
   const summary = `Provider structured review could not be accepted after repeated inspection requirements: ${limitSummary(JSON.stringify(error))}`;
-  return {
+  const review = qualifyReviewEvidence({
     verdict: "inconclusive",
     summary,
     findings: [],
@@ -1558,14 +1927,37 @@ function inconclusiveRepeatedInspectionRefusals(error, metadata) {
       "Provider repeatedly submitted a final review before completing required repository inspection.",
       limitSummary(JSON.stringify(error)),
     ],
+  }, inspection, required);
+  return {
+    ...review,
     toolUsage: metadata.toolUsage,
     rounds: metadata.rounds,
     usage: metadata.usage,
     reviewConfig: reviewConfigMetadata({
       provider: metadata.provider,
       model: metadata.model,
-      maxTokens: metadata.maxTokens,
-      reasoningOptions: metadata.reasoningOptions,
+      reviewPolicy: metadata.reviewPolicy,
+      rounds: metadata.rounds,
+      toolUsage: metadata.toolUsage,
+    }),
+  };
+}
+
+function inconclusiveIncompleteProviderResponse(completion, metadata) {
+  const reason = String(completion?.reason ?? "missing-completion-status");
+  return {
+    verdict: "inconclusive",
+    summary: `Provider turn was incomplete (${reason}); its partial review was not accepted.`,
+    findings: [],
+    assumptions: [],
+    verification_gaps: [`Provider did not complete its response: ${reason}.`],
+    toolUsage: metadata.toolUsage,
+    rounds: metadata.rounds,
+    usage: metadata.usage,
+    reviewConfig: reviewConfigMetadata({
+      provider: metadata.provider,
+      model: metadata.model,
+      reviewPolicy: metadata.reviewPolicy,
       rounds: metadata.rounds,
       toolUsage: metadata.toolUsage,
     }),
@@ -1579,18 +1971,47 @@ function limitSummary(text, maxLength = 300) {
     : normalized;
 }
 
-function createAbort(controller) {
+function createAbort(controller, { timeoutMs, provider = "provider" } = {}) {
   const abortController = new AbortController();
   const unsubscribe = controller?.onCancel?.(() => {
     abortController.abort(new Error("Review cancelled."));
   }) ?? (() => {});
+  const timer = Number.isFinite(timeoutMs)
+    ? setTimeout(() => {
+      if (!abortController.signal.aborted) {
+        abortController.abort(new Error(`${provider} review timed out after ${timeoutMs}ms.`));
+      }
+    }, timeoutMs)
+    : null;
   if (controller?.cancelled) {
     abortController.abort(new Error("Review cancelled."));
   }
   return {
     signal: abortController.signal,
-    cleanup: unsubscribe,
+    cleanup() {
+      if (timer) {
+        clearTimeout(timer);
+      }
+      unsubscribe();
+    },
   };
+}
+
+function abortable(operation, signal) {
+  if (!signal) {
+    return Promise.resolve().then(operation);
+  }
+  if (signal.aborted) {
+    return Promise.reject(signal.reason ?? new Error("Review aborted."));
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new Error("Review aborted."));
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve()
+      .then(operation)
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", onAbort));
+  });
 }
 
 function throwIfCancelled(controller) {

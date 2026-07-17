@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { awaitAbortable, throwIfAborted } from "../../lib/abort.mjs";
+
 const execFileAsync = promisify(execFile);
 
 const REFRESH_SAFETY_MS = 300_000;
@@ -40,27 +42,29 @@ export class AntigravityCredentials {
     this.loadedFromKeychain = false;
   }
 
-  async accessToken() {
-    const creds = await this.load();
+  async accessToken(options = {}) {
+    const creds = await this.load(false, options);
     if (creds.expiryMs - this.now() <= REFRESH_SAFETY_MS) {
-      return await this.forceRefresh();
+      return await this.forceRefresh(options);
     }
     return creds.accessToken;
   }
 
-  async forceRefresh() {
+  async forceRefresh(options = {}) {
+    throwIfAborted(options.signal);
     this.cache = null;
     if (this.refreshAuth) {
-      await this.refreshNativeAuth();
-      const refreshed = await this.load(true);
+      await this.refreshNativeAuth(options);
+      const refreshed = await this.load(true, options);
       if (refreshed.expiryMs - this.now() <= REFRESH_SAFETY_MS) {
         throw new Error("Antigravity OAuth access token is expired or near expiry after native AGY refresh. Refresh AGY login interactively, then retry.");
       }
       return refreshed.accessToken;
     }
-    const current = await this.load(true);
-    const refreshed = await this.refreshToken(current);
-    await this.persist(refreshed);
+    const current = await this.load(true, options);
+    const refreshed = await this.refreshToken(current, options);
+    throwIfAborted(options.signal);
+    await this.persist(refreshed, options);
     this.cache = {
       envelope: refreshed.envelope,
       accessToken: refreshed.accessToken,
@@ -71,7 +75,8 @@ export class AntigravityCredentials {
     return refreshed.accessToken;
   }
 
-  async refreshToken(creds) {
+  async refreshToken(creds, options = {}) {
+    throwIfAborted(options.signal);
     let response;
     try {
       response = await this.fetchImpl(GOOGLE_TOKEN_URL, {
@@ -83,6 +88,7 @@ export class AntigravityCredentials {
           refresh_token: creds.refreshToken,
           grant_type: "refresh_token",
         }).toString(),
+        signal: options.signal,
       });
     } catch (error) {
       throw new Error(`Antigravity OAuth token refresh failed: ${error?.message || String(error)}. Run \`agy\` once interactively to refresh the native Antigravity login, then retry Supermodels.`);
@@ -118,30 +124,35 @@ export class AntigravityCredentials {
     };
   }
 
-  async persist(refreshed) {
+  async persist(refreshed, options = {}) {
+    throwIfAborted(options.signal);
     if (this.loadedFromKeychain) {
-      await this.writeKeychain(refreshed.envelope);
+      await this.writeKeychain(refreshed.envelope, options);
       return;
     }
-    await writeFile(this.credentialsPath, `${JSON.stringify(refreshed.envelope, null, 2)}\n`, { mode: 0o600 });
+    await writeFile(this.credentialsPath, `${JSON.stringify(refreshed.envelope, null, 2)}\n`, {
+      mode: 0o600,
+      signal: options.signal,
+    });
   }
 
-  async writeKeychain(envelope) {
+  async writeKeychain(envelope, options = {}) {
     const password = `go-keyring-base64:${Buffer.from(JSON.stringify(envelope), "utf8").toString("base64")}`;
     if (this.keychainWriter) {
-      await this.keychainWriter(password);
+      await awaitAbortable(() => this.keychainWriter(password, options), options.signal);
       return;
     }
     await runCommandWithInput(buildAntigravityKeychainWriteCommand(password), {
       timeout: 10_000,
       maxBuffer: 1024 * 1024,
+      signal: options.signal,
     });
   }
 
-  async forceNativeRefresh() {
+  async forceNativeRefresh(options = {}) {
     this.cache = null;
-    await this.refreshNativeAuth();
-    const refreshed = await this.load(true);
+    await this.refreshNativeAuth(options);
+    const refreshed = await this.load(true, options);
     if (refreshed.expiryMs - this.now() <= REFRESH_SAFETY_MS) {
       throw new Error("Antigravity OAuth access token is expired or near expiry after native AGY refresh. Refresh AGY login interactively, then retry.");
     }
@@ -152,11 +163,12 @@ export class AntigravityCredentials {
     this.cache = null;
   }
 
-  async load(force = false) {
+  async load(force = false, options = {}) {
+    throwIfAborted(options.signal);
     if (this.cache && !force) {
       return this.cache;
     }
-    const envelope = await this.readEnvelope();
+    const envelope = await this.readEnvelope(options);
     const parsed = parseEnvelope(envelope);
     if (!parsed.accessToken || !parsed.refreshToken || !Number.isFinite(parsed.expiryMs)) {
       throw new Error("Antigravity credentials are missing access token, refresh token, or expiry.");
@@ -171,17 +183,21 @@ export class AntigravityCredentials {
     return this.cache;
   }
 
-  async readEnvelope() {
+  async readEnvelope(options = {}) {
+    throwIfAborted(options.signal);
     if (this.useKeychain()) {
       try {
-        const envelope = await this.readKeychain();
+        const envelope = await this.readKeychain(options);
         this.loadedFromKeychain = true;
         return envelope;
       } catch (error) {
         throw new Error(`Antigravity keychain credential read failed; refusing to fall back to local token file. Run \`agy\` once interactively or set ANTIGRAVITY_OAUTH_CREDS_PATH explicitly. ${error?.message || String(error)}`);
       }
     }
-    const parsed = JSON.parse(await readFile(this.credentialsPath, "utf8"));
+    const parsed = JSON.parse(await readFile(this.credentialsPath, {
+      encoding: "utf8",
+      signal: options.signal,
+    }));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("Antigravity credentials are not a JSON object.");
     }
@@ -189,9 +205,9 @@ export class AntigravityCredentials {
     return parsed;
   }
 
-  async readKeychain() {
+  async readKeychain(options = {}) {
     if (this.keychainReader) {
-      return await this.keychainReader();
+      return await awaitAbortable(() => this.keychainReader(options), options.signal);
     }
     const { stdout } = await execFileAsync("security", [
       "find-generic-password",
@@ -200,7 +216,7 @@ export class AntigravityCredentials {
       "-a",
       KEYCHAIN_ACCOUNT,
       "-w",
-    ], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+    ], { timeout: 10_000, maxBuffer: 1024 * 1024, signal: options.signal });
     const value = stdout.trim();
     if (!value.startsWith("go-keyring-base64:")) {
       throw new Error("Unexpected Antigravity keychain credential format.");
@@ -218,9 +234,10 @@ export class AntigravityCredentials {
     return this.platform === "darwin" && !this.credentialsPathExplicit;
   }
 
-  async refreshNativeAuth() {
+  async refreshNativeAuth(options = {}) {
+    throwIfAborted(options.signal);
     if (this.refreshAuth) {
-      await this.refreshAuth();
+      await awaitAbortable(() => this.refreshAuth(options), options.signal);
       return;
     }
     try {
@@ -228,6 +245,7 @@ export class AntigravityCredentials {
         env: refreshCommandEnv(this.env),
         timeout: 30_000,
         maxBuffer: 1024 * 1024,
+        signal: options.signal,
       });
     } catch (error) {
       const detail = [
@@ -278,15 +296,21 @@ function runCommandWithInput(command, options = {}) {
     let stderr = "";
     let settled = false;
     let timeout = null;
+    let abortCleanup = () => {};
+
+    const cleanup = () => {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      abortCleanup();
+    };
 
     const rejectOnce = (error) => {
       if (settled) {
         return;
       }
       settled = true;
-      if (timeout) {
-        clearTimeout(timeout);
-      }
+      cleanup();
       reject(error);
     };
     const resolveOnce = (value) => {
@@ -294,11 +318,22 @@ function runCommandWithInput(command, options = {}) {
         return;
       }
       settled = true;
-      if (timeout) {
-        clearTimeout(timeout);
-      }
+      cleanup();
       resolve(value);
     };
+    if (options.signal) {
+      const onAbort = () => {
+        child.kill("SIGTERM");
+        rejectOnce(options.signal.reason instanceof Error
+          ? options.signal.reason
+          : new Error("Antigravity keychain write aborted."));
+      };
+      options.signal.addEventListener("abort", onAbort, { once: true });
+      abortCleanup = () => options.signal.removeEventListener("abort", onAbort);
+      if (options.signal.aborted) {
+        onAbort();
+      }
+    }
     if (options.timeout) {
       timeout = setTimeout(() => {
         child.kill("SIGTERM");

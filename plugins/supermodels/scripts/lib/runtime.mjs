@@ -1,14 +1,16 @@
 import { readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 
 import {
   buildContextPacket,
   renderProviderContextPacketMarkdown,
   writeContextPacketArtifacts,
 } from "./context-packet.mjs";
-import { collectGitContext } from "./git.mjs";
+import { createReviewSnapshot } from "./git.mjs";
 import { commandLine, isProcessAlive, processStartedAt, processStartedAtLookup } from "./process.mjs";
 import { renderChallengePrompt, renderReviewPrompt, renderTaskPrompt } from "./prompts.mjs";
 import { createRunController, signalExitCode } from "./run-control.mjs";
+import { challengeRunId, providerLabel } from "../providers/registry.mjs";
 import {
   normalizeStructuredReview,
   parseStructuredReviewText,
@@ -29,6 +31,7 @@ import {
 
 const SUMMARY_LIMIT = 4000;
 const NO_PID_STALE_MS = 5 * 60 * 1000;
+const DEFAULT_SNAPSHOT_TIMEOUT_MS = 20 * 60 * 1000;
 const TERMINAL_JOB_STATUSES = new Set(["cancelled", "completed", "failed", "partial"]);
 
 export { markCancelled } from "./cancellation.mjs";
@@ -37,28 +40,36 @@ export function selectProviders(input) {
   const requested = input.requested ?? [];
   const checks = input.checks ?? {};
   const explicit = Boolean(input.explicit);
+  const requiredCapability = String(input.requiredCapability ?? "");
   const explicitSingleProvider = explicit && requested.length === 1;
   const selected = [];
   const skipped = [];
 
   for (const provider of requested) {
     const check = checks[provider];
-    if (check?.ready) {
+    const ready = Boolean(check?.ready);
+    const supportsRequiredCapability = !requiredCapability
+      || check?.capabilities?.[requiredCapability] === true;
+    if (ready && supportsRequiredCapability) {
       selected.push(provider);
       continue;
     }
 
     const skippedEntry = {
       provider,
-      reason: check?.error
-        ? check.error
-        : check?.auth === "missing"
-          ? "not authenticated"
-          : "not ready",
+      reason: ready
+        ? `does not support ${capabilityLabel(requiredCapability)}`
+        : check?.error
+          ? check.error
+          : check?.auth === "missing"
+            ? "not authenticated"
+            : "not ready",
       check,
     };
     if (explicitSingleProvider) {
-      throw new Error(`Provider '${provider}' is not ready: ${skippedEntry.reason}`);
+      throw new Error(ready
+        ? `Provider '${provider}' ${skippedEntry.reason}.`
+        : `Provider '${provider}' is not ready: ${skippedEntry.reason}`);
     }
     skipped.push(skippedEntry);
   }
@@ -67,13 +78,25 @@ export function selectProviders(input) {
     const reasonSummary = skipped
       .map((item) => `${item.provider}: ${item.reason}`)
       .join("; ");
-    throw new Error(`No requested providers are ready${reasonSummary ? `: ${reasonSummary}` : ""}.`);
+    const requirement = requiredCapability
+      ? ` support ${capabilityLabel(requiredCapability)}`
+      : " are ready";
+    throw new Error(`No requested providers${requirement}${reasonSummary ? `: ${reasonSummary}` : ""}.`);
   }
 
   return {
-    selected: selected.slice(0, 3),
+    selected,
     skipped,
   };
+}
+
+function capabilityLabel(capability) {
+  return {
+    review: "reviews",
+    adversarialReview: "adversarial reviews",
+    task: "tasks",
+    writeTask: "write tasks",
+  }[capability] ?? `capability '${capability}'`;
 }
 
 export function normalizeProviderResult(input) {
@@ -118,7 +141,7 @@ export function normalizeProviderResult(input) {
       assumptions: [],
       verification_gaps: [stderrSummary
         ? "Inspect the provider stderr artifact for the full crash details."
-        : "Inspect the raw provider artifact and retry if the provider returned irrelevant CLI/help text."],
+        : "Inspect the provider artifact and retry if the provider returned irrelevant CLI/help text."],
       output_valid: false,
       provider_session_id: input.sessionId ?? "",
       raw_result_path: input.rawResultPath ?? "",
@@ -184,11 +207,7 @@ export async function checkProviders(adapters, options = {}) {
           capabilities: {},
         }];
       }
-      const check = await adapter.check(options);
-      return [id, {
-        ...check,
-        capabilities: adapter.capabilities?.() ?? {},
-      }];
+      return [id, await safeProviderCheck(id, adapter, options)];
     }),
   );
   return Object.fromEntries(entries);
@@ -197,19 +216,61 @@ export async function checkProviders(adapters, options = {}) {
 export async function setupProviders(adapters, options = {}) {
   const entries = await Promise.all(
     Object.entries(adapters).map(async ([id, adapter]) => {
-      const setupResult = adapter.setup ? await adapter.setup(options) : null;
-      const check = await adapter.check(options);
-      const setup = setupResult ?? { ready: Boolean(check.ready), changed: false };
+      let setupResult = null;
+      let setupError = null;
+      if (adapter.setup) {
+        try {
+          setupResult = await adapter.setup(options);
+        } catch (error) {
+          rethrowProviderAbort(options);
+          setupError = error;
+        }
+      }
+      const check = await safeProviderCheck(id, adapter, options);
+      const setup = setupError
+        ? {
+          ready: false,
+          changed: false,
+          error: `Provider setup failed: ${setupError?.message ?? String(setupError)}`,
+        }
+        : setupResult ?? { ready: Boolean(check.ready), changed: false };
       return [id, {
         setup,
-        check: {
-          ...check,
-          capabilities: adapter.capabilities?.() ?? {},
-        },
+        check,
       }];
     }),
   );
   return Object.fromEntries(entries);
+}
+
+async function safeProviderCheck(id, adapter, options) {
+  let capabilities = {};
+  try {
+    capabilities = adapter.capabilities?.() ?? {};
+    const check = await adapter.check(options);
+    return { ...check, capabilities };
+  } catch (error) {
+    rethrowProviderAbort(options);
+    return {
+      provider: id,
+      label: adapter.label ?? providerLabel(id),
+      ready: false,
+      installed: false,
+      path: "",
+      version: "",
+      auth: "missing",
+      error: `Provider readiness check failed: ${error?.message ?? String(error)}`,
+      capabilities,
+    };
+  }
+}
+
+function rethrowProviderAbort(options) {
+  if (options.signal?.aborted) {
+    throw options.signal.reason instanceof Error
+      ? options.signal.reason
+      : new Error("Provider readiness checks were aborted.");
+  }
 }
 
 export async function runReview({ adapters, providerSelection, mode, options, focus, contextBrief = "", workspaceRoot }) {
@@ -226,11 +287,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
     requested: providerSelection.requested,
     explicit: providerSelection.explicit,
     checks,
-  });
-  const context = await collectGitContext({
-    workspaceRoot,
-    scope: options.scope ?? "working-tree",
-    baseRef: options.base ?? "",
+    requiredCapability: mode === "adversarial-review" ? "adversarialReview" : "review",
   });
   let job = options["job-id"]
     ? await readJob(state, options["job-id"])
@@ -244,25 +301,14 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
       focus,
       contextBrief,
     });
-  const contextPacket = await buildContextPacket({
-    command: mode,
-    mode,
-    workspaceRoot,
-    focus,
-    contextBrief,
-    providerSelection,
-    providerPlan,
-    context,
-  });
-  const providerContextPacketMarkdown = renderProviderContextPacketMarkdown(contextPacket);
-  job = await persistContextPacket(state, job, contextPacket);
   const controller = createRunController();
   const cleanupSignalCancellation = installJobSignalCancellation(state, job.id, controller);
+  let snapshot;
   try {
     const started = await markJobRunning(state, job.id, {
       selectedProviders: providerPlan.selected,
       skippedProviders: providerPlan.skipped,
-    });
+    }, "capturing-snapshot");
     if (started.status !== "running") {
       return terminalOutput({
         job: started,
@@ -271,6 +317,34 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
         skipped: providerPlan.skipped,
       });
     }
+    const snapshotAbort = createSnapshotAbort(
+      controller,
+      timeoutMs ?? DEFAULT_SNAPSHOT_TIMEOUT_MS,
+    );
+    try {
+      snapshot = await createReviewSnapshot({
+        workspaceRoot,
+        scope: "working-tree",
+        baseRef: options.base ?? "",
+        signal: snapshotAbort.signal,
+      });
+    } finally {
+      snapshotAbort.cleanup();
+    }
+    const context = { ...snapshot.context };
+    const contextPacket = await buildContextPacket({
+      command: mode,
+      mode,
+      workspaceRoot,
+      focus,
+      contextBrief,
+      providerSelection,
+      providerPlan,
+      context,
+    });
+    const providerContextPacketMarkdown = renderProviderContextPacketMarkdown(contextPacket);
+    job = await persistContextPacket(state, job, contextPacket);
+    await updateJob(state, job.id, (current) => ({ ...current, stage: "calling-providers" }));
     await initializeProviderRuns(state, job.id, providerPlan.selected);
 
     const writeQueue = createSerializedWriteQueue();
@@ -301,6 +375,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
         runProvider: provider,
         prompt,
         phase: "first-pass",
+        snapshot,
       });
     }));
     await writeQueue.drain();
@@ -324,6 +399,7 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
         controller,
         enqueueWrite,
         firstPassRuns: providerRuns,
+        snapshot,
       })
       : [];
     await writeQueue.drain();
@@ -351,10 +427,19 @@ export async function runReview({ adapters, providerSelection, mode, options, fo
       synthesis: completed.synthesis ?? synthesis,
     };
   } catch (error) {
-    await markJobFailedBestEffort(state, job.id, error);
+    if (controller.cancelled) {
+      await updateJob(
+        state,
+        job.id,
+        (current) => markJobCancelledForSignal(current, controller.signal, controller),
+      ).catch(() => {});
+    } else {
+      await markJobFailedBestEffort(state, job.id, error);
+    }
     throw error;
   } finally {
     cleanupSignalCancellation();
+    await snapshot?.dispose();
   }
 }
 
@@ -372,18 +457,13 @@ export async function runTask({ adapters, providerSelection, options, task, cont
     requested: providerSelection.requested,
     explicit: providerSelection.explicit,
     checks,
+    requiredCapability: options.write ? "writeTask" : "task",
   });
-  if (options.write) {
-    const unsupported = providerPlan.selected.filter((provider) => !adapters[provider]?.capabilities?.().writeTask);
-    if (unsupported.length) {
-      throw new Error(`Provider '${unsupported[0]}' does not support write tasks.`);
-    }
-  }
-  const context = await collectGitContext({
-    workspaceRoot,
-    scope: options.scope ?? "working-tree",
-    baseRef: options.base ?? "",
-  });
+  // Native task adapters inspect the live workspace themselves. Do not run the
+  // strict review-snapshot/filter pipeline merely to decorate a task packet;
+  // that pipeline is intentionally fail-closed and is irrelevant to a task
+  // which will immediately operate on live files.
+  const context = liveTaskContext(workspaceRoot, options);
   let job = options["job-id"]
     ? await readJob(state, options["job-id"])
     : await createJob(state, {
@@ -533,6 +613,22 @@ export async function runTask({ adapters, providerSelection, options, task, cont
   }
 }
 
+function liveTaskContext(workspaceRoot, options = {}) {
+  return {
+    workspaceRoot,
+    repoLabel: path.basename(workspaceRoot),
+    scope: "live-task-workspace",
+    baseRef: String(options.base ?? ""),
+    baseOid: "",
+    snapshotId: "",
+    diffSummary: "Live task delegation; the provider must inspect the workspace directly.",
+    diff: "",
+    changedFiles: [],
+    filteredFiles: [],
+    gitAvailable: false,
+  };
+}
+
 export async function getStatus({ workspaceRoot, dataRoot, jobId }) {
   const state = createState({ workspaceRoot, dataRoot });
   if (jobId) {
@@ -580,6 +676,28 @@ export function providerTimeoutMs(value) {
   return Math.ceil(seconds * 1000);
 }
 
+function createSnapshotAbort(controller, timeoutMs) {
+  const abortController = new AbortController();
+  const unsubscribe = controller.onCancel(() => {
+    abortController.abort(controller.abortSignal.reason);
+  });
+  const timer = Number.isFinite(timeoutMs)
+    ? setTimeout(() => {
+      abortController.abort(new Error(`Review snapshot timed out after ${timeoutMs}ms.`));
+    }, timeoutMs)
+    : null;
+  if (controller.cancelled) {
+    abortController.abort(controller.abortSignal.reason);
+  }
+  return {
+    signal: abortController.signal,
+    cleanup() {
+      clearTimeout(timer);
+      unsubscribe();
+    },
+  };
+}
+
 export function createSerializedWriteQueue() {
   let tail = Promise.resolve();
   let firstError = null;
@@ -611,7 +729,7 @@ export function createSerializedWriteQueue() {
   };
 }
 
-async function markJobRunning(state, jobId, requestPatch) {
+async function markJobRunning(state, jobId, requestPatch, stage = "calling-providers") {
   const pidStartedAt = await processStartedAt(process.pid);
   return await updateJob(state, jobId, (current) => {
     if (TERMINAL_JOB_STATUSES.has(current.status)) {
@@ -620,7 +738,7 @@ async function markJobRunning(state, jobId, requestPatch) {
     return {
       ...current,
       status: "running",
-      stage: "calling-providers",
+      stage,
       pid: process.pid,
       pidStartedAt,
       request: {
@@ -757,6 +875,7 @@ async function runReviewPhase(input) {
     dataRoot: input.state.dataRoot,
     timeoutMs: input.timeoutMs,
     controller: input.controller,
+    snapshot: input.snapshot,
     onStart: recordStart,
     onEvent: recordEvent,
   }));
@@ -932,37 +1051,6 @@ function appendProviderResult(lines, result) {
   lines.push("");
 }
 
-function providerLabel(provider) {
-  const challenge = parseChallengeProvider(provider);
-  if (challenge) {
-    const targets = challenge.targets.map((target) => providerLabel(target)).join(", ");
-    return `${providerLabel(challenge.source)} challenging ${targets}`;
-  }
-  return {
-    claude: "Claude Code",
-    antigravity: "Antigravity",
-    grok: "Grok Build",
-  }[provider] ?? provider;
-}
-
-function parseChallengeProvider(provider) {
-  const value = String(provider ?? "");
-  const marker = "-challenge-";
-  const markerIndex = value.indexOf(marker);
-  if (markerIndex < 0) {
-    return null;
-  }
-  const source = value.slice(0, markerIndex);
-  const targetValue = value.slice(markerIndex + marker.length);
-  if (!source || !targetValue) {
-    return null;
-  }
-  return {
-    source,
-    targets: targetValue.split("-").filter(Boolean),
-  };
-}
-
 function compareFindings(left, right) {
   return severityRank(left.severity) - severityRank(right.severity);
 }
@@ -1084,10 +1172,6 @@ function isUsableStructuredReviewRun(run) {
     && run.normalized?.output_valid !== false
     && run.normalized?.verdict !== "invalid-output"
     && run.normalized?.verdict !== "rate-limited";
-}
-
-function challengeRunId(provider, targets) {
-  return `${provider}-challenge-${targets.join("-")}`;
 }
 
 async function markJobFailedBestEffort(state, jobId, error) {

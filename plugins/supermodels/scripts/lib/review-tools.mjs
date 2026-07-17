@@ -1,10 +1,9 @@
 import { lstat, open, realpath } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import { collectGitContext } from "./git.mjs";
 import { runCommand } from "./process.mjs";
-import { parseUnifiedDiffHeaderPath } from "./diff-paths.mjs";
-import { decodeUtf8Prefix } from "./text.mjs";
 
 const DEFAULT_MAX_FILE_BYTES = 80_000;
 const DEFAULT_MAX_TOOL_BYTES = 120_000;
@@ -15,10 +14,15 @@ const DEFAULT_CONTEXT_FILE_BYTES = 12_000;
 // returns — so the final model-visible payload (result + ledger) still fits
 // maxToolBytes. The agent bounds the ledger itself to this size.
 export const COVERAGE_LEDGER_RESERVE = 8_000;
+const PRELOAD_MESSAGE_RESERVE = 1_024;
 const LEDGER_TOOLS = new Set(["get_diff", "get_review_context", "read_file"]);
 
 export function createReviewTools(options = {}) {
   const workspaceRoot = path.resolve(options.workspaceRoot ?? process.cwd());
+  const snapshot = options.snapshot ?? null;
+  const toolRoot = path.resolve(snapshot?.root ?? workspaceRoot);
+  const snapshotId = String(snapshot?.id ?? `live:${workspaceRoot}`);
+  const cursors = createCursorStore(snapshotId);
   const maxFileBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
   const maxToolBytes = options.maxToolBytes ?? DEFAULT_MAX_TOOL_BYTES;
   const controller = options.controller ?? null;
@@ -26,47 +30,62 @@ export function createReviewTools(options = {}) {
   return {
     schemas: reviewToolSchemas(),
     maxToolBytes,
+    reviewDiff: snapshot?.context?.diff ?? null,
+    reviewFilteredFiles: snapshot?.filteredFiles ?? [],
+    snapshotId: snapshot?.id ?? "",
     async execute(name, input = {}, executionOptions = {}) {
       const activeController = executionOptions.controller ?? controller;
-      throwIfCancelled(activeController);
+      const activeSignal = executionOptions.signal ?? null;
+      throwIfCancelled(activeController, activeSignal);
+      const resultCap = executionOptions.preload
+        ? Math.max(0, maxToolBytes - PRELOAD_MESSAGE_RESERVE)
+        : maxToolBytes;
       // Ledger-bearing tools reserve headroom for the coverage_ledger the review
       // agent attaches after the tool returns, so the final model-visible payload
       // (result + ledger) still fits maxToolBytes.
       const budget = LEDGER_TOOLS.has(name)
-        ? Math.max(0, maxToolBytes - COVERAGE_LEDGER_RESERVE)
-        : maxToolBytes;
+        ? Math.max(0, resultCap - COVERAGE_LEDGER_RESERVE)
+        : resultCap;
       const compute = async () => {
         if (name === "get_diff") {
-          const context = await collectGitContext({
-            workspaceRoot,
-            scope: options.scope ?? "working-tree",
-            baseRef: options.baseRef ?? "",
-          });
-          throwIfCancelled(activeController);
-          return truncateObject({
-            ok: true,
-            workspaceRoot,
-            diffSummary: context.diffSummary,
-            diff: context.diff,
-          }, budget);
+          const context = await contextForReviewTools(workspaceRoot, options);
+          throwIfCancelled(activeController, activeSignal);
+          return pageDiff(context, input.cursor, budget, cursors, workspaceRoot);
         }
         if (name === "get_review_context") {
-          return await getReviewContext(workspaceRoot, options, budget, activeController);
+          return await getReviewContext(
+            workspaceRoot,
+            toolRoot,
+            options,
+            input,
+            budget,
+            cursors,
+            activeController,
+            activeSignal,
+          );
         }
         if (name === "list_changed_files") {
-          return await listChangedFiles(workspaceRoot, options, maxToolBytes, activeController);
+          return await listChangedFiles(
+            workspaceRoot,
+            options,
+            input,
+            resultCap,
+            cursors,
+            activeController,
+            activeSignal,
+          );
         }
         if (name === "list_files") {
-          return await listFiles(workspaceRoot, input, maxToolBytes, activeController);
+          return await listFiles(toolRoot, input, resultCap, activeController, activeSignal);
         }
         if (name === "search") {
-          return await search(workspaceRoot, input, maxToolBytes, activeController);
+          return await search(toolRoot, input, resultCap, activeController, activeSignal);
         }
         if (name === "read_file") {
           // Line-aware bound: keeps end_line consistent with the returned content
           // (an integrity requirement — coverage/citation trust end_line).
           return boundReadFileResult(
-            await readWorkspaceFile(workspaceRoot, input, maxFileBytes, activeController),
+            await readWorkspaceFile(toolRoot, input, maxFileBytes, activeController, activeSignal),
             budget,
           );
         }
@@ -80,32 +99,45 @@ export function createReviewTools(options = {}) {
   };
 }
 
+export function createSnapshotReviewTools(options = {}) {
+  if (!options.snapshot?.root || !options.snapshot?.context) {
+    throw new Error("Direct reviews require an immutable review snapshot.");
+  }
+  return createReviewTools(options);
+}
+
 function reviewToolSchemas() {
   return [
     {
       name: "get_diff",
-      description: "Return the current git diff and diff summary for the workspace.",
+      description: "Return one lossless page of the immutable review diff.",
       input_schema: {
         type: "object",
-        properties: {},
+        properties: {
+          cursor: { type: "string", description: "Opaque next_cursor from a prior diff page." },
+        },
         additionalProperties: false,
       },
     },
     {
       name: "get_review_context",
-      description: "Return the current diff, changed files, and bounded snippets from changed files.",
+      description: "Return one immutable diff page plus bounded changed-file context.",
       input_schema: {
         type: "object",
-        properties: {},
+        properties: {
+          cursor: { type: "string", description: "Opaque next_cursor from a prior diff page." },
+        },
         additionalProperties: false,
       },
     },
     {
       name: "list_changed_files",
-      description: "List files changed in the working tree, including untracked files.",
+      description: "List one lossless page of files in the immutable review snapshot.",
       input_schema: {
         type: "object",
-        properties: {},
+        properties: {
+          cursor: { type: "string", description: "Opaque next_cursor from a prior file-list page." },
+        },
         additionalProperties: false,
       },
     },
@@ -149,25 +181,33 @@ function reviewToolSchemas() {
   ];
 }
 
-async function getReviewContext(workspaceRoot, options, maxToolBytes, controller) {
-  throwIfCancelled(controller);
-  const context = await collectGitContext({
-    workspaceRoot,
-    scope: options.scope ?? "working-tree",
-    baseRef: options.baseRef ?? "",
-  });
-  throwIfCancelled(controller);
-  const changedFiles = await changedFilesForReview(workspaceRoot, options, controller);
+async function getReviewContext(
+  workspaceRoot,
+  toolRoot,
+  options,
+  input,
+  maxToolBytes,
+  cursors,
+  controller,
+  signal,
+) {
+  throwIfCancelled(controller, signal);
+  const context = await contextForReviewTools(workspaceRoot, options);
+  throwIfCancelled(controller, signal);
+  const changedFiles = await changedFilesForReview(workspaceRoot, options, controller, signal);
   const fileLimit = options.contextFileLimit ?? DEFAULT_CONTEXT_FILE_LIMIT;
   const fileBytes = options.contextFileBytes ?? DEFAULT_CONTEXT_FILE_BYTES;
+  const offset = cursors.consume(input.cursor, "diff");
   const fileSnippets = [];
-  for (const changed of changedFiles.filter((file) => file.status !== "D").slice(0, fileLimit)) {
-    throwIfCancelled(controller);
-    const snippet = await readWorkspaceFile(workspaceRoot, {
+  for (const changed of (offset === 0
+    ? changedFiles.filter((file) => file.status !== "D").slice(0, fileLimit)
+    : [])) {
+    throwIfCancelled(controller, signal);
+    const snippet = await readWorkspaceFile(toolRoot, {
       path: changed.path,
       start_line: 1,
       end_line: 200,
-    }, fileBytes, controller).catch((error) => ({
+    }, fileBytes, controller, signal).catch((error) => ({
       ok: false,
       error: error?.message || String(error),
       path: changed.path,
@@ -185,18 +225,176 @@ async function getReviewContext(workspaceRoot, options, maxToolBytes, controller
         : { error: snippet.error ?? "could not read file" }),
     });
   }
-  return truncateObject({
+  const metadata = {
     ok: true,
     workspaceRoot,
+    snapshotId: context.snapshotId ?? "",
+    baseOid: context.baseOid ?? "",
     diffSummary: context.diffSummary,
-    diff: context.diff,
-    changedFiles,
+    changedFiles: offset === 0 ? changedFiles : [],
     fileSnippets,
-  }, maxToolBytes);
+    truncated: false,
+    diffTruncated: false,
+  };
+  fitReviewContextMetadata(metadata, maxToolBytes, context.diff.length > offset);
+  return pageString({
+    text: context.diff,
+    offset,
+    maxBytes: maxToolBytes,
+    kind: "diff",
+    cursors,
+    build: (diff, complete, nextCursor) => ({
+      ...metadata,
+      diff,
+      complete,
+      ...(nextCursor ? { next_cursor: nextCursor } : {}),
+    }),
+  });
 }
 
-async function readWorkspaceFile(workspaceRoot, input, maxBytes, controller) {
-  throwIfCancelled(controller);
+async function contextForReviewTools(workspaceRoot, options) {
+  if (options.snapshot?.context) {
+    return options.snapshot.context;
+  }
+  return await collectGitContext({
+    workspaceRoot,
+    scope: options.scope ?? "working-tree",
+    baseRef: options.baseRef ?? "",
+  });
+}
+
+function createCursorStore(snapshotId) {
+  const entries = new Map();
+  const placeholder = "00000000-0000-4000-8000-000000000000";
+  return {
+    placeholder,
+    issue(kind, offset) {
+      const token = randomUUID();
+      entries.set(token, { snapshotId, kind, offset });
+      return token;
+    },
+    consume(token, kind) {
+      if (token === undefined || token === null || token === "") {
+        return 0;
+      }
+      const key = String(token);
+      const entry = entries.get(key);
+      if (!entry || entry.snapshotId !== snapshotId || entry.kind !== kind) {
+        throw new Error("Invalid, expired, used, or wrong-kind review cursor.");
+      }
+      entries.delete(key);
+      return entry.offset;
+    },
+  };
+}
+
+function pageDiff(context, cursor, maxBytes, cursors, workspaceRoot) {
+  const offset = cursors.consume(cursor, "diff");
+  return pageString({
+    text: context.diff,
+    offset,
+    maxBytes,
+    kind: "diff",
+    cursors,
+    build: (diff, complete, nextCursor) => ({
+      ok: true,
+      workspaceRoot,
+      snapshotId: context.snapshotId ?? "",
+      baseOid: context.baseOid ?? "",
+      diffSummary: context.diffSummary,
+      diff,
+      complete,
+      ...(nextCursor ? { next_cursor: nextCursor } : {}),
+    }),
+  });
+}
+
+function pageString({ text, offset, maxBytes, kind, cursors, build }) {
+  const value = String(text ?? "");
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > value.length) {
+    throw new Error("Invalid or expired review cursor.");
+  }
+  const remaining = value.length - offset;
+  const candidate = (count, nextCursor = cursors.placeholder) => {
+    const end = offset + count;
+    const complete = end >= value.length;
+    return build(
+      value.slice(offset, end),
+      complete,
+      complete ? "" : nextCursor,
+    );
+  };
+  // No serialized character can consume less than one byte. Searching beyond
+  // one response budget only re-serializes an enormous remainder that cannot
+  // fit, making a complete pagination walk quadratic on giant diffs.
+  const searchLimit = Math.min(remaining, maxBytes);
+  let count = largestFittingValue(searchLimit, (amount) => withinCap(candidate(amount), maxBytes));
+  if (count > 0 && splitsSurrogatePair(value, offset + count)) {
+    count -= 1;
+  }
+  if (remaining > 0 && count === 0) {
+    throw new Error("maxToolBytes is too small for one diff character.");
+  }
+  const end = offset + count;
+  const complete = end >= value.length;
+  return candidate(count, complete ? "" : cursors.issue(kind, end));
+}
+
+function fitReviewContextMetadata(metadata, maxBytes, hasRemainingDiff) {
+  const placeholder = "00000000-0000-4000-8000-000000000000";
+  const originalSnippetCount = metadata.fileSnippets.length;
+  const originalFileCount = metadata.changedFiles.length;
+  const probe = () => ({
+    ...metadata,
+    diff: hasRemainingDiff ? "x" : "",
+    complete: !hasRemainingDiff,
+    ...(hasRemainingDiff ? { next_cursor: placeholder } : {}),
+  });
+  while (!withinCap(probe(), maxBytes) && metadata.fileSnippets.length) {
+    metadata.fileSnippets = metadata.fileSnippets.slice(0, -1);
+    metadata.fileSnippetsOmitted = originalSnippetCount - metadata.fileSnippets.length;
+    metadata.truncated = true;
+  }
+  while (!withinCap(probe(), maxBytes) && metadata.changedFiles.length) {
+    metadata.changedFiles = metadata.changedFiles.slice(0, -1);
+    metadata.changedFilesOmitted = originalFileCount - metadata.changedFiles.length;
+    metadata.truncated = true;
+  }
+  if (!withinCap(probe(), maxBytes) && metadata.diffSummary) {
+    const summary = metadata.diffSummary;
+    const kept = largestFittingValue(summary.length, (count) => {
+      metadata.diffSummary = summary.slice(0, count);
+      return withinCap(probe(), maxBytes);
+    });
+    metadata.diffSummary = summary.slice(0, kept);
+    metadata.truncated = true;
+  }
+  if (!withinCap(probe(), maxBytes)) {
+    throw new Error("maxToolBytes is too small for review context metadata.");
+  }
+}
+
+function largestFittingValue(hi, fits) {
+  if (fits(hi)) {
+    return hi;
+  }
+  let lo = 0;
+  let high = hi;
+  let best = 0;
+  while (lo <= high) {
+    const mid = (lo + high) >>> 1;
+    if (fits(mid)) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return best;
+}
+
+async function readWorkspaceFile(workspaceRoot, input, maxBytes, controller, signal) {
+  throwIfCancelled(controller, signal);
   const safe = await safeWorkspacePath(workspaceRoot, input.path);
   if (!safe.ok) {
     return safe;
@@ -212,6 +410,7 @@ async function readWorkspaceFile(workspaceRoot, input, maxBytes, controller) {
     end: Math.min(end, start + 199),
     maxBytes,
     controller,
+    signal,
   });
   return {
     ok: true,
@@ -223,12 +422,12 @@ async function readWorkspaceFile(workspaceRoot, input, maxBytes, controller) {
   };
 }
 
-async function search(workspaceRoot, input, maxBytes, controller) {
+async function search(workspaceRoot, input, maxBytes, controller, signal) {
   const query = String(input.query ?? "").trim();
   if (!query) {
     return { ok: false, error: "search query is required." };
   }
-  throwIfCancelled(controller);
+  throwIfCancelled(controller, signal);
   const result = await runCommand({
     bin: "rg",
     args: ["--line-number", "--hidden", "--glob", "!.git", "--", query, "."],
@@ -236,8 +435,9 @@ async function search(workspaceRoot, input, maxBytes, controller) {
     cwd: workspaceRoot,
     timeoutMs: 10_000,
     controller,
+    signal,
   });
-  throwIfCancelled(controller);
+  throwIfCancelled(controller, signal);
   if (result.exitCode > 1) {
     return { ok: false, error: result.stderr || `rg exited ${result.exitCode}` };
   }
@@ -252,8 +452,8 @@ async function search(workspaceRoot, input, maxBytes, controller) {
   };
 }
 
-async function listFiles(workspaceRoot, input, maxBytes, controller) {
-  throwIfCancelled(controller);
+async function listFiles(workspaceRoot, input, maxBytes, controller, signal) {
+  throwIfCancelled(controller, signal);
   const result = await runCommand({
     bin: "rg",
     args: ["--files", "--hidden", "--glob", "!.git"],
@@ -261,8 +461,9 @@ async function listFiles(workspaceRoot, input, maxBytes, controller) {
     cwd: workspaceRoot,
     timeoutMs: 10_000,
     controller,
+    signal,
   });
-  throwIfCancelled(controller);
+  throwIfCancelled(controller, signal);
   if (result.exitCode !== 0) {
     return { ok: false, error: result.stderr || `rg exited ${result.exitCode}` };
   }
@@ -280,57 +481,89 @@ async function listFiles(workspaceRoot, input, maxBytes, controller) {
   };
 }
 
-async function listChangedFiles(workspaceRoot, options, maxBytes, controller) {
-  throwIfCancelled(controller);
-  const files = await changedFilesForReview(workspaceRoot, options, controller);
-  // Keep the largest CONTIGUOUS PREFIX of files whose BOTH views — the structured
-  // entry and the text `output` line — fit within the serialized cap. Binary search
-  // the retained count so the two always describe the same set and an exact fit is
-  // never stopped one entry short (unlike the old conservative estimate). The kept
-  // set is a prefix: a shorter later entry displaced by a longer earlier one is not
-  // back-filled — a readable contiguous list is preferred over maximizing count.
+async function listChangedFiles(workspaceRoot, options, input, maxBytes, cursors, controller, signal) {
+  throwIfCancelled(controller, signal);
+  const files = await changedFilesForReview(workspaceRoot, options, controller, signal);
+  const offset = cursors.consume(input.cursor, "changed-files");
+  if (offset > files.length) {
+    throw new Error("Invalid or expired review cursor.");
+  }
   const renderLine = (file) => `${file.status.padEnd(2)} ${file.path}`;
-  const result = { ok: true, changedFiles: [], output: "", truncated: false };
-  const apply = (k) => {
-    result.changedFiles = files.slice(0, k);
-    result.output = k > 0 ? files.slice(0, k).map(renderLine).join("\n") : "(no changed files)";
-    if (k < files.length) {
-      result.changedFilesOmitted = files.length - k;
-    } else {
-      delete result.changedFilesOmitted;
-    }
-    result.truncated = k < files.length;
+  const placeholder = cursors.placeholder;
+  const build = (count, nextCursor = placeholder) => {
+    const end = offset + count;
+    const complete = end >= files.length;
+    const changedFiles = files.slice(offset, end);
+    return {
+      ok: true,
+      snapshotId: options.snapshot?.id ?? "",
+      baseOid: options.snapshot?.baseOid ?? "",
+      changedFiles,
+      output: changedFiles.length > 0
+        ? changedFiles.map(renderLine).join("\n")
+        : "(no changed files)",
+      complete,
+      truncated: !complete,
+      ...(!complete
+        ? { changedFilesOmitted: files.length - end, next_cursor: nextCursor }
+        : {}),
+    };
   };
-  largestFitting(files.length, apply, () => withinCap(result, maxBytes));
-  return result;
+  const remaining = files.length - offset;
+  // Every retained entry costs at least one serialized byte, so entries beyond
+  // maxBytes cannot possibly fit and must not be repeatedly serialized on each
+  // page of a huge file list.
+  const count = largestFittingValue(
+    Math.min(remaining, maxBytes),
+    (value) => withinCap(build(value), maxBytes),
+  );
+  if (remaining > 0 && count === 0) {
+    throw new Error("maxToolBytes is too small for one changed-file entry.");
+  }
+  const end = offset + count;
+  const complete = end >= files.length;
+  return build(count, complete ? "" : cursors.issue("changed-files", end));
 }
 
-async function changedFilesForReview(workspaceRoot, options = {}, controller) {
+function splitsSurrogatePair(value, index) {
+  if (index <= 0 || index >= value.length) {
+    return false;
+  }
+  const left = value.charCodeAt(index - 1);
+  const right = value.charCodeAt(index);
+  return left >= 0xD800 && left <= 0xDBFF && right >= 0xDC00 && right <= 0xDFFF;
+}
+
+async function changedFilesForReview(workspaceRoot, options = {}, controller, signal) {
+  if (options.snapshot?.changedFiles) {
+    return options.snapshot.changedFiles;
+  }
   const baseRef = String(options.baseRef ?? "").trim();
   if (!baseRef) {
-    return await changedFilesFromGitStatus(workspaceRoot, controller);
+    return await changedFilesFromGitStatus(workspaceRoot, controller, signal);
   }
-  throwIfCancelled(controller);
-  await assertValidBaseRef(workspaceRoot, baseRef, controller);
+  throwIfCancelled(controller, signal);
+  await assertValidBaseRef(workspaceRoot, baseRef, controller, signal);
   const diff = await runCommand({
     bin: "git",
-    args: ["diff", "--name-status", baseRef],
+    args: ["diff", "--name-status", "-z", baseRef],
   }, {
     cwd: workspaceRoot,
     timeoutMs: 10_000,
     controller,
+    signal,
   });
-  throwIfCancelled(controller);
+  throwIfCancelled(controller, signal);
   if (diff.exitCode !== 0) {
     throw new Error(`git diff --name-status failed: ${diff.stderr || diff.stdout || `exit ${diff.exitCode}`}`);
   }
-  const committed = parseGitNameStatus(diff.stdout);
-  const untracked = (await changedFilesFromGitStatus(workspaceRoot, controller))
+  const committed = parseGitNameStatusZ(diff.stdout);
+  const untracked = (await changedFilesFromGitStatus(workspaceRoot, controller, signal))
     .filter((file) => file.status === "??");
   return dedupeChangedFiles([...committed, ...untracked]);
 }
 
-async function assertValidBaseRef(workspaceRoot, baseRef, controller) {
+async function assertValidBaseRef(workspaceRoot, baseRef, controller, signal) {
   const resolved = await runCommand({
     bin: "git",
     args: ["rev-parse", "--verify", `${baseRef}^{commit}`],
@@ -338,8 +571,9 @@ async function assertValidBaseRef(workspaceRoot, baseRef, controller) {
     cwd: workspaceRoot,
     timeoutMs: 10_000,
     controller,
+    signal,
   });
-  throwIfCancelled(controller);
+  throwIfCancelled(controller, signal);
   if (resolved.exitCode !== 0) {
     throw new Error(`Base ref '${baseRef}' could not be resolved: ${resolved.stderr || resolved.stdout || `exit ${resolved.exitCode}`}`);
   }
@@ -355,33 +589,21 @@ async function readLineRangeWithinLimit(absolutePath, options) {
   let lineNumber = 1;
   let outputBytes = 0;
   let truncated = false;
-  let lastLine = options.start;
+  let lastLine = Math.max(options.start - 1, 0);
 
-  const addLine = (line, { forceTruncated = false } = {}) => {
+  const addLine = (line) => {
     const normalized = line.endsWith("\r") ? line.slice(0, -1) : line;
     if (lineNumber >= options.start && lineNumber <= options.end) {
       const rendered = `${lineNumber}: ${normalized}`;
       const separatorBytes = lines.length ? 1 : 0;
       const renderedBytes = Buffer.byteLength(rendered, "utf8");
       if (outputBytes + separatorBytes + renderedBytes > options.maxBytes) {
-        const remainingLineBytes = Math.max(0, options.maxBytes - outputBytes - separatorBytes);
-        if (remainingLineBytes > 0) {
-          const partial = decodeUtf8Prefix(Buffer.from(rendered, "utf8"), remainingLineBytes);
-          if (partial) {
-            lines.push(partial);
-            lastLine = lineNumber;
-          }
-        }
         truncated = true;
         return "truncated";
       }
       lines.push(rendered);
       outputBytes += separatorBytes + renderedBytes;
       lastLine = lineNumber;
-      if (forceTruncated) {
-        truncated = true;
-        return "truncated";
-      }
     }
     lineNumber += 1;
     return lineNumber <= options.end ? "continue" : "done";
@@ -403,18 +625,18 @@ async function readLineRangeWithinLimit(absolutePath, options) {
     const separatorBytes = lines.length ? 1 : 0;
     const prefixBytes = Buffer.byteLength(`${lineNumber}: `, "utf8");
     const remainingLineBytes = Math.max(0, options.maxBytes - outputBytes - separatorBytes - prefixBytes);
-    const pendingBuffer = Buffer.from(pending, "utf8");
-    if (pendingBuffer.byteLength <= remainingLineBytes) {
+    if (Buffer.byteLength(pending, "utf8") <= remainingLineBytes) {
       return "continue";
     }
-    pending = remainingLineBytes > 0 ? decodeUtf8Prefix(pendingBuffer, remainingLineBytes) : "";
-    return addLine(pending, { forceTruncated: true });
+    truncated = true;
+    return "truncated";
   };
 
   try {
     while (lineNumber <= options.end) {
-      throwIfCancelled(options.controller);
+      throwIfCancelled(options.controller, options.signal);
       const { bytesRead } = await handle.read(chunk, 0, chunk.byteLength, position);
+      throwIfCancelled(options.controller, options.signal);
       if (bytesRead === 0) {
         break;
       }
@@ -447,7 +669,7 @@ async function readLineRangeWithinLimit(absolutePath, options) {
     }
     return {
       content: lines.join("\n"),
-      endLine: lines.length ? lastLine : options.start,
+      endLine: lastLine,
       truncated,
     };
   } finally {
@@ -455,37 +677,45 @@ async function readLineRangeWithinLimit(absolutePath, options) {
   }
 }
 
-async function changedFilesFromGitStatus(workspaceRoot, controller) {
-  throwIfCancelled(controller);
+async function changedFilesFromGitStatus(workspaceRoot, controller, signal) {
+  throwIfCancelled(controller, signal);
   const status = await runCommand({
     bin: "git",
-    args: ["status", "--short"],
+    args: ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
   }, {
     cwd: workspaceRoot,
     timeoutMs: 10_000,
     controller,
+    signal,
   });
-  throwIfCancelled(controller);
+  throwIfCancelled(controller, signal);
   if (status.exitCode !== 0) {
     throw new Error(`git status failed: ${status.stderr || status.stdout || `exit ${status.exitCode}`}`);
   }
-  return parseGitStatus(status.stdout);
+  return parseGitStatusZ(status.stdout);
 }
 
-function parseGitNameStatus(stdout) {
-  return String(stdout ?? "")
-    .split(/\r?\n/)
-    .filter((line) => line.trim())
-    .map((line) => {
-      const parts = line.split("\t");
-      const status = normalizeNameStatus(parts[0]);
-      const filePath = parts.at(-1) ?? "";
-      return {
-        status,
-        path: unquoteGitPath(filePath.trim()),
-      };
-    })
-    .filter((file) => file.path);
+function parseGitNameStatusZ(stdout) {
+  const fields = String(stdout ?? "").split("\0");
+  const files = [];
+  let index = 0;
+  while (index < fields.length && fields[index]) {
+    const rawStatus = fields[index++];
+    const status = normalizeNameStatus(rawStatus);
+    if (/^[RC]/.test(rawStatus)) {
+      const oldPath = fields[index++] ?? "";
+      const filePath = fields[index++] ?? "";
+      if (oldPath && filePath) {
+        files.push({ status, path: filePath, oldPath });
+      }
+      continue;
+    }
+    const filePath = fields[index++] ?? "";
+    if (filePath) {
+      files.push({ status, path: filePath });
+    }
+  }
+  return files;
 }
 
 function normalizeNameStatus(status) {
@@ -512,32 +742,32 @@ function dedupeChangedFiles(files) {
   return out;
 }
 
-function parseGitStatus(stdout) {
-  return String(stdout ?? "")
-    .split(/\r?\n/)
-    .filter((line) => line.trim())
-    .map((line) => {
-      const status = line.slice(0, 2).trim() || line.slice(0, 2);
-      let filePath = line.slice(3).trim();
-      const renameIndex = filePath.lastIndexOf(" -> ");
-      if (renameIndex >= 0) {
-        filePath = filePath.slice(renameIndex + " -> ".length);
+function parseGitStatusZ(stdout) {
+  const fields = String(stdout ?? "").split("\0");
+  const files = [];
+  let index = 0;
+  while (index < fields.length && fields[index]) {
+    const entry = fields[index++];
+    const rawStatus = entry.slice(0, 2);
+    const status = rawStatus.trim() || rawStatus;
+    const filePath = entry.slice(3);
+    if (/[RC]/.test(rawStatus)) {
+      const oldPath = fields[index++] ?? "";
+      if (filePath) {
+        files.push({ status, path: filePath, ...(oldPath ? { oldPath } : {}) });
       }
-      return {
-        status,
-        path: unquoteGitPath(filePath),
-      };
-    })
-    .filter((file) => file.path);
-}
-
-function unquoteGitPath(filePath) {
-  return parseUnifiedDiffHeaderPath(filePath);
+      continue;
+    }
+    if (filePath) {
+      files.push({ status, path: filePath });
+    }
+  }
+  return files;
 }
 
 async function safeWorkspacePath(workspaceRoot, requestedPath) {
   const root = await realpath(workspaceRoot);
-  const relative = String(requestedPath ?? "").trim();
+  const relative = String(requestedPath ?? "");
   if (!relative || path.isAbsolute(relative)) {
     return { ok: false, error: "Path must be workspace-relative." };
   }
@@ -561,128 +791,7 @@ function normalizeLine(value, fallback) {
   return Number.isInteger(line) && line > 0 ? line : fallback;
 }
 
-export function truncateObject(value, maxBytes) {
-  const text = JSON.stringify(value);
-  if (Buffer.byteLength(text, "utf8") <= maxBytes) {
-    return value;
-  }
-  const out = {
-    ...value,
-    truncated: true,
-    diffTruncated: false,
-  };
-  // Reclaim against the HARD cap. The bookkeeping fields are all present in `out`
-  // at their largest form while we size it — `truncated` is constant, and both
-  // `diffTruncated` (false→true) and `changedFilesOmitted` (reserved at its
-  // maximum below) only ever shrink — so this already guarantees the final
-  // payload fits, without over-dropping to a soft budget.
-  const overCap = () => Buffer.byteLength(JSON.stringify(out), "utf8") > maxBytes;
-
-  // Reclaim in priority order, taking only the bytes actually required at each
-  // step (largest-fitting / binary-search trims, never fixed fractions). The diff
-  // is the coverage-critical payload (the high-risk hunk ledger is built from it),
-  // so it is kept whole while it fits and trimmed only as a last resort.
-  //
-  // 1. File snippets are the lowest-value context. Shrink every snippet's content
-  //    to the LARGEST UNIFORM byte-cap that still fits — reclaiming far less than the
-  //    old fixed 35%/n, though one escaping-heavy snippet still lowers the shared cap
-  //    for all (a per-snippet targeted trim would reclaim less) — then drop snippets
-  //    only if emptying their content is still not enough.
-  if (overCap() && Array.isArray(out.fileSnippets) && out.fileSnippets.length) {
-    const original = out.fileSnippets;
-    const fullContents = original.map((snippet) => String(snippet.content ?? ""));
-    const origTruncated = original.map((snippet) => Boolean(snippet.truncated));
-    const maxContentBytes = fullContents.reduce(
-      (max, content) => Math.max(max, Buffer.byteLength(content, "utf8")),
-      0,
-    );
-    // Build fresh snippet objects each step (never mutate the caller's context,
-    // which may be reused across the review loop).
-    largestFitting(
-      maxContentBytes,
-      (cap) => {
-        out.fileSnippets = original.map((snippet, i) => ({
-          ...snippet,
-          content: truncateText(fullContents[i], cap),
-          truncated: origTruncated[i] || Buffer.byteLength(fullContents[i], "utf8") > cap,
-        }));
-      },
-      () => !overCap(),
-    );
-  }
-  while (overCap() && out.fileSnippets?.length) {
-    out.fileSnippets = out.fileSnippets.slice(0, -1);
-  }
-  // 2 & 3. The diff outranks the changed-files list (strict priority). Clear the
-  //    list, then — only if the diff still overflows on its own — trim it to the
-  //    largest prefix that fits the whole cap. Finally re-pack the list into
-  //    whatever budget the diff leaves, which may be nothing when the diff alone
-  //    fills the cap (the omitted count is still reported).
-  if (overCap()) {
-    const allChanged = Array.isArray(out.changedFiles) ? out.changedFiles : null;
-    const totalChanged = allChanged ? allChanged.length : 0;
-    if (allChanged) {
-      out.changedFiles = [];
-      out.changedFilesOmitted = totalChanged; // reserve the widest bookkeeping form
-    }
-    if (overCap() && typeof out.diff === "string" && out.diff.length) {
-      // The diff has strict priority (coverage-critical): it is only reached here
-      // when it overflows the cap even with the list cleared, so trim it to the
-      // largest prefix that fits the WHOLE cap, then pack the changed-files list
-      // into whatever remains. No fixed reserve — a diff one byte over loses about
-      // one byte, and a diff that alone exceeds the cap simply fills it (the list
-      // yields, its omitted count still reported).
-      fitFieldToBudget(out, "diff", maxBytes);
-    }
-    if (allChanged) {
-      // Binary search the largest count that fits — exact, so it neither over-drops
-      // on a conservative estimate nor stops short of the cap.
-      largestFitting(
-        totalChanged,
-        (k) => {
-          out.changedFiles = allChanged.slice(0, k);
-          if (k < totalChanged) {
-            out.changedFilesOmitted = totalChanged - k;
-          } else {
-            delete out.changedFilesOmitted;
-          }
-        },
-        () => !overCap(),
-      );
-    }
-  }
-  // The diff was truncated iff its content actually changed. Compare content,
-  // not byte length: for tiny caps the appended truncation marker can make the
-  // result longer than a very short original.
-  out.diffTruncated = typeof value.diff === "string" && out.diff !== value.diff;
-  return out;
-}
-
 const TRUNCATION_MARKER = "\n... truncated ...";
-
-function truncateText(value, maxBytes) {
-  const text = String(value ?? "");
-  if (Buffer.byteLength(text, "utf8") <= maxBytes) {
-    return text;
-  }
-  // Largest character prefix whose bytes plus the marker fit maxBytes — a precise
-  // binary search, not a geometric 0.9 step that can overshoot far below budget
-  // (which turned every bounded snippet into a fraction of the room it was given).
-  const budget = Math.max(0, maxBytes - Buffer.byteLength(TRUNCATION_MARKER, "utf8"));
-  let lo = 0;
-  let hi = text.length;
-  let best = 0;
-  while (lo <= hi) {
-    const mid = (lo + hi) >>> 1;
-    if (Buffer.byteLength(text.slice(0, mid), "utf8") <= budget) {
-      best = mid;
-      lo = mid + 1;
-    } else {
-      hi = mid - 1;
-    }
-  }
-  return `${text.slice(0, best)}${TRUNCATION_MARKER}`;
-}
 
 // True when `result` serializes within the byte cap (measured on the FINAL
 // escaped JSON — the only size the model actually receives).
@@ -832,7 +941,12 @@ export function boundReadFileResult(result, maxBytes) {
   return result;
 }
 
-function throwIfCancelled(controller) {
+function throwIfCancelled(controller, signal) {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new Error("Review tool execution aborted.");
+  }
   if (controller?.cancelled) {
     throw new Error(`Review tool execution cancelled by ${controller.signal ?? "signal"}.`);
   }

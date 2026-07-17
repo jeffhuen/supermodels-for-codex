@@ -5,8 +5,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { commandLine, findExecutable, runCommand } from "../../lib/process.mjs";
+import { withAbortTimeout } from "../../lib/abort.mjs";
 import { runReviewAgent } from "../../lib/review-agent.mjs";
-import { createReviewTools } from "../../lib/review-tools.mjs";
+import { createSnapshotReviewTools } from "../../lib/review-tools.mjs";
 import { parseStructuredReviewText } from "../../lib/review-schema.mjs";
 import { runGrokAcpTask } from "./acp-client.mjs";
 import { GrokCredentials, readGrokClientVersion } from "./oauth.mjs";
@@ -16,16 +17,29 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULTS = JSON.parse(readFileSync(path.join(__dirname, "defaults.json"), "utf8"));
 const DEFAULT_MODEL = process.env.SUPERMODELS_GROK_MODEL || DEFAULTS.defaultModel;
 const DEFAULT_EFFORT = process.env.SUPERMODELS_GROK_EFFORT || DEFAULTS.defaultEffort;
-// grok-4.5's 500K context window can absorb the most generous review budget
-// on the panel, so large diffs truncate last and coverage enforcement
-// survives longest. Double the review-tools library defaults (120_000/80_000).
+// grok-4.5's 500K context window can absorb the most generous per-page review
+// budget on the panel, so large reviews require fewer lossless diff cursors.
+// Double the review-tools library defaults (120_000/80_000).
 const REVIEW_MAX_TOOL_BYTES = 240_000;
 const REVIEW_MAX_FILE_BYTES = 160_000;
+const REVIEW_MAX_TOKENS = 64_000;
+const POST_EVIDENCE_INSPECTION_ROUNDS = 4;
+const REVIEW_SYSTEM_INSTRUCTIONS = Object.freeze([Object.freeze({
+  type: "text",
+  text: "You are Grok Build reviewing for Codex. Be direct and adversarial toward the diff, but ground every claim in inspected repository evidence.",
+})]);
+
+export const providerDefinition = Object.freeze({
+  id: "grok",
+  aliases: Object.freeze([]),
+  label: "Grok Build",
+  create: createGrokAdapter,
+});
 
 export function createGrokAdapter(factoryOptions = {}) {
   return {
-    id: "grok",
-    label: "Grok Build",
+    id: providerDefinition.id,
+    label: providerDefinition.label,
     capabilities: () => ({
       review: true,
       adversarialReview: true,
@@ -39,6 +53,24 @@ export function createGrokAdapter(factoryOptions = {}) {
     check: (options) => check(options, factoryOptions),
     review: (input, options) => runGrokReview(input, options, factoryOptions),
     task: runGrokTask,
+  };
+}
+
+export function resolveGrokReviewPolicy(options = {}) {
+  const requestedEffort = options.effort ?? DEFAULT_EFFORT;
+  const effort = requestedEffort === "cli-default" ? null : requestedEffort;
+  return {
+    maxTokens: options.maxTokens ?? REVIEW_MAX_TOKENS,
+    reasoningOptions: effort ? { reasoning_effort: effort } : {},
+    strictSubmit: false,
+    cacheControl: false,
+    allowForcedToolChoice: true,
+    forceAfterSatisfiedRounds: options.forceAfterSatisfiedRounds
+      ?? POST_EVIDENCE_INSPECTION_ROUNDS,
+    systemInstructions: REVIEW_SYSTEM_INSTRUCTIONS,
+    auditMetadata: {
+      effort: effort ?? "",
+    },
   };
 }
 
@@ -57,18 +89,46 @@ export async function check(options = {}, factoryOptions = {}) {
     };
   }
 
-  let version = await readGrokClientVersion(factoryOptions.versionOptions ?? {});
-  if (!version) {
-    const versionResult = await runCommand({ bin: binPath, args: ["--version"] }, { timeoutMs: 5000 });
-    version = versionResult.stdout.trim().split(/\s+/)[1] ?? "";
+  const versionResult = await runCommand({ bin: binPath, args: ["--version"] }, { timeoutMs: 5000 });
+  if (versionResult.exitCode !== 0 || versionResult.timedOut) {
+    return {
+      provider: "grok",
+      label: "Grok Build",
+      ready: false,
+      installed: true,
+      path: binPath,
+      version: "unknown",
+      auth: "missing",
+      error: `Grok Build is installed but \`grok --version\` failed: ${versionResult.stderr || versionResult.stdout || "no version output"}`,
+    };
   }
+
+  let version = "";
+  try {
+    version = await withAbortTimeout(
+      (signal) => readGrokClientVersion({
+        ...(factoryOptions.versionOptions ?? {}),
+        signal,
+      }),
+      options.versionTimeoutMs ?? 5_000,
+      "Grok version readiness check",
+    );
+  } catch {
+    // The native CLI is the authoritative fallback when the cache is absent,
+    // malformed, or cannot be read within the readiness budget.
+  }
+  version ||= versionResult.stdout.trim().split(/\s+/)[1] ?? "";
 
   let ready = true;
   let error = "";
   try {
     const credentials = factoryOptions.credentials
       ?? new GrokCredentials(factoryOptions.credentialsOptions ?? {});
-    await credentials.accessToken();
+    await withAbortTimeout(
+      (signal) => credentials.accessToken({ signal }),
+      options.credentialTimeoutMs ?? 10_000,
+      "Grok credential readiness check",
+    );
   } catch (authError) {
     ready = false;
     error = authError?.message ?? String(authError);
@@ -271,14 +331,21 @@ async function runGrokReview(input, options = {}, factoryOptions = {}) {
       fetchImpl: factoryOptions.fetchImpl,
     });
   const tools = factoryOptions.reviewTools
-    ?? createReviewTools({
+    ?? createSnapshotReviewTools({
       workspaceRoot: options.cwd,
+      snapshot: options.snapshot,
       scope: input.context?.scope,
       baseRef: input.context?.baseRef,
       controller: options.controller,
       maxToolBytes: REVIEW_MAX_TOOL_BYTES,
       maxFileBytes: REVIEW_MAX_FILE_BYTES,
     });
+  const reviewPolicy = resolveGrokReviewPolicy({
+    effort,
+    maxTokens: options.maxTokens ?? factoryOptions.maxTokens,
+    forceAfterSatisfiedRounds: options.forceAfterSatisfiedRounds
+      ?? factoryOptions.forceAfterSatisfiedRounds,
+  });
   const structured = await runReviewAgent({
     provider: "grok",
     transport,
@@ -287,10 +354,9 @@ async function runGrokReview(input, options = {}, factoryOptions = {}) {
     focus: input.focus,
     mode: input.mode,
     model,
-    effort,
+    reviewPolicy,
     maxRounds: factoryOptions.maxRounds,
     forceAfterRounds: factoryOptions.forceAfterRounds,
-    forceAfterSatisfiedRounds: factoryOptions.forceAfterSatisfiedRounds,
     forceInspectionTools: factoryOptions.forceInspectionTools,
     preloadTools: factoryOptions.preloadTools ?? ["get_review_context"],
     timeoutMs: options.timeoutMs ?? 20 * 60 * 1000,

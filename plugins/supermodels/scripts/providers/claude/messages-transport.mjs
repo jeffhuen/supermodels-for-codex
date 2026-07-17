@@ -1,3 +1,5 @@
+import { awaitAbortable } from "../../lib/abort.mjs";
+
 const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
 const OAUTH_BETA = "oauth-2025-04-20";
@@ -39,7 +41,10 @@ export class ClaudeOAuthMessagesTransport {
       const response = await this.fetchImpl(this.url, {
         method: "POST",
         headers: {
-          authorization: `Bearer ${await this.credentials.accessToken()}`,
+          authorization: `Bearer ${await awaitAbortable(
+            () => this.credentials.accessToken({ signal: signal.signal }),
+            signal.signal,
+          )}`,
           "anthropic-version": ANTHROPIC_VERSION,
           "anthropic-beta": OAUTH_BETA,
           "content-type": "application/json",
@@ -49,7 +54,7 @@ export class ClaudeOAuthMessagesTransport {
         signal: signal.signal,
       });
       if (response.status === 401 && !refreshed) {
-        await refreshCredentials(this.credentials);
+        await refreshCredentials(this.credentials, signal.signal);
         return await this.request(body, nextOptions, true);
       }
       if (!response.ok) {
@@ -108,6 +113,7 @@ export function collectClaudeMessageEvents(events) {
   let model = "";
   let usage = {};
   let stopReason = null;
+  let messageStopSeen = false;
 
   const slot = (index) => {
     if (!slots.has(index)) {
@@ -198,6 +204,10 @@ export function collectClaudeMessageEvents(events) {
       }
       continue;
     }
+    if (kind === "message_stop") {
+      messageStopSeen = true;
+      continue;
+    }
     if (kind === "error") {
       throw new AnthropicStreamError(event.error ?? event);
     }
@@ -246,6 +256,18 @@ export function collectClaudeMessageEvents(events) {
     usage,
     model,
     stop_reason: stopReason,
+    completion: claudeCompletion(stopReason, messageStopSeen),
+  };
+}
+
+function claudeCompletion(stopReason, messageStopSeen) {
+  const reason = typeof stopReason === "string" && stopReason
+    ? stopReason
+    : "missing-stop-reason";
+  const nominallyComplete = ["end_turn", "tool_use", "stop_sequence"].includes(reason);
+  return {
+    status: nominallyComplete && messageStopSeen ? "complete" : "incomplete",
+    reason: nominallyComplete && !messageStopSeen ? "missing-message-stop" : reason,
   };
 }
 
@@ -317,7 +339,6 @@ function combineAbortSignals(parentSignal, timeoutMs) {
       controller.abort(new Error("Request timed out."));
     }
   }, timeoutMs);
-  timer.unref?.();
   return {
     signal: controller.signal,
     cleanup() {
@@ -327,9 +348,9 @@ function combineAbortSignals(parentSignal, timeoutMs) {
   };
 }
 
-async function refreshCredentials(credentials) {
+async function refreshCredentials(credentials, signal) {
   if (credentials.forceRefresh) {
-    await credentials.forceRefresh();
+    await awaitAbortable(() => credentials.forceRefresh({ signal }), signal);
     return;
   }
   credentials.forceReload?.();

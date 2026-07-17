@@ -69,6 +69,34 @@ test("state stores jobs and provider artifacts outside the repo", async () => {
   }
 });
 
+test("state bounds artifact filenames without truncating the provider run identity", async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-state-long-provider-"));
+  try {
+    const state = createState({ workspaceRoot: "/tmp/workspace", dataRoot });
+    const job = await createJob(state, {
+      command: "adversarial-review",
+      mode: "adversarial-review",
+      requestedProviders: ["claude"],
+      background: false,
+    });
+    const provider = `claude-challenge-v2-${"a".repeat(900)}`;
+
+    await writeProviderResult(state, job.id, {
+      provider,
+      status: "completed",
+      rawText: "raw",
+      normalized: { provider, verdict: "clean", summary: "clean", findings: [] },
+    });
+
+    const reloaded = await readJob(state, job.id);
+    assert.equal(reloaded.providerRuns[provider].provider, provider);
+    assert.ok(Buffer.byteLength(path.basename(reloaded.providerRuns[provider].rawResultPath)) < 150);
+    assert.equal(await readFile(reloaded.providerRuns[provider].rawResultPath, "utf8"), "raw");
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
 test("listJobs skips malformed job files", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-state-malformed-list-"));
   try {

@@ -10,6 +10,7 @@ import {
   buildClaudeCommand,
   createClaudeAdapter,
   parseClaudeOutput,
+  resolveClaudeReviewPolicy,
 } from "../scripts/providers/claude/adapter.mjs";
 import {
   claudeTaskPermissionDecision,
@@ -21,6 +22,7 @@ import {
   createAntigravityAdapter,
   buildAntigravityCommand,
   parseAntigravitySessionMetadata,
+  resolveAntigravityReviewPolicy,
   resolveAntigravityModelAlias,
 } from "../scripts/providers/antigravity/adapter.mjs";
 import {
@@ -32,11 +34,68 @@ import {
   buildGrokHeadlessCommand,
   createGrokAdapter,
   parseGrokHeadlessOutput,
+  resolveGrokReviewPolicy,
 } from "../scripts/providers/grok/adapter.mjs";
 
 const FAKE_ACP = fileURLToPath(new URL("./fixtures/fake-grok-acp.mjs", import.meta.url));
 const nodeSpawnFakeAgent = (mode) => (bin, args, opts) =>
   spawn(process.execPath, [FAKE_ACP], { ...opts, env: { ...opts.env, FAKE_ACP_MODE: mode } });
+
+test("provider adapters resolve their own flat review policies", () => {
+  const claude = resolveClaudeReviewPolicy({ effort: "cli-default" });
+  assert.equal(claude.maxTokens, 128_000);
+  assert.equal(claude.strictSubmit, true);
+  assert.equal(claude.cacheControl, true);
+  assert.equal(claude.allowForcedToolChoice, false, "adaptive thinking disables forced tool choice");
+  assert.deepEqual(claude.reasoningOptions.thinking, { type: "adaptive", display: "summarized" });
+  assert.equal(claude.reasoningOptions.output_config, undefined);
+  assert.equal(claude.auditMetadata.effort, "");
+  assert.match(claude.systemInstructions[0].text, /Claude Code, Anthropic/);
+
+  const claudeWithoutThinking = resolveClaudeReviewPolicy({ thinking: null, maxTokens: 12_345 });
+  assert.equal(claudeWithoutThinking.allowForcedToolChoice, true);
+  assert.equal(claudeWithoutThinking.maxTokens, 12_345);
+
+  const antigravity = resolveAntigravityReviewPolicy({ mode: "review" });
+  assert.equal(antigravity.maxTokens, 64_000);
+  assert.equal(antigravity.reasoningOptions.thinkingBudget, -1);
+  assert.equal(antigravity.forceAfterSatisfiedRounds, 4);
+  assert.equal(antigravity.auditMetadata.thinkingBudget, -1);
+  assert.equal(
+    resolveAntigravityReviewPolicy({ mode: "adversarial-review" }).forceAfterSatisfiedRounds,
+    Number.POSITIVE_INFINITY,
+  );
+
+  const grok = resolveGrokReviewPolicy();
+  assert.equal(grok.maxTokens, 64_000);
+  assert.equal(grok.reasoningOptions.reasoning_effort, "high");
+  assert.equal(grok.forceAfterSatisfiedRounds, 4);
+  assert.equal(grok.auditMetadata.effort, "high");
+  assert.equal(resolveGrokReviewPolicy({ forceAfterSatisfiedRounds: 9 }).forceAfterSatisfiedRounds, 9);
+});
+
+test("provider readiness rejects regular but non-runnable CLI files", { skip: process.platform === "win32" }, async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-broken-provider-bins-"));
+  try {
+    for (const name of ["claude", "agy", "grok"]) {
+      await writeFile(path.join(tempDir, name), "#!/bin/sh\nexit 9\n", { mode: 0o755 });
+    }
+    const env = { PATH: tempDir, HOME: tempDir };
+    const checks = await Promise.all([
+      createClaudeAdapter().check({ env }),
+      createAntigravityAdapter().check({ env }),
+      createGrokAdapter().check({ env }),
+    ]);
+
+    for (const check of checks) {
+      assert.equal(check.installed, true);
+      assert.equal(check.ready, false);
+      assert.match(check.error, /--version.*failed/i);
+    }
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
 
 test("parseClaudeOutput extracts stream-json text and session id", () => {
   const output = [
@@ -731,6 +790,23 @@ test("Antigravity check detects native CLI when local CLI config exists", async 
   }
 });
 
+test("Antigravity readiness uses the adapter's injected credential source", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-agy-injected-auth-"));
+  try {
+    const fakeAgy = path.join(tempDir, "agy");
+    await writeFile(fakeAgy, "#!/bin/sh\necho 1.2.3-test\n", { mode: 0o755 });
+    const adapter = createAntigravityAdapter({
+      credentials: { accessToken: async () => "injected-token" },
+    });
+    const check = await adapter.check({ env: { PATH: tempDir, HOME: tempDir } });
+
+    assert.equal(check.ready, true);
+    assert.equal(check.auth, "local-oauth");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("Antigravity check does not treat an empty config directory as ready", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-agy-empty-config-"));
   try {
@@ -1273,6 +1349,50 @@ test("grok check fails with grok login guidance when credentials are unusable", 
   }
 });
 
+test("grok readiness refuses a FIFO version cache and falls back within its bound", { skip: process.platform === "win32" }, async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-grok-version-fifo-check-"));
+  try {
+    const fakeGrok = path.join(tempDir, "grok");
+    const versionPath = path.join(tempDir, "version.json");
+    await writeFile(fakeGrok, "#!/bin/sh\necho grok 0.2.101 [stable]\n", { mode: 0o755 });
+    const fifo = spawnSync("mkfifo", [versionPath]);
+    assert.equal(fifo.status, 0, fifo.stderr?.toString() || "mkfifo failed");
+    const adapter = createGrokAdapter({
+      credentials: { accessToken: async () => "token" },
+      versionOptions: { versionPath },
+    });
+
+    const startedAt = Date.now();
+    const check = await adapter.check({ env: { PATH: tempDir }, versionTimeoutMs: 40 });
+    assert.equal(check.ready, true);
+    assert.equal(check.version, "0.2.101");
+    assert.ok(Date.now() - startedAt < 1_000, "version cache must not block readiness");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("grok readiness bounds a hanging credential refresh", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-grok-check-timeout-"));
+  try {
+    const fakeGrok = path.join(tempDir, "grok");
+    await writeFile(fakeGrok, "#!/bin/sh\necho grok 0.2.101 [stable]\n", { mode: 0o755 });
+    const adapter = createGrokAdapter({
+      credentials: { accessToken: async () => await new Promise(() => {}) },
+      versionOptions: { versionPath: path.join(tempDir, "version.json") },
+    });
+
+    const started = Date.now();
+    const check = await adapter.check({ env: { PATH: tempDir }, credentialTimeoutMs: 30 });
+
+    assert.equal(check.ready, false);
+    assert.match(check.error, /timed out/i);
+    assert(Date.now() - started < 500);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("grok readiness requires the subscription OAuth session, not an API key", async () => {
   // Supermodels intentionally exposes a narrower subscription-only contract:
   // even though xAI supports XAI_API_KEY / external auth for the CLI, Supermodels
@@ -1505,10 +1625,14 @@ function fakeDirectReviewFactory(provider) {
 }
 
 function directToolResponse(id, name, input) {
+  const normalizedInput = name === "submit_review" && input && !("missing_change_findings" in input)
+    ? { ...input, missing_change_findings: [] }
+    : input;
   return {
-    content: [{ type: "tool_use", id, name, input }],
-    tool_calls: [{ id, name, input }],
+    content: [{ type: "tool_use", id, name, input: normalizedInput }],
+    tool_calls: [{ id, name, input: normalizedInput }],
     text: "",
+    completion: { status: "complete", reason: "tool_use" },
   };
 }
 

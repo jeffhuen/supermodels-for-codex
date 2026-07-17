@@ -1,9 +1,9 @@
 {
   "name": "supermodels",
-  "version": "0.2.10",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "Codex plugin runtime for external model review through native CLIs.",
+  "description": "Codex plugin runtime for external model review and native-CLI task delegation.",
   "author": "Jeff Huen",
   "license": "MIT",
   "scripts": {

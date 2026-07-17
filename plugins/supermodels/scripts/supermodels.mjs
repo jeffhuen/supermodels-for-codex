@@ -27,18 +27,16 @@ import {
 } from "./lib/runtime.mjs";
 import { createJob, createState, readJob, updateJob } from "./lib/state.mjs";
 import { decodeUtf8Prefix } from "./lib/text.mjs";
-import { createAntigravityAdapter } from "./providers/antigravity/adapter.mjs";
-import { createClaudeAdapter } from "./providers/claude/adapter.mjs";
-import { createGrokAdapter } from "./providers/grok/adapter.mjs";
+import {
+  PROVIDER_IDS,
+  createProviderAdapters,
+  providerLabel,
+} from "./providers/registry.mjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const MAX_REVIEW_CONTEXT_BYTES = 200_000;
 
-const adapters = {
-  claude: createClaudeAdapter(),
-  antigravity: createAntigravityAdapter(),
-  grok: createGrokAdapter(),
-};
+const adapters = createProviderAdapters();
 
 async function main(argv = process.argv.slice(2)) {
   const parsed = parseRuntimeArgs(argv);
@@ -267,7 +265,7 @@ async function handleTask(parsed) {
     throw new Error("task requires a task description.");
   }
   if (parsed.options.write && providerSelection.requested.length > 1) {
-    throw new Error("Refusing multi-provider --write task. Pick a single provider: --provider claude, --provider antigravity, or --provider grok.");
+    throw new Error(`Refusing multi-provider --write task. Pick a single provider: ${PROVIDER_IDS.map((id) => `--provider ${id}`).join(", ")}.`);
   }
   assertGrokOnlyTaskOptions(parsed.options, providerSelection);
   const request = buildTaskRequest({
@@ -526,16 +524,19 @@ function renderSetup(output) {
 }
 
 function setupNextSteps(providers) {
-  const steps = [];
-  const claude = providers.claude;
-  const antigravity = providers.antigravity;
-  if (!claude?.ready) {
-    steps.push("Install Claude Code and run `claude auth login`, then rerun `$supermodels:setup`.");
-  }
-  if (!antigravity?.ready) {
-    steps.push("Install Antigravity CLI, run `agy` once interactively, then rerun `$supermodels:setup`.");
-  }
-  return steps;
+  return PROVIDER_IDS.flatMap((id) => {
+    const provider = providers[id];
+    if (!provider || provider.ready) {
+      return [];
+    }
+    const guidance = String(provider.error ?? "").trim()
+      || `${providerLabel(id)} is not ready.`;
+    if (/\$supermodels:setup/.test(guidance)) {
+      return [guidance];
+    }
+    const punctuated = /[.!?]$/.test(guidance) ? guidance : `${guidance}.`;
+    return [`${punctuated} Then rerun \`$supermodels:setup\`.`];
+  });
 }
 
 function renderProviders(providers) {
@@ -593,7 +594,7 @@ function renderJob(job, options = {}) {
       lines.push(`- ${providerLabel(run.provider)}: ${providerStatusText(run)}`);
       if (options.includeArtifacts) {
         if (run.rawResultPath) {
-          lines.push(`  raw: ${run.rawResultPath}`);
+          lines.push(`  accepted result: ${run.rawResultPath}`);
         }
         if (run.normalizedResultPath) {
           lines.push(`  normalized: ${run.normalizedResultPath}`);
@@ -699,36 +700,6 @@ function providerProgressSummary(job) {
   return `${completed}/${runs.length} ${noun} completed${failed ? `, ${failed} failed` : ""}${invalid ? `, ${invalid} invalid` : ""}${rateLimited ? `, ${rateLimited} rate-limited` : ""}`;
 }
 
-function providerLabel(provider) {
-  const challenge = parseChallengeProvider(provider);
-  if (challenge) {
-    const targets = challenge.targets.map((target) => providerLabel(target)).join(", ");
-    return `${providerLabel(challenge.source)} challenging ${targets}`;
-  }
-  return {
-    claude: "Claude Code",
-    antigravity: "Antigravity",
-  }[provider] ?? provider;
-}
-
-function parseChallengeProvider(provider) {
-  const value = String(provider ?? "");
-  const marker = "-challenge-";
-  const markerIndex = value.indexOf(marker);
-  if (markerIndex < 0) {
-    return null;
-  }
-  const source = value.slice(0, markerIndex);
-  const targetValue = value.slice(markerIndex + marker.length);
-  if (!source || !targetValue) {
-    return null;
-  }
-  return {
-    source,
-    targets: targetValue.split("-").filter(Boolean),
-  };
-}
-
 function providerStatusText(run) {
   if (run.status === "queued") {
     return "queued - waiting to start";
@@ -744,7 +715,7 @@ function providerStatusText(run) {
     return `failed${run.stderrPath ? `, see ${run.stderrPath}` : ""}`;
   }
   if (run.status === "invalid-output") {
-    return `invalid output${run.rawResultPath ? `, raw ${run.rawResultPath}` : ""}`;
+    return `invalid output${run.rawResultPath ? `, provider artifact ${run.rawResultPath}` : ""}`;
   }
   if (run.status === "rate-limited") {
     return `rate limited${run.stderrPath ? `, see ${run.stderrPath}` : ""}`;
@@ -765,20 +736,22 @@ function writeText(text) {
 }
 
 function usage() {
+  const providerCsv = PROVIDER_IDS.join(",");
+  const providerAlternatives = PROVIDER_IDS.join("|");
   return `Supermodels for Codex
 
 Commands:
   setup [--json]
   providers [--json]
-  review [--all|--provider claude,antigravity,grok] [--base REF] [--context-file PATH] [--live|--background] [focus]
-  adversarial-review [--all|--provider claude,antigravity,grok] [--base REF] [--context-file PATH] [--model MODEL] [--effort xhigh|max] [--live|--background] [focus]
-  task [--provider claude|antigravity|grok] [--write] [--background] [grok-only: --best-of-n N | --check | --json-schema JSON | --worktree] <task>
+  review [--all|--provider ${providerCsv}] [--base REF] [--context-file PATH] [--timeout SECONDS] [--live|--background] [focus]
+  adversarial-review [--all|--provider ${providerCsv}] [--base REF] [--context-file PATH] [--model MODEL] [--effort xhigh|max] [--timeout SECONDS] [--live|--background] [focus]
+  task [--provider ${providerAlternatives}] [--write] [--timeout SECONDS] [--background] [grok-only: --best-of-n N | --check | --json-schema JSON | --worktree] <task>
   status [job-id] [--json]
   watch <job-id> [--interval seconds] [--max-wait seconds]
   result <job-id> [--json]
   cancel <job-id> [--json]
 
-Supported providers: claude, antigravity, grok.`;
+Supported providers: ${PROVIDER_IDS.join(", ")}.`;
 }
 
 function sleep(ms) {

@@ -50,8 +50,18 @@ export async function buildContextPacket(input = {}) {
         available: context.gitAvailable !== false,
         scope: String(context.scope ?? "working-tree"),
         baseRef: String(context.baseRef ?? ""),
+        baseOid: String(context.baseOid ?? ""),
+        snapshotId: String(context.snapshotId ?? ""),
         diffSummary: String(context.diffSummary ?? ""),
         changedFiles: changedFilesFromDiff(context.diff ?? ""),
+        filteredFiles: Array.isArray(context.filteredFiles)
+          ? context.filteredFiles.map((file) => ({
+            path: String(file.path ?? ""),
+            status: String(file.status ?? ""),
+            filter: String(file.filter ?? ""),
+            lineCount: Number(file.lineCount ?? 0),
+          }))
+          : [],
         diffExcerpt: limitText(context.diff ?? "", MAX_DIFF_EXCERPT_BYTES),
         diffTruncated: Buffer.byteLength(String(context.diff ?? ""), "utf8") > MAX_DIFF_EXCERPT_BYTES,
       },
@@ -100,8 +110,20 @@ export function renderContextPacketMarkdown(packet) {
   lines.push(`Repository: ${packet.evidence?.workspace?.repoLabel ?? ""}`);
   lines.push(`Scope: ${git.scope ?? ""}`);
   lines.push(`Base ref: ${git.baseRef ?? ""}`);
+  if (git.baseOid) {
+    lines.push(`Base OID: ${git.baseOid}`);
+  }
+  if (git.snapshotId) {
+    lines.push(`Immutable snapshot: ${git.snapshotId}`);
+  }
   lines.push(`Diff summary: ${git.diffSummary || "(none)"}`);
   lines.push(`Changed files: ${(git.changedFiles ?? []).join(", ") || "(none detected)"}`);
+  if (git.filteredFiles?.length) {
+    lines.push("Filtered changed files (canonical diff/raw-file mapping may be non-invertible):");
+    for (const file of git.filteredFiles) {
+      lines.push(`- ${file.status} ${file.path} via ${file.filter} (${file.lineCount} raw lines)`);
+    }
+  }
   if (git.diffExcerpt) {
     lines.push("", "Diff excerpt:");
     lines.push(git.diffExcerpt);
