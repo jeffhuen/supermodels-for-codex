@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   createJob,
   createState,
+  isLockStale,
   listJobs,
   readJob,
   updateJob,
@@ -15,6 +16,28 @@ import {
   writeProviderResult,
   jobPath,
 } from "../scripts/lib/state.mjs";
+
+// Poll until a condition holds (deterministic-ish: waits for a state change, not
+// a fixed real-time guess) with a hard cap so a hang fails fast.
+async function waitFor(condition, { timeoutMs = 5_000, intervalMs = 5 } = {}) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await condition()) {
+      return;
+    }
+    await sleep(intervalMs);
+  }
+  throw new Error("waitFor timed out");
+}
+
+const exists = (p) => stat(p).then(() => true, () => false);
+
+test("isLockStale decides staleness purely from timestamps (deterministic)", () => {
+  assert.equal(isLockStale(1_000, 900, 50), true, "aged past staleLockMs -> stale");
+  assert.equal(isLockStale(1_000, 960, 50), false, "within staleLockMs -> fresh");
+  assert.equal(isLockStale(1_000, 950, 50), false, "exactly at the boundary -> not yet stale");
+  assert.equal(isLockStale(1_000, Number.NaN, 50), false, "missing mtime -> never stale (fail closed)");
+});
 
 test("state stores jobs and provider artifacts outside the repo", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-state-"));
@@ -392,7 +415,7 @@ test("state heartbeats active locks so slow updates are not reaped", async () =>
   }
 });
 
-test("state lock owner tokens prevent stale holders from deleting fresh locks", async () => {
+test("state lock owner tokens prevent stale holders from deleting fresh locks", { timeout: 10_000 }, async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-state-lock-owner-"));
   try {
     const state = createState({
@@ -409,21 +432,35 @@ test("state lock owner tokens prevent stale holders from deleting fresh locks", 
       background: false,
     });
 
+    const lockPath = `${jobPath(state, job.id)}.lock`;
+    // The stale holder acquires the lock and holds it across the steal via a
+    // barrier (not a real sleep), so the interleaving is deterministic.
+    let releaseStaleHolder;
+    const held = new Promise((resolve) => { releaseStaleHolder = resolve; });
     const staleHolder = updateJob(state, job.id, async (current) => {
-      await sleep(140);
+      await held;
       return {
         ...current,
         markers: [...(current.markers ?? []), "stale-holder"],
       };
     });
     staleHolder.catch(() => {});
-    await sleep(80);
 
+    // Wait until the stale holder actually owns the lock, then force its lock
+    // STALE by backdating the file's mtime an hour — deterministic, independent
+    // of real elapsed time (no sleep-until-hopefully-stale race).
+    await waitFor(() => exists(lockPath));
+    const anHourAgo = Date.now() / 1000 - 3_600;
+    await utimes(lockPath, anHourAgo, anHourAgo);
+
+    // The fresh holder now steals the (deterministically) stale lock.
     const freshHolder = await updateJob(state, job.id, (current) => ({
       ...current,
       markers: [...(current.markers ?? []), "fresh-holder"],
     }));
 
+    // Release the stale holder; its write must be refused (lost ownership).
+    releaseStaleHolder();
     await assert.rejects(staleHolder, /Lost job state lock ownership/);
     const reloaded = await readJob(state, job.id);
     assert.deepEqual(reloaded.markers, ["fresh-holder"]);

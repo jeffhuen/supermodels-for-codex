@@ -1349,7 +1349,7 @@ test("grok check fails with grok login guidance when credentials are unusable", 
   }
 });
 
-test("grok readiness refuses a FIFO version cache and falls back within its bound", { skip: process.platform === "win32" }, async () => {
+test("grok readiness refuses a FIFO version cache and falls back within its bound", { skip: process.platform === "win32", timeout: 15_000 }, async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-grok-version-fifo-check-"));
   try {
     const fakeGrok = path.join(tempDir, "grok");
@@ -1362,17 +1362,15 @@ test("grok readiness refuses a FIFO version cache and falls back within its boun
       versionOptions: { versionPath },
     });
 
-    const startedAt = Date.now();
     const check = await adapter.check({ env: { PATH: tempDir }, versionTimeoutMs: 40 });
     assert.equal(check.ready, true);
     assert.equal(check.version, "0.2.101");
-    assert.ok(Date.now() - startedAt < 5_000, "version cache must not block readiness (generous margin over subprocess-spawn jitter; a real hang hits the runner timeout)");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
 });
 
-test("grok readiness bounds a hanging credential refresh", async () => {
+test("grok readiness bounds a hanging credential refresh", { timeout: 15_000 }, async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-grok-check-timeout-"));
   try {
     const fakeGrok = path.join(tempDir, "grok");
@@ -1382,14 +1380,12 @@ test("grok readiness bounds a hanging credential refresh", async () => {
       versionOptions: { versionPath: path.join(tempDir, "version.json") },
     });
 
-    const started = Date.now();
     const check = await adapter.check({ env: { PATH: tempDir }, credentialTimeoutMs: 30 });
 
+    // The 30ms credential bound is proven by ready:false + /timed out/; the
+    // { timeout } guards a genuine hang. No wall-clock stopwatch.
     assert.equal(check.ready, false);
     assert.match(check.error, /timed out/i);
-    // The 30ms credential bound IS enforced (proven above). This is only a
-    // "did not hang" guard — generous margin over the subprocess spawns in check().
-    assert(Date.now() - started < 5_000, "hanging credential refresh must be bounded");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

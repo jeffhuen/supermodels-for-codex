@@ -134,18 +134,24 @@ test("runCommand forwards controller cancellation without exiting the parent", {
   }
 });
 
-test("runCommand forwards AbortSignal cancellation to the subprocess", { skip: process.platform === "win32" }, async () => {
+test("runCommand forwards AbortSignal cancellation to the subprocess", { skip: process.platform === "win32", timeout: 15_000 }, async () => {
   const abort = new AbortController();
+  let markReady;
+  const ready = new Promise((resolve) => { markReady = resolve; });
   const command = runCommand({
     bin: process.execPath,
-    args: ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"],
+    // Announce readiness, ignore SIGTERM, then run forever — so we abort a
+    // subprocess that is PROVABLY running (not a fixed-sleep guess) and assert
+    // it is force-killed.
+    args: ["-e", "process.stdout.write('ready\\n'); process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"],
   }, {
     timeoutMs: 10_000,
     signalKillMs: 0,
     signal: abort.signal,
+    onStdout: (chunk) => { if (String(chunk).includes("ready")) markReady(); },
   });
 
-  await sleep(50);
+  await ready; // deterministic: the child has executed and is running
   abort.abort(new Error("deadline"));
   const result = await command;
 

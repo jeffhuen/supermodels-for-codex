@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.3.2
+
+### Changed
+
+- The deadline, timeout, cancellation, and lock tests are now **deterministic** instead of racing real wall-clock time, so a single run means what it says (the earlier suite had rare timing flakes a single pass could not surface). Specifically: pure deadline logic is driven by a virtual clock (node's built-in `mock.timers`, zero new deps); the lock staleness decision is extracted into a pure `isLockStale(now, mtime, staleLockMs)` function with a deterministic unit test; the stale-lock and subprocess-cancellation integration tests are gated on real state signals — a backdated lock mtime, a subprocess readiness line — instead of fixed `sleep()`s; and the remaining timing-integration tests assert the *outcome* under a per-test `{ timeout }` hang-guard rather than a brittle elapsed-time stopwatch. No runtime behavior change — `isLockStale` is a behavior-identical extraction of the existing staleness check.
+
 ## v0.3.1
 
 ### Fixed
