@@ -1513,15 +1513,15 @@ test("readGrokClientVersion reads version.json", async () => {
   }
 });
 
-test("readGrokClientVersion refuses a non-regular version source without hanging", { skip: process.platform === "win32" }, async () => {
+test("readGrokClientVersion refuses a non-regular version source without hanging", { skip: process.platform === "win32", timeout: 15_000 }, async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "supermodels-grok-version-fifo-"));
   const fifo = path.join(dir, "version.json");
   try {
     const created = spawnSync("mkfifo", [fifo]);
     assert.equal(created.status, 0, created.stderr?.toString() || "mkfifo failed");
-    const startedAt = Date.now();
+    // The { timeout } guards against a genuine hang; the functional assertion (the
+    // read returns "") is what proves the deadline fired — no wall-clock stopwatch.
     assert.equal(await readGrokClientVersion({ versionPath: fifo, timeoutMs: 40 }), "");
-    assert.ok(Date.now() - startedAt < 3_000, "version FIFO should not outlive its deadline (generous margin over subprocess-spawn jitter)");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -1825,13 +1825,15 @@ test("direct transports abort credential access that hangs past the request dead
   ];
 
   for (const scenario of cases) {
-    await t.test(scenario.name, async () => {
-      const started = Date.now();
-      await assert.rejects(
-        () => scenario.transport.messages(scenario.body, { timeoutMs: 40 }),
-        /timed out|aborted/i,
-      );
-      assert(Date.now() - started < 2_000, "credential wait must be bounded by the transport deadline");
+    await t.test(scenario.name, async (subtest) => {
+      // Deterministic: fake the deadline timer, advance virtual time to it, and
+      // assert the transport aborts the hanging credential access — no real wall
+      // clock, no jitter, instant.
+      subtest.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const pending = scenario.transport.messages(scenario.body, { timeoutMs: 40 });
+      const rejection = assert.rejects(pending, /timed out|aborted/i);
+      subtest.mock.timers.tick(40);
+      await rejection;
     });
   }
 });

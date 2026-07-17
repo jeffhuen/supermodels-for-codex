@@ -264,6 +264,13 @@ function isJobRecord(job) {
   return typeof job.createdAt === "string";
 }
 
+// Pure staleness decision: a lock/reaper file is stale once it has not been
+// touched within staleLockMs. Extracted so the decision is unit-tested
+// deterministically, independent of real filesystem/wall-clock timing.
+export function isLockStale(nowMs, mtimeMs, staleLockMs) {
+  return Number.isFinite(mtimeMs) && nowMs - mtimeMs > staleLockMs;
+}
+
 async function withJobLock(state, jobId, operation) {
   await ensureState(state);
   const lockPath = `${jobPath(state, jobId)}.lock`;
@@ -287,7 +294,7 @@ async function withJobLock(state, jobId, operation) {
         throw error;
       }
       const lockInfo = await stat(lockPath).catch(() => null);
-      if (lockInfo && Date.now() - lockInfo.mtimeMs > staleLockMs) {
+      if (lockInfo && isLockStale(Date.now(), lockInfo.mtimeMs, staleLockMs)) {
         if (await removeStaleLock(lockPath, staleLockMs)) {
           continue;
         }
@@ -331,7 +338,7 @@ async function removeStaleLock(lockPath, staleLockMs) {
   } catch (error) {
     if (error?.code === "EEXIST") {
       const reaperInfo = await stat(reaperPath).catch(() => null);
-      if (reaperInfo && Date.now() - reaperInfo.mtimeMs > staleLockMs) {
+      if (reaperInfo && isLockStale(Date.now(), reaperInfo.mtimeMs, staleLockMs)) {
         await unlink(reaperPath).catch(() => {});
       }
       return false;
@@ -348,7 +355,7 @@ async function removeStaleLock(lockPath, staleLockMs) {
       || !after
       || before.dev !== after.dev
       || before.ino !== after.ino
-      || Date.now() - after.mtimeMs <= staleLockMs
+      || !isLockStale(Date.now(), after.mtimeMs, staleLockMs)
     ) {
       return false;
     }

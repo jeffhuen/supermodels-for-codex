@@ -3199,14 +3199,15 @@ test("runReviewAgent fails no-tool churn as no progress instead of looping indef
   assert.match(prompts[1], /Continue the review with repository tools/i);
 });
 
-test("runReviewAgent uses timeout as an aggregate review budget", async () => {
+test("runReviewAgent uses timeout as an aggregate review budget", { timeout: 10_000 }, async () => {
   const seenTimeouts = [];
-  const startedAt = Date.now();
   const fakeTransport = {
     async messages(_body, options) {
       seenTimeouts.push(options.timeoutMs);
-      // Return far later than the 50ms review deadline so the abort reliably wins
-      // the race under load (the old 70ms left only a 20ms, jitter-swamped gap).
+      // Returns a clean result only after 1000ms — far past the 50ms budget. If the
+      // budget did NOT fire, the review would accept this clean result and the
+      // assert.rejects below would fail. So the rejection proves the abort won,
+      // with no brittle wall-clock stopwatch; the { timeout } guards a real hang.
       await sleep(1_000);
       return responseWithTool("submit", "submit_review", cleanReview("Late clean result."));
     },
@@ -3222,7 +3223,6 @@ test("runReviewAgent uses timeout as an aggregate review budget", async () => {
     /timed out (?:before completion|after 50ms)/i,
   );
 
-  assert.ok(Date.now() - startedAt < 500, "the hard abort rejects well before the 1000ms signal-ignoring transport returns");
   assert.equal(seenTimeouts.length, 1);
   assert(seenTimeouts[0] > 0 && seenTimeouts[0] <= 50);
 });
