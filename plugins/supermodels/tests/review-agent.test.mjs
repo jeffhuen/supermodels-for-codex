@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { createRunController } from "../scripts/lib/run-control.mjs";
 import { runReviewAgent } from "../scripts/lib/review-agent.mjs";
+import { lastNumberedLine } from "../scripts/lib/review-tools.mjs";
 
 test("runReviewAgent refuses submit_review before required inspection tools", async () => {
   const calls = [];
@@ -301,6 +302,93 @@ test("runReviewAgent does not credit hunk coverage past the visible content of a
   assert.ok(
     (readLedger.missingHighRiskHunks ?? []).some((hunk) => hunk.line_start === 120),
     "the hunk beyond the visible content stays uncovered (stale end_line did not credit it)",
+  );
+});
+
+test("runReviewAgent keeps result+ledger within the cap and does not credit coverage past content trimmed by the final cap", async () => {
+  // maxToolBytes IS set on the tools, so executeToolCall's final-cap branch runs.
+  // The read returns 200 escaping-heavy numbered lines — far larger than the
+  // ledger-reserved budget — so the agent trims the content below the line-200 hunk
+  // BEFORE coverage is recorded, and the attached ledger must fit the cap.
+  const maxToolBytes = 30_000;
+  const diff = [
+    "diff --git a/auth/session.mjs b/auth/session.mjs",
+    "--- a/auth/session.mjs",
+    "+++ b/auth/session.mjs",
+    "@@ -200,1 +200,2 @@",
+    " function keep() {",
+    "+  const added = 1;",
+  ].join("\n");
+  const content = Array.from({ length: 200 }, (_, i) => `${i + 1}: ${'"'.repeat(120)}`).join("\n");
+  const calls = [];
+  const fakeTransport = {
+    calls: 0,
+    async messages(body) {
+      this.calls += 1;
+      calls.push(body);
+      if (this.calls === 1) {
+        return responseWithTool("diff_1", "get_diff", {});
+      }
+      if (this.calls === 2) {
+        return responseWithTool("read_1", "read_file", { path: "auth/session.mjs", start_line: 1, end_line: 200 });
+      }
+      return responseWithTool("submit_1", "submit_review", {
+        verdict: "clean",
+        summary: "Nothing found.",
+        findings: [],
+        assumptions: [],
+        verification_gaps: [],
+      });
+    },
+  };
+  const fakeTools = {
+    schemas: [],
+    maxToolBytes,
+    async execute(name, input = {}) {
+      if (name === "get_diff") {
+        return { ok: true, diffSummary: "1 file changed", diff };
+      }
+      if (name === "read_file") {
+        return { ok: true, path: input.path, start_line: 1, end_line: 200, content };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+
+  await runReviewAgent({
+    provider: "claude",
+    transport: fakeTransport,
+    tools: fakeTools,
+    maxRounds: 6,
+    minInspection: { diff: true, fileOrSearch: true, explicitFileOrSearchToolCalls: 1, cleanExplicitFileOrSearchToolCalls: 1 },
+  }).catch(() => {});
+
+  let delivered = null;
+  for (const body of calls) {
+    for (const msg of body.messages ?? []) {
+      if (!Array.isArray(msg.content)) {
+        continue;
+      }
+      for (const part of msg.content) {
+        if (part?.type === "tool_result" && part.tool_use_id === "read_1") {
+          delivered = JSON.parse(part.content);
+        }
+      }
+    }
+  }
+  assert.ok(delivered, "the read result was delivered to the model");
+  // The delivered payload — content PLUS the attached coverage_ledger — fits the cap
+  // (the full serialized ledger envelope is budgeted, not just its body).
+  const deliveredBytes = Buffer.byteLength(JSON.stringify(delivered), "utf8");
+  assert.ok(deliveredBytes <= maxToolBytes, `delivered ${deliveredBytes} exceeded cap ${maxToolBytes}`);
+  // Content was trimmed below the requested range, and end_line matches what remains.
+  assert.ok(delivered.end_line < 200, "content was trimmed below the requested 200 lines");
+  assert.equal(delivered.end_line, lastNumberedLine(delivered.content), "end_line matches the delivered content");
+  // Integrity: the line-200 hunk sits past the delivered content, so it stays
+  // uncovered — coverage was recorded from the FINAL content, not the pre-trim read.
+  assert.ok(
+    (delivered.coverage_ledger?.missingHighRiskHunks ?? []).some((hunk) => hunk.line_start === 200),
+    "the hunk past the trimmed content stays uncovered (coverage recorded from delivered content)",
   );
 });
 
