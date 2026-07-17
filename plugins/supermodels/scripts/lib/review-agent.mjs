@@ -474,6 +474,15 @@ export async function runReviewAgent(options = {}) {
   throw new Error(`Review did not complete after ${maxRounds} rounds.`);
 }
 
+// Keep read_file's end_line honest after any content trim: never past the last
+// line actually present in the delivered content.
+function syncReadFileEndLine(result) {
+  const visibleEnd = lastNumberedLine(result?.content);
+  if (Number.isFinite(visibleEnd)) {
+    result.end_line = Math.min(Number(result.end_line ?? visibleEnd), visibleEnd);
+  }
+}
+
 async function executeToolCall({ call, tools, controller, abort, inspection, toolUsage, onEvent, provider }) {
   let result;
   try {
@@ -489,20 +498,25 @@ async function executeToolCall({ call, tools, controller, abort, inspection, too
   }
   throwIfCancelled(controller);
   toolUsage[call.name] = (toolUsage[call.name] ?? 0) + 1;
-  updateInspection(inspection, call.name, result, call.input ?? {});
-  // Hard guarantee that the MODEL-VISIBLE payload (result + the coverage_ledger
-  // just attached) never exceeds the cap. A no-op at realistic caps, where the
-  // tool already reserved ledger headroom; the backstop only for pathologically
-  // small caps below that reserve. Re-sync read_file's end_line afterward so it
-  // never points past content the backstop trimmed.
   const cap = Number(tools?.maxToolBytes);
+  // read_file coverage is recorded from result.content by updateInspection, so the
+  // content it will actually deliver must be FINAL before that runs: bound it to
+  // the ledger-reserved budget and resync end_line to the last delivered line. This
+  // stops the cap guarantee below from ever trimming evidence out from under
+  // already-recorded coverage.
+  if (Number.isFinite(cap) && call.name === "read_file" && result?.ok !== false) {
+    enforceSerializedCap(result, Math.max(0, cap - COVERAGE_LEDGER_RESERVE));
+    syncReadFileEndLine(result);
+  }
+  updateInspection(inspection, call.name, result, call.input ?? {});
+  // Hard guarantee that the MODEL-VISIBLE payload (result + the coverage_ledger just
+  // attached — whose FULL serialized envelope is bounded to the reserve) stays within
+  // the cap. A no-op at realistic caps; a backstop only for caps below the reserve,
+  // where read_file content is already empty and no coverage was recorded.
   if (Number.isFinite(cap)) {
     enforceSerializedCap(result, cap);
     if (call.name === "read_file" && result?.ok !== false) {
-      const visibleEnd = lastNumberedLine(result.content);
-      if (Number.isFinite(visibleEnd)) {
-        result.end_line = Math.min(Number(result.end_line ?? visibleEnd), visibleEnd);
-      }
+      syncReadFileEndLine(result);
     }
   }
   onEvent?.({
@@ -1087,14 +1101,17 @@ function coverageGapsForInspection(inspection) {
 // hints never weakens the gate: coverage is enforced server-side from the full
 // hunk set (coverageGapsForInspection), not from what the ledger displays.
 function boundCoverageLedger(ledger) {
-  if (Buffer.byteLength(JSON.stringify(ledger), "utf8") <= COVERAGE_LEDGER_RESERVE) {
+  // Budget the FULL serialized attachment — the `,"coverage_ledger":` envelope key
+  // plus the value — not just the value, so attaching it to a result already bounded
+  // to (cap - reserve) can never push the payload over the cap and force a later trim
+  // (which would invalidate coverage already recorded from the pre-trim content).
+  const attachedBytes = (candidate) =>
+    Buffer.byteLength(`,"coverage_ledger":${JSON.stringify(candidate)}`, "utf8");
+  if (attachedBytes(ledger) <= COVERAGE_LEDGER_RESERVE) {
     return ledger;
   }
   const bounded = { ...ledger, missingHighRiskHunks: [...(ledger.missingHighRiskHunks ?? [])] };
-  while (
-    bounded.missingHighRiskHunks.length
-    && Buffer.byteLength(JSON.stringify(bounded), "utf8") > COVERAGE_LEDGER_RESERVE
-  ) {
+  while (bounded.missingHighRiskHunks.length && attachedBytes(bounded) > COVERAGE_LEDGER_RESERVE) {
     bounded.missingHighRiskHunks.pop();
   }
   return bounded;

@@ -283,11 +283,12 @@ async function listFiles(workspaceRoot, input, maxBytes, controller) {
 async function listChangedFiles(workspaceRoot, options, maxBytes, controller) {
   throwIfCancelled(controller);
   const files = await changedFilesForReview(workspaceRoot, options, controller);
-  // Keep the largest number of files whose BOTH views — the structured entry and
-  // the text `output` line — fit within the serialized cap. Binary search the
-  // retained count so the two always describe the same set and it reclaims only
-  // what is required: no conservative estimate that stops one entry short of an
-  // exact fit, and no early break that ignores later entries.
+  // Keep the largest CONTIGUOUS PREFIX of files whose BOTH views — the structured
+  // entry and the text `output` line — fit within the serialized cap. Binary search
+  // the retained count so the two always describe the same set and an exact fit is
+  // never stopped one entry short (unlike the old conservative estimate). The kept
+  // set is a prefix: a shorter later entry displaced by a longer earlier one is not
+  // back-filled — a readable contiguous list is preferred over maximizing count.
   const renderLine = (file) => `${file.status.padEnd(2)} ${file.path}`;
   const result = { ok: true, changedFiles: [], output: "", truncated: false };
   const apply = (k) => {
@@ -583,8 +584,9 @@ export function truncateObject(value, maxBytes) {
   // so it is kept whole while it fits and trimmed only as a last resort.
   //
   // 1. File snippets are the lowest-value context. Shrink every snippet's content
-  //    to the LARGEST uniform byte-cap that still fits — so a small overflow trims
-  //    them by only what it needs, not a fixed 35%/n — then drop whole snippets
+  //    to the LARGEST UNIFORM byte-cap that still fits — reclaiming far less than the
+  //    old fixed 35%/n, though one escaping-heavy snippet still lowers the shared cap
+  //    for all (a per-snippet targeted trim would reclaim less) — then drop snippets
   //    only if emptying their content is still not enough.
   if (overCap() && Array.isArray(out.fileSnippets) && out.fileSnippets.length) {
     const original = out.fileSnippets;
@@ -611,11 +613,11 @@ export function truncateObject(value, maxBytes) {
   while (overCap() && out.fileSnippets?.length) {
     out.fileSnippets = out.fileSnippets.slice(0, -1);
   }
-  // 2 & 3. The diff outranks the changed-files list. Clear the list, then — only
-  //    if the diff still overflows on its own — trim it to the largest prefix that
-  //    fits, keeping a slice of the budget for the changed-files list (bounded by
-  //    the list's real size) so a very large diff does not also discard the entire
-  //    list. Finally re-pack the list into whatever budget remains.
+  // 2 & 3. The diff outranks the changed-files list (strict priority). Clear the
+  //    list, then — only if the diff still overflows on its own — trim it to the
+  //    largest prefix that fits the whole cap. Finally re-pack the list into
+  //    whatever budget the diff leaves, which may be nothing when the diff alone
+  //    fills the cap (the omitted count is still reported).
   if (overCap()) {
     const allChanged = Array.isArray(out.changedFiles) ? out.changedFiles : null;
     const totalChanged = allChanged ? allChanged.length : 0;

@@ -152,6 +152,20 @@ test("read_file reserves ledger headroom so result plus a max coverage ledger st
 
     const size = Buffer.byteLength(JSON.stringify(result), "utf8");
     assert.ok(size <= maxToolBytes - COVERAGE_LEDGER_RESERVE, `result ${size} left no room for the ledger reserve`);
+    // The reserve must cover the FULL attachment envelope, not just the ledger body:
+    // attach a ledger whose serialized `,"coverage_ledger":<body>` fills the entire
+    // reserve and confirm the combined payload still fits the cap (the v0.2.8 bug was
+    // budgeting only the body, so the `,"coverage_ledger":` key overflowed by ~19 B).
+    const attach = (body) => Buffer.byteLength(`,"coverage_ledger":${JSON.stringify(body)}`, "utf8");
+    const hunks = [];
+    const ledger = { enabled: true, highRiskHunks: 99, coveredHighRiskHunks: 0, missingHighRiskHunks: hunks };
+    while (attach(ledger) <= COVERAGE_LEDGER_RESERVE) {
+      hunks.push({ file: "src/module.mjs", line_start: hunks.length, line_end: hunks.length + 5, reason: "high-risk path" });
+    }
+    hunks.pop(); // last one that still fits within the reserve
+    assert.ok(attach(ledger) <= COVERAGE_LEDGER_RESERVE, "the max ledger attachment fits the reserve");
+    const withLedger = Buffer.byteLength(JSON.stringify({ ...result, coverage_ledger: ledger }), "utf8");
+    assert.ok(withLedger <= maxToolBytes, `result + max ledger ${withLedger} exceeded cap ${maxToolBytes}`);
     // end_line reflects the truncated content, not the requested 5000.
     assert.equal(result.end_line, lastNumberedLine(result.content), "end_line matches visible content");
     assert.ok(result.end_line < 5000, "end_line was reduced to the visible range");

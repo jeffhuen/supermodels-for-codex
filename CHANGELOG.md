@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.9
+
+### Fixed
+
+- Coverage can no longer be credited against content that the final cap trims away. The coverage-ledger reserve budgeted only the ledger body, not the `,"coverage_ledger":` envelope key, so at a full budget the attached payload exceeded the cap by ~the key length — and the final cap then trimmed `read_file` content *after* high-risk hunk coverage had already been credited from the pre-trim content, letting a hunk beyond the delivered content be marked covered. The reserve now budgets the full serialized ledger envelope, and `read_file` content is finalized (with its `end_line` resynced) before coverage is recorded from it, so coverage always reflects the content the model actually received.
+
 ## v0.2.8
 
 ### Fixed
