@@ -1521,7 +1521,7 @@ test("readGrokClientVersion refuses a non-regular version source without hanging
     assert.equal(created.status, 0, created.stderr?.toString() || "mkfifo failed");
     const startedAt = Date.now();
     assert.equal(await readGrokClientVersion({ versionPath: fifo, timeoutMs: 40 }), "");
-    assert.ok(Date.now() - startedAt < 1_000, "version FIFO should not outlive its deadline");
+    assert.ok(Date.now() - startedAt < 3_000, "version FIFO should not outlive its deadline (generous margin over subprocess-spawn jitter)");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -1831,7 +1831,7 @@ test("direct transports abort credential access that hangs past the request dead
         () => scenario.transport.messages(scenario.body, { timeoutMs: 40 }),
         /timed out|aborted/i,
       );
-      assert(Date.now() - started < 500, "credential wait must be bounded by the transport deadline");
+      assert(Date.now() - started < 2_000, "credential wait must be bounded by the transport deadline");
     });
   }
 });

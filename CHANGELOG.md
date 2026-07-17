@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.3.1
+
+### Fixed
+
+- Deleted clean-filter/LFS files no longer receive a phantom `1-1` current-file coverage range that forced the reviewer to attempt an impossible `read_file` on deleted source before an `inconclusive` verdict was accepted. No high-risk readable hunk is created for `status: D` or `lineCount: 0`; the correct non-invertible-filter-mapping gap is still disclosed. It already failed closed — this removes wasted rounds/tokens and imprecise evidence modeling, not a bypass.
+- `readGrokClientVersion` now degrades to "no version" on a slow, blocking, or non-regular source instead of throwing. The Grok client version is optional metadata, but the timeout throw could propagate out of `resolveClientVersion` — which feeds a live review request and does not catch — aborting the request. Timeout now returns `""` like every other failure path, and callers fall back to a default version.
+
+### Changed
+
+- Hardened six timing-fragile liveness/deadline tests whose tight wall-clock bounds could flake under load (subprocess-spawn and timer jitter), intermittently masking a real pass/fail behind "one test failed." Each deadline-enforcement guarantee is still asserted precisely (rejection, timeout error, or readiness state); only the secondary "did-not-hang" wall-clock proxies were given generous margins, and one 20 ms deadline-vs-transport race gap was widened to 950 ms.
+
 ## v0.3.0
 
 ### Added

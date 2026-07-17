@@ -1,6 +1,6 @@
 {
   "name": "supermodels",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "description": "Codex plugin runtime for external model review and native-CLI task delegation.",
