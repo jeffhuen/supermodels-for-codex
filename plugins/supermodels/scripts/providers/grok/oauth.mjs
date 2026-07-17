@@ -151,10 +151,11 @@ export async function readGrokClientVersion(options = {}) {
     signal: options.signal,
   });
   throwIfAborted(options.signal);
-  if (result.timedOut) {
-    throw new Error(`Grok client version read timed out after ${timeoutMs}ms.`);
-  }
-  if (result.exitCode !== 0 || !result.stdout) {
+  if (result.timedOut || result.exitCode !== 0 || !result.stdout) {
+    // The client version is optional metadata. A slow, blocking, or non-regular
+    // source must degrade to "no version" — like every other failure here — never
+    // throw and abort the caller (resolveClientVersion feeds a LIVE review request
+    // and does not catch). Callers treat "" as "unknown" and fall back.
     return "";
   }
   try {

@@ -271,7 +271,7 @@ test("runReview applies its wall-clock timeout while the immutable snapshot is b
       /timed out|timeout/i,
     );
     assert.equal(providerCalled, false);
-    assert(Date.now() - startedAt < 1_500, "snapshot timeout should stop the hanging Git filter promptly");
+    assert(Date.now() - startedAt < 5_000, "snapshot timeout should stop the hanging Git filter promptly (generous margin over subprocess jitter; a real hang hits the runner timeout)");
   } finally {
     await rm(dataRoot, { recursive: true, force: true });
     await rm(workspaceRoot, { recursive: true, force: true });

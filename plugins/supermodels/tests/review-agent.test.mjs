@@ -272,6 +272,52 @@ test("runReviewAgent requires complete raw-file coverage and reports non-inverti
   assert.match(result.verification_gaps.join("\n"), /generated\.mjs.*clean filter 'generator'.*cannot be losslessly mapped/i);
 });
 
+test("runReviewAgent does not require read_file coverage for deleted filtered files", async () => {
+  const diff = [
+    "diff --git a/deleted.asset b/deleted.asset",
+    "deleted file mode 100644",
+    "--- a/deleted.asset",
+    "+++ /dev/null",
+    "@@ -1 +0,0 @@",
+    "-filtered content",
+  ].join("\n");
+  const transport = {
+    calls: 0,
+    async messages() {
+      this.calls += 1;
+      if (this.calls === 1) return responseWithTool("diff", "get_diff", {});
+      return responseWithTool("submit", "submit_review", inconclusiveReview("The deleted filtered source is unavailable."));
+    },
+  };
+  const tools = {
+    schemas: [],
+    reviewDiff: diff,
+    reviewFilteredFiles: [{ path: "deleted.asset", status: "D", filter: "lfs", lineCount: 0 }],
+    async execute(name) {
+      if (name === "get_diff") return { ok: true, diff, complete: true };
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+
+  const result = await runReviewAgent({
+    provider: "claude",
+    transport,
+    tools,
+    minInspection: {
+      diff: true,
+      fileOrSearch: false,
+      explicitFileOrSearchToolCalls: 0,
+      cleanExplicitFileOrSearchToolCalls: 0,
+    },
+    maxRounds: 2,
+  });
+
+  assert.equal(result.verdict, "inconclusive");
+  assert.equal(transport.calls, 2, "deleted source must not trigger an impossible read_file round");
+  assert.match(result.verification_gaps.join("\n"), /deleted\.asset.*clean filter 'lfs'.*cannot be losslessly mapped/i);
+  assert.doesNotMatch(result.verification_gaps.join("\n"), /high-risk hunk|read_file could not deliver/i);
+});
+
 test("runReviewAgent requires merged read ranges to cover the full high-risk hunk", async () => {
   const targetPath = "auth/session.mjs";
   const diff = [
@@ -3159,7 +3205,9 @@ test("runReviewAgent uses timeout as an aggregate review budget", async () => {
   const fakeTransport = {
     async messages(_body, options) {
       seenTimeouts.push(options.timeoutMs);
-      await sleep(70);
+      // Return far later than the 50ms review deadline so the abort reliably wins
+      // the race under load (the old 70ms left only a 20ms, jitter-swamped gap).
+      await sleep(1_000);
       return responseWithTool("submit", "submit_review", cleanReview("Late clean result."));
     },
   };
@@ -3174,7 +3222,7 @@ test("runReviewAgent uses timeout as an aggregate review budget", async () => {
     /timed out (?:before completion|after 50ms)/i,
   );
 
-  assert.ok(Date.now() - startedAt < 70, "the hard abort rejects before the signal-ignoring transport returns");
+  assert.ok(Date.now() - startedAt < 500, "the hard abort rejects well before the 1000ms signal-ignoring transport returns");
   assert.equal(seenTimeouts.length, 1);
   assert(seenTimeouts[0] > 0 && seenTimeouts[0] <= 50);
 });

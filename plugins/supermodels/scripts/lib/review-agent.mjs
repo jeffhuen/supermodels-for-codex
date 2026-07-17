@@ -1157,6 +1157,9 @@ function seedSnapshotCoverage(inspection, reviewDiff, filteredFiles = []) {
       lineCount,
     };
     inspection.coverage.filteredFiles.push(normalized);
+    if (normalized.status === "D" || lineCount === 0) {
+      continue;
+    }
     inspection.coverage.highRiskHunks.push({
       id: `filtered:${file}:1-${Math.max(1, lineCount)}`,
       file,
