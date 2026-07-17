@@ -10,7 +10,7 @@
         "source": "git-subdir",
         "url": "https://github.com/jeffhuen/supermodels-for-codex.git",
         "path": "./plugins/supermodels",
-        "ref": "v0.2.9"
+        "ref": "v0.2.10"
       },
       "policy": {
         "installation": "AVAILABLE",

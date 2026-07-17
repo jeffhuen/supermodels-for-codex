@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.10
+
+### Fixed
+
+- The preloaded-evidence message is now bounded to the model-visible cap. The preload path capped the `get_review_context` result, then pretty-printed and wrapped it into a message without re-checking the final size — pretty-printing (`JSON.stringify(…, null, 2)`) multiplied structure-heavy evidence up to ~2.4x, so a ~112 KB capped result could reach ~225–272 KB in the delivered preload, silently exceeding the advertised hard cap. The evidence is now serialized compactly, and the assembled message is bounded to `maxToolBytes` (trimming the embedded results if needed). Coverage is unaffected: the hunk ledger is built from the full diff and reads — not the embedded diff — credit coverage.
+
 ## v0.2.9
 
 ### Fixed

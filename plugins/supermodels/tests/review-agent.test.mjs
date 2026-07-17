@@ -2835,6 +2835,56 @@ test("runReviewAgent preloaded context does not satisfy explicit inspection by i
   assert.match(JSON.stringify(calls[0].messages), /Codex preloaded/);
 });
 
+test("runReviewAgent bounds the preloaded-evidence message to the model-visible cap", async () => {
+  const maxToolBytes = 40_000;
+  // Structure-heavy evidence: many small array entries pretty-print far larger than
+  // compact. The message the model actually receives must still fit the cap — the
+  // bug pretty-serialized a capped result into a payload well over the cap.
+  const changedFiles = Array.from({ length: 1500 }, (_, i) => ({ status: "M", path: `src/pkg/deep/module-${i}.mjs` }));
+  const fileSnippets = Array.from({ length: 200 }, (_, i) => ({ path: `src/module-${i}.mjs`, content: `1: short line ${i}`, truncated: false }));
+  const calls = [];
+  const fakeTransport = {
+    async messages(body) {
+      calls.push(body);
+      return responseWithTool("submit_1", "submit_review", inconclusiveReview("preloaded"));
+    },
+  };
+  const fakeTools = {
+    schemas: [],
+    maxToolBytes,
+    async execute(name) {
+      if (name === "get_review_context") {
+        return {
+          ok: true,
+          diff: "diff --git a/x b/x\n@@ -1 +1 @@\n+small\n",
+          diffSummary: "many files changed",
+          changedFiles,
+          fileSnippets,
+          truncated: true,
+        };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    },
+  };
+
+  await runReviewAgent({
+    provider: "antigravity",
+    transport: fakeTransport,
+    tools: fakeTools,
+    preloadTools: ["get_review_context"],
+    maxRounds: 1,
+  }).catch(() => {});
+
+  const preloadText = (calls[0]?.messages ?? [])
+    .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+    .filter((part) => part?.type === "text" && String(part.text).includes("Codex preloaded"))
+    .map((part) => part.text)
+    .join("");
+  assert.ok(preloadText, "the preloaded-evidence message was sent");
+  const size = Buffer.byteLength(preloadText, "utf8");
+  assert.ok(size <= maxToolBytes, `preloaded-evidence message ${size} exceeded the cap ${maxToolBytes}`);
+});
+
 test("runReviewAgent sends the Claude Code identity as the first Claude system block", async () => {
   let firstBody;
   const fakeTransport = {
