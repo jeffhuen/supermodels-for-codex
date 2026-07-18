@@ -39,6 +39,7 @@ test("runCommand handles stdin pipe errors when child exits early", async () => 
 test("runCommand timeout terminates provider subprocesses", { skip: process.platform === "win32", timeout: 15_000 }, async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-process-tree-"));
   const pidPath = path.join(tempDir, "grandchild.pid");
+  let grandchildPid = null;
   try {
     // The grandchild records its REAL pid at startup and stays alive.
     const childScript = [
@@ -52,8 +53,11 @@ test("runCommand timeout terminates provider subprocesses", { skip: process.plat
       "setInterval(() => {}, 1000);",
     ].join(" ");
 
-    // A generous timeout so the whole tree is provably established before the kill
-    // (the old 100ms raced tree setup and occasionally let the grandchild escape).
+    // Robust-by-margin, NOT fully deterministic: testing an autonomous timeout
+    // inherently races the tree's own setup. The timeout is generous enough that
+    // the tree is established first under any realistic scheduling, and the
+    // grandchild's real pid then proves the kill reached it (the pid check confirms
+    // setup happened when it passes; it cannot make the timeout itself causal).
     const result = await runCommand({
       bin: process.execPath,
       args: ["-e", parentScript],
@@ -62,12 +66,14 @@ test("runCommand timeout terminates provider subprocesses", { skip: process.plat
     });
 
     assert.equal(result.timedOut, true);
-    // Causal: read the grandchild's actual pid, then confirm the timeout kill
-    // reached it — poll until the pid no longer exists (SIGKILL is immediate).
-    const grandchildPid = Number(await readFile(pidPath, "utf8"));
+    grandchildPid = Number(await readFile(pidPath, "utf8"));
     assert.ok(Number.isInteger(grandchildPid) && grandchildPid > 0, "grandchild recorded its pid");
     await waitForDead(grandchildPid);
   } finally {
+    // Never leak the infinite grandchild if the kill assertion failed.
+    if (grandchildPid) {
+      try { process.kill(grandchildPid, "SIGKILL"); } catch { /* already dead */ }
+    }
     await rm(tempDir, { recursive: true, force: true });
   }
 });
