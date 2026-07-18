@@ -1,13 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Follow-up corrections to the v0.3.3 timing tests after review flagged two remaining overclaims and a regression (test-only; folded here rather than cut as a separate public patch):
+  - **Credential deadline** now uses `mock.timers` with a credential-start barrier, asserting the check is still pending at 29 ms virtual and resolves at exactly 30 ms — proving the timing behavior, not just `withAbortTimeout`'s echoed message text (a decoupling regression could print `30ms` while scheduling 10 s and still pass a text assertion).
+  - **Process-tree timeout** test is now documented as robust-by-margin, not deterministic: testing an autonomous timeout inherently races the tree's own setup, so a generous timeout plus real-pid confirmation is reliable but not causal.
+  - Fixed a cleanup regression — the process-tree test now kills the infinite grandchild in `finally` so a failed kill assertion cannot leave an orphan process.
+
 ## v0.3.3
 
 ### Changed
 
 - Corrected the residual timing-test defects that v0.3.2's determinism pass missed — each the same root error: synchronizing on a **correlated observation** instead of a **causal guarantee**. (Found by review of v0.3.2 plus a 250× hard-loop of the subprocess suite; the earlier 30× validation was too shallow to surface ~1% races.)
   - **Subprocess cancellation** (two tests) emitted `ready` *before* installing the SIGTERM handler, so an abort could land SIGTERM before the handler existed and terminate the child with SIGTERM instead of the expected SIGKILL (~1%). The handler is now installed *before* `ready`, so `ready` causally guarantees it is in place.
-  - **Timeout terminates the process tree** used a 100 ms timeout that raced the tree's own setup, occasionally letting the grandchild escape. The timeout is now generous (the tree is provably established first) and the grandchild records its real pid, which the test confirms is dead after the kill — no marker-timing race.
-  - **Credential deadline** asserted only that *a* timeout fired — which an ignored `30 ms` option (falling back to the `10 s` default) would also satisfy. It now pins the configured value via `withAbortTimeout`'s echoed message (`timed out after 30ms`).
+  - **Timeout terminates the process tree** used a 100 ms timeout that raced the tree's own setup, occasionally letting the grandchild escape. The timeout is now generous enough that the tree is established first under realistic scheduling, and the grandchild's real pid confirms the kill reached it (robust by margin — see Unreleased for why this is not fully causal).
+  - **Credential deadline** asserted only that *a* timeout fired — which an ignored `30 ms` option (falling back to the `10 s` default) would also satisfy. It was tightened to assert `withAbortTimeout`'s echoed message (`timed out after 30ms`) — better, but still a text proxy for the timing behavior (replaced with a virtual-clock boundary assertion in Unreleased).
   - **Stale-lock** polled for lock-file existence before backdating its mtime, racing the token write that resets the mtime. It now signals from *inside* the lock updater, which cannot run until the token is written — a causal guarantee the lock is fully held.
   - Corrected a comment claiming a FIFO read exercises the timeout path; it exercises the non-regular-file rejection (general timeout behavior is covered by the `withAbortTimeout` tests).
 - No runtime behavior change (test-only).
