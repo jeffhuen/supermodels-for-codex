@@ -1,28 +1,16 @@
 # Changelog
 
-## Unreleased
+## v0.3.3
+
+Test-suite quality only — no runtime behavior change since v0.3.1.
 
 ### Changed
 
-- **Right-sized the timing/subprocess/lock test suite** (test-only; folded here rather than cut as a separate public patch). The suite had accumulated ~11 flaky tests that asserted the *implementation mechanics* of timeout, cancellation, and locking — SIGKILL-vs-SIGTERM, zero-ms grace periods, exact-millisecond firing, lock owner-token/mtime choreography, a FIFO `version.json` source, duplicate controller/AbortSignal variants of one path — rather than user-visible behavior. Those code paths are real, but the assertions were academic, and they were the source of the recurring flakes. Replaced them with three behavior smokes plus focused unit tests that protect what actually matters:
+- **Right-sized the timing/subprocess/lock test suite to behavior smokes**, completing and superseding v0.3.2's incomplete determinism pass. That pass tried to de-flake ~11 timing tests one at a time (causal barriers, virtual clocks), but a 250× hard-loop showed de-flaking kept surfacing new races and never fully converged. The root cause: most of these tests asserted the *implementation mechanics* of timeout, cancellation, and locking — SIGKILL-vs-SIGTERM, zero-ms grace periods, exact-millisecond firing, lock owner-token/mtime choreography, a FIFO `version.json` source, duplicate controller/AbortSignal variants of one path — rather than user-visible behavior. The code paths are real; the assertions were academic. Deletion converges where de-flaking oscillated. Kept three behavior smokes plus focused unit tests:
   - **Hung readiness terminates** — one virtual-clock (`mock.timers`) unit test proving `withAbortTimeout` aborts exactly at its deadline (no real wall-clock).
   - **No orphaned provider descendants** — one POSIX smoke asserting a timed-out/cancelled `runCommand` eventually terminates the whole process tree (confirmed via the real grandchild pid), with a `finally` kill so a failed assertion can never leak the process.
   - **No corrupted job state / no permanently wedged lock** — a concurrent-update smoke (20 racing `updateJob`s all applied) and a stale-lock recovery smoke (a backdated lock is reclaimed), plus the pure `isLockStale(now, mtime, stale)` unit test.
-  - Deleted 15 implementation-detail timing tests (net −561/+16 lines across six test files).
-- Fixed the last load-induced flake: the `runReview` progress-recording integration test's wait-for-condition hang-guard was 1000 ms, too tight when the whole suite runs these integration cases concurrently (snapshot + provider-check setup can exceed a second). Raised to 15 000 ms to match its already-non-flaky siblings; a wait-for-condition poll returns the instant the condition holds, so the larger bound only prevents false timeouts — it does not slow the passing case.
-- No runtime behavior change (test-only).
-
-## v0.3.3
-
-### Changed
-
-- Corrected the residual timing-test defects that v0.3.2's determinism pass missed — each the same root error: synchronizing on a **correlated observation** instead of a **causal guarantee**. (Found by review of v0.3.2 plus a 250× hard-loop of the subprocess suite; the earlier 30× validation was too shallow to surface ~1% races.)
-  - **Subprocess cancellation** (two tests) emitted `ready` *before* installing the SIGTERM handler, so an abort could land SIGTERM before the handler existed and terminate the child with SIGTERM instead of the expected SIGKILL (~1%). The handler is now installed *before* `ready`, so `ready` causally guarantees it is in place.
-  - **Timeout terminates the process tree** used a 100 ms timeout that raced the tree's own setup, occasionally letting the grandchild escape. The timeout is now generous enough that the tree is established first under realistic scheduling, and the grandchild's real pid confirms the kill reached it (robust by margin — see Unreleased for why this is not fully causal).
-  - **Credential deadline** asserted only that *a* timeout fired — which an ignored `30 ms` option (falling back to the `10 s` default) would also satisfy. It was tightened to assert `withAbortTimeout`'s echoed message (`timed out after 30ms`) — better, but still a text proxy for the timing behavior (replaced with a virtual-clock boundary assertion in Unreleased).
-  - **Stale-lock** polled for lock-file existence before backdating its mtime, racing the token write that resets the mtime. It now signals from *inside* the lock updater, which cannot run until the token is written — a causal guarantee the lock is fully held.
-  - Corrected a comment claiming a FIFO read exercises the timeout path; it exercises the non-regular-file rejection (general timeout behavior is covered by the `withAbortTimeout` tests).
-- No runtime behavior change (test-only).
+  - Deleted 15 implementation-detail timing tests. The `runReview` progress-recording integration test's wait-for-condition hang-guard was also raised from 1000 ms to 15 000 ms — a poll that returns the instant its condition holds, so the larger bound only prevents false timeouts under concurrent load. Result: 472 tests, 50/50 clean under load.
 
 ## v0.3.2
 
