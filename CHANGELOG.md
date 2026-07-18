@@ -1,10 +1,22 @@
 # Changelog
 
+## v0.3.3
+
+### Changed
+
+- Corrected the residual timing-test defects that v0.3.2's determinism pass missed — each the same root error: synchronizing on a **correlated observation** instead of a **causal guarantee**. (Found by review of v0.3.2 plus a 250× hard-loop of the subprocess suite; the earlier 30× validation was too shallow to surface ~1% races.)
+  - **Subprocess cancellation** (two tests) emitted `ready` *before* installing the SIGTERM handler, so an abort could land SIGTERM before the handler existed and terminate the child with SIGTERM instead of the expected SIGKILL (~1%). The handler is now installed *before* `ready`, so `ready` causally guarantees it is in place.
+  - **Timeout terminates the process tree** used a 100 ms timeout that raced the tree's own setup, occasionally letting the grandchild escape. The timeout is now generous (the tree is provably established first) and the grandchild records its real pid, which the test confirms is dead after the kill — no marker-timing race.
+  - **Credential deadline** asserted only that *a* timeout fired — which an ignored `30 ms` option (falling back to the `10 s` default) would also satisfy. It now pins the configured value via `withAbortTimeout`'s echoed message (`timed out after 30ms`).
+  - **Stale-lock** polled for lock-file existence before backdating its mtime, racing the token write that resets the mtime. It now signals from *inside* the lock updater, which cannot run until the token is written — a causal guarantee the lock is fully held.
+  - Corrected a comment claiming a FIFO read exercises the timeout path; it exercises the non-regular-file rejection (general timeout behavior is covered by the `withAbortTimeout` tests).
+- No runtime behavior change (test-only).
+
 ## v0.3.2
 
 ### Changed
 
-- The deadline, timeout, cancellation, and lock tests are now **deterministic** instead of racing real wall-clock time, so a single run means what it says (the earlier suite had rare timing flakes a single pass could not surface). Specifically: pure deadline logic is driven by a virtual clock (node's built-in `mock.timers`, zero new deps); the lock staleness decision is extracted into a pure `isLockStale(now, mtime, staleLockMs)` function with a deterministic unit test; the stale-lock and subprocess-cancellation integration tests are gated on real state signals — a backdated lock mtime, a subprocess readiness line — instead of fixed `sleep()`s; and the remaining timing-integration tests assert the *outcome* under a per-test `{ timeout }` hang-guard rather than a brittle elapsed-time stopwatch. No runtime behavior change — `isLockStale` is a behavior-identical extraction of the existing staleness check.
+- Reworked the deadline, timeout, cancellation, and lock tests to reduce their reliance on real wall-clock time (the earlier suite had rare timing flakes a single pass could not surface). **This pass was incomplete — the residual races and a weakened assertion it left behind are corrected in v0.3.3.** Specifically: pure deadline logic is driven by a virtual clock (node's built-in `mock.timers`, zero new deps); the lock staleness decision is extracted into a pure `isLockStale(now, mtime, staleLockMs)` function with a deterministic unit test; the stale-lock and subprocess-cancellation integration tests are gated on real state signals — a backdated lock mtime, a subprocess readiness line — instead of fixed `sleep()`s; and the remaining timing-integration tests assert the *outcome* under a per-test `{ timeout }` hang-guard rather than a brittle elapsed-time stopwatch. No runtime behavior change — `isLockStale` is a behavior-identical extraction of the existing staleness check.
 
 ## v0.3.1
 
