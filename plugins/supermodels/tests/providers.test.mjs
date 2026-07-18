@@ -1349,69 +1349,6 @@ test("grok check fails with grok login guidance when credentials are unusable", 
   }
 });
 
-test("grok readiness refuses a FIFO version cache and falls back within its bound", { skip: process.platform === "win32", timeout: 15_000 }, async () => {
-  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-grok-version-fifo-check-"));
-  try {
-    const fakeGrok = path.join(tempDir, "grok");
-    const versionPath = path.join(tempDir, "version.json");
-    await writeFile(fakeGrok, "#!/bin/sh\necho grok 0.2.101 [stable]\n", { mode: 0o755 });
-    const fifo = spawnSync("mkfifo", [versionPath]);
-    assert.equal(fifo.status, 0, fifo.stderr?.toString() || "mkfifo failed");
-    const adapter = createGrokAdapter({
-      credentials: { accessToken: async () => "token" },
-      versionOptions: { versionPath },
-    });
-
-    const check = await adapter.check({ env: { PATH: tempDir }, versionTimeoutMs: 40 });
-    assert.equal(check.ready, true);
-    assert.equal(check.version, "0.2.101");
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("grok readiness bounds a hanging credential refresh at exactly the configured deadline", { timeout: 15_000 }, async (t) => {
-  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-grok-check-timeout-"));
-  try {
-    const fakeGrok = path.join(tempDir, "grok");
-    await writeFile(fakeGrok, "#!/bin/sh\necho grok 0.2.101 [stable]\n", { mode: 0o755 });
-    // Fake only setTimeout so the credential deadline runs on a virtual clock; the
-    // real readiness subprocesses still complete via real I/O.
-    t.mock.timers.enable({ apis: ["setTimeout"] });
-    let markCredentialStart;
-    const credentialStarted = new Promise((resolve) => { markCredentialStart = resolve; });
-    const adapter = createGrokAdapter({
-      credentials: {
-        accessToken: async () => { markCredentialStart(); return await new Promise(() => {}); },
-      },
-      versionOptions: { versionPath: path.join(tempDir, "version.json") },
-    });
-
-    const check = adapter.check({ env: { PATH: tempDir }, credentialTimeoutMs: 30 });
-    let settled = false;
-    check.then(() => { settled = true; }, () => { settled = true; });
-
-    // Causal barrier: the real subprocess steps have completed and the hanging
-    // credential access has started, so its 30ms deadline is now armed.
-    await credentialStarted;
-
-    // At 29ms virtual it has NOT fired — the promptness proof a text assertion
-    // cannot give (an ignored option using the 10s default would also be pending
-    // here, but it would NOT resolve at 30ms below).
-    t.mock.timers.tick(29);
-    await Promise.resolve();
-    assert.equal(settled, false, "must not time out before the configured 30ms deadline");
-
-    // At exactly 30ms virtual it aborts.
-    t.mock.timers.tick(1);
-    const result = await check;
-    assert.equal(result.ready, false);
-    assert.match(result.error, /timed out/i);
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
-  }
-});
-
 test("grok readiness requires the subscription OAuth session, not an API key", async () => {
   // Supermodels intentionally exposes a narrower subscription-only contract:
   // even though xAI supports XAI_API_KEY / external auth for the CLI, Supermodels

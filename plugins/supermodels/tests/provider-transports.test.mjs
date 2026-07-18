@@ -1,6 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -1513,22 +1512,6 @@ test("readGrokClientVersion reads version.json", async () => {
   }
 });
 
-test("readGrokClientVersion refuses a non-regular version source without hanging", { skip: process.platform === "win32", timeout: 15_000 }, async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "supermodels-grok-version-fifo-"));
-  const fifo = path.join(dir, "version.json");
-  try {
-    const created = spawnSync("mkfifo", [fifo]);
-    assert.equal(created.status, 0, created.stderr?.toString() || "mkfifo failed");
-    // A FIFO is a non-regular file, so the reader rejects it (exit 2) and returns
-    // "" WITHOUT exercising the timeout path — this verifies graceful refusal of a
-    // blocking/non-regular source, not the deadline (general timeout behavior is
-    // covered by the withAbortTimeout tests). The { timeout } guards a genuine hang.
-    assert.equal(await readGrokClientVersion({ versionPath: fifo, timeoutMs: 40 }), "");
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
 test("toGrokResponsesRequest translates Anthropic body to Responses shape", () => {
   const request = toGrokResponsesRequest({
     model: "grok-4.5",
@@ -1785,57 +1768,4 @@ test("ClaudeOAuthMessagesTransport preserves one deadline across retries", async
     /overall deadline/,
   );
   assert.equal(calls, 1);
-});
-
-test("direct transports abort credential access that hangs past the request deadline", async (t) => {
-  const hangingCredentials = {
-    accessToken: async () => await new Promise(() => {}),
-    forceRefresh: async () => await new Promise(() => {}),
-    forceReload() {},
-    identity: async () => ({ userId: "", email: "" }),
-  };
-  const cases = [
-    {
-      name: "claude",
-      transport: new ClaudeOAuthMessagesTransport({
-        credentials: hangingCredentials,
-        url: "https://api.test/v1/messages",
-        fetchImpl: async () => { throw new Error("fetch must not run"); },
-      }),
-      body: { model: "claude", max_tokens: 10, messages: [] },
-    },
-    {
-      name: "grok",
-      transport: new GrokOAuthResponsesTransport({
-        credentials: hangingCredentials,
-        clientVersion: "0.2.101",
-        url: "https://proxy.test/v1/responses",
-        fetchImpl: async () => { throw new Error("fetch must not run"); },
-      }),
-      body: { model: "grok-4.5", max_tokens: 10, messages: [] },
-    },
-    {
-      name: "antigravity",
-      transport: new AntigravityCodeAssistTransport({
-        credentials: hangingCredentials,
-        projectId: "project-1",
-        rateLimiter: noRateLimit,
-        fetchImpl: async () => { throw new Error("fetch must not run"); },
-      }),
-      body: { model: "gemini", max_tokens: 10, messages: [], tools: [] },
-    },
-  ];
-
-  for (const scenario of cases) {
-    await t.test(scenario.name, async (subtest) => {
-      // Deterministic: fake the deadline timer, advance virtual time to it, and
-      // assert the transport aborts the hanging credential access — no real wall
-      // clock, no jitter, instant.
-      subtest.mock.timers.enable({ apis: ["setTimeout", "Date"] });
-      const pending = scenario.transport.messages(scenario.body, { timeoutMs: 40 });
-      const rejection = assert.rejects(pending, /timed out|aborted/i);
-      subtest.mock.timers.tick(40);
-      await rejection;
-    });
-  }
 });

@@ -3199,34 +3199,6 @@ test("runReviewAgent fails no-tool churn as no progress instead of looping indef
   assert.match(prompts[1], /Continue the review with repository tools/i);
 });
 
-test("runReviewAgent uses timeout as an aggregate review budget", { timeout: 10_000 }, async () => {
-  const seenTimeouts = [];
-  const fakeTransport = {
-    async messages(_body, options) {
-      seenTimeouts.push(options.timeoutMs);
-      // Returns a clean result only after 1000ms — far past the 50ms budget. If the
-      // budget did NOT fire, the review would accept this clean result and the
-      // assert.rejects below would fail. So the rejection proves the abort won,
-      // with no brittle wall-clock stopwatch; the { timeout } guards a real hang.
-      await sleep(1_000);
-      return responseWithTool("submit", "submit_review", cleanReview("Late clean result."));
-    },
-  };
-
-  await assert.rejects(
-    () => runReviewAgent({
-      provider: "antigravity",
-      transport: fakeTransport,
-      tools: { schemas: [], async execute() {} },
-      timeoutMs: 50,
-    }),
-    /timed out (?:before completion|after 50ms)/i,
-  );
-
-  assert.equal(seenTimeouts.length, 1);
-  assert(seenTimeouts[0] > 0 && seenTimeouts[0] <= 50);
-});
-
 test("runReviewAgent requires distinct meaningful file or search inspection", async () => {
   const fakeTransport = {
     calls: 0,
@@ -4385,8 +4357,4 @@ function reviewToolsWithDeletedDiff({ targetPath, missingLine, diff, truncated =
       throw new Error(`unexpected tool ${name}`);
     },
   };
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

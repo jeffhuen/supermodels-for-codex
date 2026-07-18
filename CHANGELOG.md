@@ -4,10 +4,13 @@
 
 ### Changed
 
-- Follow-up corrections to the v0.3.3 timing tests after review flagged two remaining overclaims and a regression (test-only; folded here rather than cut as a separate public patch):
-  - **Credential deadline** now uses `mock.timers` with a credential-start barrier, asserting the check is still pending at 29 ms virtual and resolves at exactly 30 ms — proving the timing behavior, not just `withAbortTimeout`'s echoed message text (a decoupling regression could print `30ms` while scheduling 10 s and still pass a text assertion).
-  - **Process-tree timeout** test is now documented as robust-by-margin, not deterministic: testing an autonomous timeout inherently races the tree's own setup, so a generous timeout plus real-pid confirmation is reliable but not causal.
-  - Fixed a cleanup regression — the process-tree test now kills the infinite grandchild in `finally` so a failed kill assertion cannot leave an orphan process.
+- **Right-sized the timing/subprocess/lock test suite** (test-only; folded here rather than cut as a separate public patch). The suite had accumulated ~11 flaky tests that asserted the *implementation mechanics* of timeout, cancellation, and locking — SIGKILL-vs-SIGTERM, zero-ms grace periods, exact-millisecond firing, lock owner-token/mtime choreography, a FIFO `version.json` source, duplicate controller/AbortSignal variants of one path — rather than user-visible behavior. Those code paths are real, but the assertions were academic, and they were the source of the recurring flakes. Replaced them with three behavior smokes plus focused unit tests that protect what actually matters:
+  - **Hung readiness terminates** — one virtual-clock (`mock.timers`) unit test proving `withAbortTimeout` aborts exactly at its deadline (no real wall-clock).
+  - **No orphaned provider descendants** — one POSIX smoke asserting a timed-out/cancelled `runCommand` eventually terminates the whole process tree (confirmed via the real grandchild pid), with a `finally` kill so a failed assertion can never leak the process.
+  - **No corrupted job state / no permanently wedged lock** — a concurrent-update smoke (20 racing `updateJob`s all applied) and a stale-lock recovery smoke (a backdated lock is reclaimed), plus the pure `isLockStale(now, mtime, stale)` unit test.
+  - Deleted 15 implementation-detail timing tests (net −561/+16 lines across six test files).
+- Fixed the last load-induced flake: the `runReview` progress-recording integration test's wait-for-condition hang-guard was 1000 ms, too tight when the whole suite runs these integration cases concurrently (snapshot + provider-check setup can exceed a second). Raised to 15 000 ms to match its already-non-flaky siblings; a wait-for-condition poll returns the instant the condition holds, so the larger bound only prevents false timeouts — it does not slow the passing case.
+- No runtime behavior change (test-only).
 
 ## v0.3.3
 

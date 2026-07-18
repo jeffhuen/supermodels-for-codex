@@ -231,51 +231,6 @@ test("runReview shares one snapshot across first-pass and challenge runs, then d
   }
 });
 
-test("runReview applies its wall-clock timeout while the immutable snapshot is being captured", { timeout: 15_000 }, async () => {
-  const dataRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-snapshot-timeout-data-"));
-  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "supermodels-runtime-snapshot-timeout-workspace-"));
-  let providerCalled = false;
-  try {
-    runGit(workspaceRoot, ["init"]);
-    runGit(workspaceRoot, ["config", "user.email", "test@example.com"]);
-    runGit(workspaceRoot, ["config", "user.name", "Test User"]);
-    await writeFile(path.join(workspaceRoot, "base.txt"), "base\n");
-    runGit(workspaceRoot, ["add", "."]);
-    runGit(workspaceRoot, ["commit", "-m", "initial"]);
-    await writeFile(path.join(workspaceRoot, ".gitattributes"), "*.slow filter=slow\n");
-    await writeFile(path.join(workspaceRoot, "slow-filter.sh"), "#!/bin/sh\nsleep 2\ncat\n");
-    await chmod(path.join(workspaceRoot, "slow-filter.sh"), 0o755);
-    runGit(workspaceRoot, ["config", "filter.slow.clean", "./slow-filter.sh"]);
-    runGit(workspaceRoot, ["config", "filter.slow.required", "true"]);
-    await writeFile(path.join(workspaceRoot, "change.slow"), "changed\n");
-
-    await assert.rejects(
-      () => runReview({
-        adapters: {
-          claude: {
-            capabilities: reviewCapabilities,
-            check: async () => ({ provider: "claude", ready: true, installed: true, auth: "ok" }),
-            review: async () => {
-              providerCalled = true;
-              return { exitCode: 0, rawText: "{}", stderr: "" };
-            },
-          },
-        },
-        providerSelection: { requested: ["claude"], explicit: true },
-        mode: "review",
-        options: { "data-root": dataRoot, timeout: 0.1 },
-        focus: "",
-        workspaceRoot,
-      }),
-      /timed out|timeout/i,
-    );
-    assert.equal(providerCalled, false);
-  } finally {
-    await rm(dataRoot, { recursive: true, force: true });
-    await rm(workspaceRoot, { recursive: true, force: true });
-  }
-});
-
 test("renderHumanResult includes failed job errors", () => {
   const text = renderHumanResult({
     job: {

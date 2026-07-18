@@ -376,7 +376,13 @@ test("runReview records provider subprocess pid while provider is running", asyn
   }
 });
 
-async function waitFor(predicate, timeoutMs = 1000) {
+// Wait-for-condition poll: returns the instant the predicate holds, so the
+// timeout is only a hang-guard. Keep it generous — the whole suite runs these
+// integration cases concurrently, and runReview's snapshot + provider-check
+// setup can exceed a second under that load. A tight bound here fails a passing
+// invariant; it does not make anything more correct. (Was 1000ms; that raced
+// the setup and flaked.)
+async function waitFor(predicate, timeoutMs = 15_000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     if (await predicate()) {

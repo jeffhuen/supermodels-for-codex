@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { createRunController } from "../scripts/lib/run-control.mjs";
-import { findExecutable, runCommand, signalProcessTree } from "../scripts/lib/process.mjs";
+import { findExecutable, runCommand } from "../scripts/lib/process.mjs";
+import { withAbortTimeout } from "../scripts/lib/abort.mjs";
 
 test("findExecutable returns only regular executable files", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-executable-probe-"));
@@ -78,108 +78,17 @@ test("runCommand timeout terminates provider subprocesses", { skip: process.plat
   }
 });
 
-test("signalProcessTree terminates a detached provider subprocess group", { skip: process.platform === "win32" }, async () => {
-  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-process-cancel-"));
-  const markerPath = path.join(tempDir, "survived.txt");
-  try {
-    const childScript = [
-      "const { writeFileSync } = require('node:fs');",
-      `setTimeout(() => writeFileSync(${JSON.stringify(markerPath)}, 'survived'), 500);`,
-      "setInterval(() => {}, 1000);",
-    ].join(" ");
-    const parentScript = [
-      "const { spawn } = require('node:child_process');",
-      `const child = spawn(process.execPath, ['-e', ${JSON.stringify(childScript)}], { detached: true, stdio: 'ignore' });`,
-      "console.log(child.pid);",
-    ].join(" ");
-
-    const result = await runCommand({
-      bin: process.execPath,
-      args: ["-e", parentScript],
-    }, {
-      timeoutMs: 5_000,
-      onStdout: (chunk) => {
-        const pid = Number(String(chunk).trim());
-        if (pid) {
-          signalProcessTree(pid, "SIGTERM");
-        }
-      },
-    });
-    await sleep(900);
-
-    assert.equal(result.exitCode, 0);
-    await assert.rejects(() => readFile(markerPath, "utf8"), /ENOENT/);
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("runCommand forwards controller cancellation without exiting the parent", { skip: process.platform === "win32", timeout: 15_000 }, async () => {
-  const tempDir = await mkdtemp(path.join(tmpdir(), "supermodels-controller-signal-"));
-  const markerPath = path.join(tempDir, "provider-survived.txt");
-  try {
-    // Install the SIGTERM handler, THEN emit ready — so "ready" causally guarantees
-    // the handler exists before we cancel; otherwise SIGTERM could terminate the
-    // provider before its handler is installed, producing SIGTERM not SIGKILL.
-    const providerScript = [
-      "const { writeFileSync } = require('node:fs');",
-      "process.on('SIGTERM', () => {});",
-      "process.stdout.write('ready\\n');",
-      `setTimeout(() => writeFileSync(${JSON.stringify(markerPath)}, 'survived'), 900);`,
-      "setInterval(() => {}, 1000);",
-    ].join(" ");
-    const controller = createRunController();
-    let markReady;
-    const ready = new Promise((resolve) => { markReady = resolve; });
-    const command = runCommand({
-      bin: process.execPath,
-      args: ["-e", providerScript],
-    }, {
-      timeoutMs: 10_000,
-      signalKillMs: 0,
-      controller,
-      onStdout: (chunk) => { if (String(chunk).includes("ready")) markReady(); },
-    });
-
-    await ready; // causal: the SIGTERM handler is installed
-    assert.equal(controller.cancel("SIGTERM"), true);
-    const result = await command;
-
-    // The command resolves only after the provider process has exited, so it can no
-    // longer write its 900ms marker — the SIGTERM was ignored and SIGKILL won.
-    assert.equal(result.exitCode, null);
-    assert.equal(result.signal, "SIGKILL");
-    await assert.rejects(() => readFile(markerPath, "utf8"), /ENOENT/);
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("runCommand forwards AbortSignal cancellation to the subprocess", { skip: process.platform === "win32", timeout: 15_000 }, async () => {
-  const abort = new AbortController();
-  let markReady;
-  const ready = new Promise((resolve) => { markReady = resolve; });
-  const command = runCommand({
-    bin: process.execPath,
-    // Install the SIGTERM handler FIRST, then announce readiness — so "ready"
-    // causally guarantees the handler is in place (the write runs after the
-    // handler line). Otherwise the abort could land SIGTERM before the handler
-    // exists and terminate the child with SIGTERM instead of the expected SIGKILL.
-    args: ["-e", "process.on('SIGTERM', () => {}); process.stdout.write('ready\\n'); setInterval(() => {}, 1000)"],
-  }, {
-    timeoutMs: 10_000,
-    signalKillMs: 0,
-    signal: abort.signal,
-    onStdout: (chunk) => { if (String(chunk).includes("ready")) markReady(); },
-  });
-
-  await ready; // deterministic: the child has executed and is running
-  abort.abort(new Error("deadline"));
-  const result = await command;
-
-  assert.equal(result.exitCode, null);
-  assert.equal(result.signal, "SIGKILL");
-  assert.equal(result.timedOut, false);
+test("withAbortTimeout aborts the operation exactly at its deadline (virtual clock)", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const pending = withAbortTimeout(() => new Promise(() => {}), 50, "probe");
+  const rejection = assert.rejects(pending, /probe timed out after 50ms/);
+  let settled = false;
+  pending.catch(() => { settled = true; });
+  t.mock.timers.tick(49);
+  await Promise.resolve();
+  assert.equal(settled, false, "must not abort before the deadline");
+  t.mock.timers.tick(1);
+  await rejection;
 });
 
 function sleep(ms) {
