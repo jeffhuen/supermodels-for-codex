@@ -1382,10 +1382,12 @@ test("grok readiness bounds a hanging credential refresh", { timeout: 15_000 }, 
 
     const check = await adapter.check({ env: { PATH: tempDir }, credentialTimeoutMs: 30 });
 
-    // The 30ms credential bound is proven by ready:false + /timed out/; the
-    // { timeout } guards a genuine hang. No wall-clock stopwatch.
     assert.equal(check.ready, false);
-    assert.match(check.error, /timed out/i);
+    // Pin the CONFIGURED deadline: withAbortTimeout echoes the exact timeout it
+    // used, so "timed out after 30ms" causally proves the 30ms option was honored
+    // (an ignored option would use the 10_000ms default and read "10000ms"). The
+    // { timeout } guards a genuine hang; no wall-clock stopwatch.
+    assert.match(check.error, /timed out after 30ms/i);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

@@ -2,7 +2,7 @@
 
 *A panel of frontier models that's really, really, ridiculously good at reviewing code.*
 
-![status](https://img.shields.io/badge/status-v0.3.2-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![built for](https://img.shields.io/badge/built%20for-Codex-111827)
+![status](https://img.shields.io/badge/status-v0.3.3-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![built for](https://img.shields.io/badge/built%20for-Codex-111827)
 
 Supermodels is a [Codex](https://github.com/openai/codex) plugin that lets Codex stop reviewing its own homework. Instead of trusting one model to grade its own diff, you can have it hand the work to **Claude Code**, **Google Antigravity**, and **Grok Build**, collect their independent reviews, and — if you want a fight — make them tear into each other's findings before reporting back.
 
@@ -54,7 +54,7 @@ node plugins/supermodels/scripts/supermodels.mjs status
 Add this repo as a Codex plugin marketplace, pinned to the latest release:
 
 ```bash
-codex plugin marketplace add jeffhuen/supermodels-for-codex --ref v0.3.2
+codex plugin marketplace add jeffhuen/supermodels-for-codex --ref v0.3.3
 codex plugin add supermodels@supermodels
 ```
 
@@ -64,7 +64,7 @@ Prefer to live on the edge? Point `--ref` at `main` instead. Either way, **start
 
 ```bash
 codex plugin marketplace remove supermodels
-codex plugin marketplace add jeffhuen/supermodels-for-codex --ref v0.3.2
+codex plugin marketplace add jeffhuen/supermodels-for-codex --ref v0.3.3
 codex plugin add supermodels@supermodels
 ```
 
@@ -148,7 +148,7 @@ The provider CLIs still do their own thing with their own auth files, sessions, 
 
 ## What's rough (the honest part)
 
-This is `v0.3.2` of a hobby project. It's well-tested and it works on my machine, but you should know the edges:
+This is `v0.3.3` of a hobby project. It's well-tested and it works on my machine, but you should know the edges:
 
 - **Three providers ship today, still on purpose.** Claude Code, Antigravity, and Grok Build. The internal registry and adapter-owned policies make another built-in provider a bounded adapter addition, but this is deliberately not a dynamic provider SDK, and API-key-only services remain outside the current subscription-login product contract. The Grok review transport uses the chat-proxy surface xAI documents for auth.json tokens; if xAI tightens its client-version gate you'll get an explicit "run `grok update`" error, never silent junk.
 - **macOS is the path I live on.** The OAuth/keychain bits are exercised on macOS. Other platforms may have sharp corners I haven't hit yet.

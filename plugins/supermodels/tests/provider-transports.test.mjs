@@ -1519,8 +1519,10 @@ test("readGrokClientVersion refuses a non-regular version source without hanging
   try {
     const created = spawnSync("mkfifo", [fifo]);
     assert.equal(created.status, 0, created.stderr?.toString() || "mkfifo failed");
-    // The { timeout } guards against a genuine hang; the functional assertion (the
-    // read returns "") is what proves the deadline fired — no wall-clock stopwatch.
+    // A FIFO is a non-regular file, so the reader rejects it (exit 2) and returns
+    // "" WITHOUT exercising the timeout path — this verifies graceful refusal of a
+    // blocking/non-regular source, not the deadline (general timeout behavior is
+    // covered by the withAbortTimeout tests). The { timeout } guards a genuine hang.
     assert.equal(await readGrokClientVersion({ versionPath: fifo, timeoutMs: 40 }), "");
   } finally {
     await rm(dir, { recursive: true, force: true });

@@ -17,21 +17,6 @@ import {
   jobPath,
 } from "../scripts/lib/state.mjs";
 
-// Poll until a condition holds (deterministic-ish: waits for a state change, not
-// a fixed real-time guess) with a hard cap so a hang fails fast.
-async function waitFor(condition, { timeoutMs = 5_000, intervalMs = 5 } = {}) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (await condition()) {
-      return;
-    }
-    await sleep(intervalMs);
-  }
-  throw new Error("waitFor timed out");
-}
-
-const exists = (p) => stat(p).then(() => true, () => false);
-
 test("isLockStale decides staleness purely from timestamps (deterministic)", () => {
   assert.equal(isLockStale(1_000, 900, 50), true, "aged past staleLockMs -> stale");
   assert.equal(isLockStale(1_000, 960, 50), false, "within staleLockMs -> fresh");
@@ -433,11 +418,17 @@ test("state lock owner tokens prevent stale holders from deleting fresh locks", 
     });
 
     const lockPath = `${jobPath(state, job.id)}.lock`;
-    // The stale holder acquires the lock and holds it across the steal via a
-    // barrier (not a real sleep), so the interleaving is deterministic.
+    // Signal from INSIDE the updater. withJobLock writes the owner token before it
+    // invokes the operation, so the updater cannot run until the token is written —
+    // a causal guarantee the lock is fully held (unlike polling for file existence,
+    // which races the token write and can have its mtime overwritten). Then hold the
+    // lock via a barrier so the interleaving is deterministic.
+    let markEntered;
+    const entered = new Promise((resolve) => { markEntered = resolve; });
     let releaseStaleHolder;
     const held = new Promise((resolve) => { releaseStaleHolder = resolve; });
     const staleHolder = updateJob(state, job.id, async (current) => {
+      markEntered();
       await held;
       return {
         ...current,
@@ -446,10 +437,9 @@ test("state lock owner tokens prevent stale holders from deleting fresh locks", 
     });
     staleHolder.catch(() => {});
 
-    // Wait until the stale holder actually owns the lock, then force its lock
-    // STALE by backdating the file's mtime an hour — deterministic, independent
-    // of real elapsed time (no sleep-until-hopefully-stale race).
-    await waitFor(() => exists(lockPath));
+    // The updater is now provably running (token written), so backdating the lock's
+    // mtime an hour makes it deterministically stale — no race with the token write.
+    await entered;
     const anHourAgo = Date.now() / 1000 - 3_600;
     await utimes(lockPath, anHourAgo, anHourAgo);
 
